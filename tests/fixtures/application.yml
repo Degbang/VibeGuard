@@ -1,0 +1,8 @@
+# Same content as application.properties, in YAML form, to prove both
+# formats flatten to the same dotted-key shape.
+quarkus:
+  datasource:
+    username: admin
+    password: hunter2
+  http:
+    port: 8080

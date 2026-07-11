@@ -47,3 +47,46 @@ a secondary robustness concern, not the thesis's core contribution.
 should describe this explicitly as a documented limitation (soft
 wall-clock budget, not hard process isolation) rather than claim full
 adversarial-input isolation.
+
+---
+
+## [2026-07-11] - Layer 1 scope extended to non-Java config files for CWE-798
+**What the plan said:** CLAUDE.md Section 1/2 frame Layer 1 as "AST
+detection" via `javalang`, implicitly scoped to `.java` source only.
+**What we actually did / found:** In real Quarkus/Spring projects,
+hardcoded credentials targeted by CWE-798 (e.g.
+`quarkus.datasource.password=...`) are at least as likely to live in
+`application.properties`/`application.yml` as in `.java` source -
+arguably more likely, since externalizing config to these files is the
+idiomatic pattern these frameworks encourage. Since the evaluation
+dataset is planned to include real public repos (not only
+self-generated sample apps), restricting CWE-798 detection to `.java`
+AST findings would systematically under-detect the most common
+real-world instance of this exact CWE. Added
+`vibeguard/layer1_static/config_parser.py` as a sibling to
+`ast_parser.py`: a non-AST (`javalang` cannot parse non-Java syntax)
+key-value parser for `.properties` and `.yml`/`.yaml`, producing a
+`ParsedConfigFile` with flattened, dotted keys (e.g.
+`quarkus.datasource.password`) and line numbers, in the same
+fail-closed style as `ast_parser.py` (explicit `ConfigParseStatus`,
+size limit, soft timeout - YAML anchor/alias expansion is a known DoS
+vector, so the timeout guard applies there specifically). Added
+`pyyaml` to `requirements.txt` (not in CLAUDE.md Section 6's original
+dependency list) to parse YAML safely (`SafeLoader`) rather than
+hand-rolling a YAML parser. Refactored the shared size-limit/safe-read
+and soft-timeout logic out of `ast_parser.py` into
+`vibeguard/layer1_static/_parsing_guards.py` so both parsers get
+identical, single-sourced safety guarantees instead of duplicated
+(and potentially drifting) copies.
+**Why:** A CWE-798 rule module built only on top of `ast_parser.py`
+would be defensible for synthetic, self-generated sample apps but not
+for a real-world evaluation against public repositories, where this
+is the dominant hardcoded-secret pattern for the Java/Quarkus
+ecosystem this thesis targets.
+**Effect on thesis chapters:** Chapter 3 (methodology) should describe
+Layer 1 as covering two input types - Java AST and flattened config
+key-value pairs - not `javalang`/AST alone. Chapter 4 should list
+`pyyaml` as an added dependency with its justification. Chapter 5's
+CWE-798 evaluation should report findings split by source type
+(Java source vs. config file) to make this coverage decision visible
+in the results, not just in this log.

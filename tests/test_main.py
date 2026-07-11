@@ -21,10 +21,20 @@ def test_main_returns_nonzero_when_any_file_fails_to_parse() -> None:
     assert exit_code == 1
 
 
-def test_main_returns_nonzero_when_no_java_files_found(
+def test_main_returns_nonzero_when_nothing_found(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     exit_code = main.main([str(tmp_path)])
 
     assert exit_code == 1
-    assert "No .java files found" in capsys.readouterr().err
+    assert "No .java or config files found" in capsys.readouterr().err
+
+
+def test_main_handles_config_only_directory() -> None:
+    exit_code = main.main([str(FIXTURES_DIR / "application.properties")])
+    assert exit_code == 0
+
+
+def test_main_returns_nonzero_when_config_file_fails_to_parse() -> None:
+    exit_code = main.main([str(FIXTURES_DIR / "malformed.yml")])
+    assert exit_code == 1
