@@ -9,8 +9,6 @@ never run it.
 from __future__ import annotations
 
 import logging
-import threading
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -23,6 +21,12 @@ from javalang.tree import (
     FieldDeclaration,
     InterfaceDeclaration,
     MethodDeclaration,
+)
+
+from vibeguard.layer1_static._parsing_guards import (
+    ParsingGuardError,
+    read_text_within_limit,
+    run_with_timeout,
 )
 
 logger = logging.getLogger(__name__)
@@ -131,7 +135,8 @@ def parse_file(
         max_bytes: Reject files larger than this to bound memory and
             parse time on adversarial input.
         timeout_seconds: Soft wall-clock budget for the parse call. See
-            ``_run_with_timeout`` for the limitations of this guard.
+            ``_parsing_guards.run_with_timeout`` for the limitations of
+            this guard.
 
     Returns:
         A ParsedFile whose ``status`` reflects exactly what happened.
@@ -141,49 +146,27 @@ def parse_file(
     """
     resolved = path.resolve()
 
-    size_failure = _check_size(resolved, max_bytes)
-    if size_failure is not None:
-        return size_failure
-
-    source = _read_source(resolved)
-    if isinstance(source, ParsedFile):
-        return source
+    try:
+        source = read_text_within_limit(resolved, max_bytes)
+    except ParsingGuardError as exc:
+        return _guard_failure(resolved, exc)
     if not source.strip():
         return ParsedFile(path=resolved, status=ParseStatus.EMPTY_FILE)
 
     return _parse_source(resolved, source, timeout_seconds)
 
 
-def _check_size(path: Path, max_bytes: int) -> ParsedFile | None:
-    """Return a failure ParsedFile if ``path`` can't be stat'd or is too large."""
-    try:
-        size = path.stat().st_size
-    except OSError as exc:
-        logger.warning("Cannot stat %s: %s", path, exc)
-        return ParsedFile(path=path, status=ParseStatus.PARSE_FAILED, error_message=str(exc))
-    if size > max_bytes:
-        logger.warning("Rejecting %s: %d bytes exceeds max_bytes=%d", path, size, max_bytes)
-        return ParsedFile(
-            path=path,
-            status=ParseStatus.FILE_TOO_LARGE,
-            error_message=f"{size} bytes exceeds max_bytes={max_bytes}",
-        )
-    return None
-
-
-def _read_source(path: Path) -> str | ParsedFile:
-    """Read ``path`` as UTF-8 text, returning a failure ParsedFile on error."""
-    try:
-        return path.read_text(encoding="utf-8", errors="strict")
-    except (OSError, UnicodeDecodeError) as exc:
-        logger.warning("Cannot read %s: %s", path, exc)
-        return ParsedFile(path=path, status=ParseStatus.PARSE_FAILED, error_message=str(exc))
+def _guard_failure(path: Path, exc: ParsingGuardError) -> ParsedFile:
+    """Translate a ParsingGuardError into the right ParseStatus."""
+    status = ParseStatus.FILE_TOO_LARGE if exc.too_large else ParseStatus.PARSE_FAILED
+    logger.warning("Rejecting %s: %s", path, exc)
+    return ParsedFile(path=path, status=status, error_message=str(exc))
 
 
 def _parse_source(path: Path, source: str, timeout_seconds: float) -> ParsedFile:
     """Run javalang over ``source`` and convert the outcome into a ParsedFile."""
     try:
-        tree = _run_with_timeout(javalang.parse.parse, source, timeout_seconds=timeout_seconds)
+        tree = run_with_timeout(javalang.parse.parse, source, timeout_seconds=timeout_seconds)
     except TimeoutError:
         logger.warning("Parse timed out after %.1fs: %s", timeout_seconds, path)
         return ParsedFile(
@@ -210,39 +193,6 @@ def _syntax_error_message(exc: javalang.parser.JavaSyntaxError) -> str:
     """
     description = getattr(exc, "description", None)
     return description or str(exc) or exc.__class__.__name__
-
-
-def _run_with_timeout(
-    parse_func: Callable[[str], CompilationUnit], source: str, *, timeout_seconds: float
-) -> CompilationUnit:
-    """Run ``parse_func(source)`` on a daemon thread with a wall-clock budget.
-
-    This is a soft mitigation, not true isolation: on timeout the
-    background thread is abandoned (marked ``daemon=True`` so it can't
-    block interpreter exit) rather than killed, since CPython has no
-    supported way to forcibly stop a running thread. It bounds how long
-    a caller waits on a single pathological file without hanging the
-    overall scan; it does not bound the CPU the orphaned thread burns.
-    True process-level isolation (subprocess per file) was considered
-    unnecessary overhead for this project's scope — see
-    IMPLEMENTATION_LOG.md.
-    """
-    thread_result: dict[str, object] = {}
-
-    def _invoke_parse_func_in_background() -> None:
-        try:
-            thread_result["return_value"] = parse_func(source)
-        except Exception as exc:  # re-raised on the caller's thread below
-            thread_result["exception"] = exc
-
-    parse_thread = threading.Thread(target=_invoke_parse_func_in_background, daemon=True)
-    parse_thread.start()
-    parse_thread.join(timeout=timeout_seconds)
-    if parse_thread.is_alive():
-        raise TimeoutError(f"parse exceeded {timeout_seconds}s budget")
-    if "exception" in thread_result:
-        raise thread_result["exception"]  # type: ignore[misc]
-    return thread_result["return_value"]
 
 
 def _build_parsed_file(path: Path, tree: CompilationUnit) -> ParsedFile:
