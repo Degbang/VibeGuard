@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_FILE_BYTES = 2_000_000
 DEFAULT_PARSE_TIMEOUT_SECONDS = 5.0
 
-_TypeDeclaration: TypeAlias = ClassDeclaration | InterfaceDeclaration
+_ClassOrInterfaceDeclaration: TypeAlias = ClassDeclaration | InterfaceDeclaration
 
 
 class ParseStatus(str, Enum):
@@ -202,9 +202,9 @@ def _parse_source(path: Path, source: str, timeout_seconds: float) -> ParsedFile
 
 
 def _run_with_timeout(
-    func: Callable[[str], CompilationUnit], source: str, *, timeout_seconds: float
+    parse_func: Callable[[str], CompilationUnit], source: str, *, timeout_seconds: float
 ) -> CompilationUnit:
-    """Run ``func(source)`` on a daemon thread with a wall-clock budget.
+    """Run ``parse_func(source)`` on a daemon thread with a wall-clock budget.
 
     This is a soft mitigation, not true isolation: on timeout the
     background thread is abandoned (marked ``daemon=True`` so it can't
@@ -216,22 +216,22 @@ def _run_with_timeout(
     unnecessary overhead for this project's scope — see
     IMPLEMENTATION_LOG.md.
     """
-    outcome: dict[str, object] = {}
+    thread_result: dict[str, object] = {}
 
-    def _target() -> None:
+    def _invoke_parse_func_in_background() -> None:
         try:
-            outcome["value"] = func(source)
+            thread_result["return_value"] = parse_func(source)
         except Exception as exc:  # re-raised on the caller's thread below
-            outcome["error"] = exc
+            thread_result["exception"] = exc
 
-    thread = threading.Thread(target=_target, daemon=True)
-    thread.start()
-    thread.join(timeout=timeout_seconds)
-    if thread.is_alive():
+    parse_thread = threading.Thread(target=_invoke_parse_func_in_background, daemon=True)
+    parse_thread.start()
+    parse_thread.join(timeout=timeout_seconds)
+    if parse_thread.is_alive():
         raise TimeoutError(f"parse exceeded {timeout_seconds}s budget")
-    if "error" in outcome:
-        raise outcome["error"]  # type: ignore[misc]
-    return outcome["value"]
+    if "exception" in thread_result:
+        raise thread_result["exception"]  # type: ignore[misc]
+    return thread_result["return_value"]
 
 
 def _build_parsed_file(path: Path, tree: CompilationUnit) -> ParsedFile:
@@ -258,7 +258,7 @@ def _build_parsed_file(path: Path, tree: CompilationUnit) -> ParsedFile:
     )
 
 
-def _build_class(node: _TypeDeclaration) -> ParsedClass:
+def _build_class(node: _ClassOrInterfaceDeclaration) -> ParsedClass:
     """Convert a javalang class/interface declaration into a ParsedClass."""
     fields = tuple(
         parsed_field
@@ -266,12 +266,14 @@ def _build_class(node: _TypeDeclaration) -> ParsedClass:
         if isinstance(decl, FieldDeclaration)
         for parsed_field in _build_fields(decl)
     )
-    methods = tuple(_build_method(m) for m in node.body if isinstance(m, MethodDeclaration))
+    methods = tuple(
+        _build_method(member) for member in node.body if isinstance(member, MethodDeclaration)
+    )
     return ParsedClass(
         name=node.name,
-        line=_line_of(node),
+        line=_line_number_of(node),
         modifiers=frozenset(node.modifiers),
-        annotations=tuple(a.name for a in node.annotations),
+        annotations=tuple(annotation.name for annotation in node.annotations),
         superclass=_superclass_name(node),
         interfaces=_interface_names(node),
         fields=fields,
@@ -283,28 +285,29 @@ def _build_fields(decl: FieldDeclaration) -> tuple[ParsedField, ...]:
     """Expand one FieldDeclaration into one ParsedField per declared variable."""
     type_name = _type_name(decl.type)
     modifiers = frozenset(decl.modifiers)
-    line = _line_of(decl)
+    line = _line_number_of(decl)
     return tuple(
-        ParsedField(name=d.name, type_name=type_name, modifiers=modifiers, line=line)
-        for d in decl.declarators
+        ParsedField(name=declarator.name, type_name=type_name, modifiers=modifiers, line=line)
+        for declarator in decl.declarators
     )
 
 
 def _build_method(node: MethodDeclaration) -> ParsedMethod:
     """Convert a javalang MethodDeclaration into a ParsedMethod."""
     parameters = tuple(
-        ParsedParameter(name=p.name, type_name=_type_name(p.type)) for p in node.parameters
+        ParsedParameter(name=parameter.name, type_name=_type_name(parameter.type))
+        for parameter in node.parameters
     )
     return ParsedMethod(
         name=node.name,
-        line=_line_of(node),
+        line=_line_number_of(node),
         modifiers=frozenset(node.modifiers),
         parameters=parameters,
         return_type=_type_name(node.return_type),
     )
 
 
-def _line_of(node: object) -> int | None:
+def _line_number_of(node: object) -> int | None:
     """Extract the source line number from a javalang node, if available."""
     position = getattr(node, "position", None)
     return position.line if position is not None else None
@@ -326,7 +329,7 @@ def _type_name(type_node: object | None) -> str:
     return f"{name}{'[]' * len(dimensions)}"
 
 
-def _superclass_name(node: _TypeDeclaration) -> str | None:
+def _superclass_name(node: _ClassOrInterfaceDeclaration) -> str | None:
     """Extract the superclass name for a class declaration.
 
     Interfaces have no superclass in this model: javalang represents
@@ -340,14 +343,14 @@ def _superclass_name(node: _TypeDeclaration) -> str | None:
     return _type_name(extends) if extends is not None else None
 
 
-def _interface_names(node: _TypeDeclaration) -> tuple[str, ...]:
+def _interface_names(node: _ClassOrInterfaceDeclaration) -> tuple[str, ...]:
     """Extract implemented/extended interface names.
 
     Handles both ``implements`` (classes) and interface ``extends``
     (which javalang models as a list for InterfaceDeclaration).
     """
     if isinstance(node, InterfaceDeclaration):
-        extends = getattr(node, "extends", None) or []
-        return tuple(_type_name(i) for i in extends)
-    implements = getattr(node, "implements", None) or []
-    return tuple(_type_name(i) for i in implements)
+        extended_interfaces = getattr(node, "extends", None) or []
+        return tuple(_type_name(interface_type) for interface_type in extended_interfaces)
+    implemented_interfaces = getattr(node, "implements", None) or []
+    return tuple(_type_name(interface_type) for interface_type in implemented_interfaces)
