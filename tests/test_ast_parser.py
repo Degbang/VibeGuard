@@ -63,7 +63,7 @@ def test_parse_malformed_file_reports_failure_not_exception() -> None:
     result = parse_file(FIXTURES_DIR / "MalformedService.java")
 
     assert result.status == ParseStatus.PARSE_FAILED
-    assert result.error_message is not None
+    assert result.error_message  # must be non-empty, not just non-None
     assert result.tree is None
     assert result.classes == ()
 

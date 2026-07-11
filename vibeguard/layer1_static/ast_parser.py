@@ -192,13 +192,24 @@ def _parse_source(path: Path, source: str, timeout_seconds: float) -> ParsedFile
             error_message=f"parse exceeded {timeout_seconds}s budget",
         )
     except javalang.parser.JavaSyntaxError as exc:
-        logger.warning("Syntax error parsing %s: %s", path, exc)
-        return ParsedFile(path=path, status=ParseStatus.PARSE_FAILED, error_message=str(exc))
+        message = _syntax_error_message(exc)
+        logger.warning("Syntax error parsing %s: %s", path, message)
+        return ParsedFile(path=path, status=ParseStatus.PARSE_FAILED, error_message=message)
     except Exception as exc:  # pragma: no cover - defensive: javalang internals are not fully typed
         logger.warning("Unexpected error parsing %s: %s", path, exc)
         return ParsedFile(path=path, status=ParseStatus.PARSE_FAILED, error_message=str(exc))
 
     return _build_parsed_file(path, tree)
+
+
+def _syntax_error_message(exc: javalang.parser.JavaSyntaxError) -> str:
+    """Extract a human-readable message from a JavaSyntaxError.
+
+    ``str(exc)`` on this exception is empty in javalang 0.13 - the
+    actual message (e.g. "Expected type") lives on ``exc.description``.
+    """
+    description = getattr(exc, "description", None)
+    return description or str(exc) or exc.__class__.__name__
 
 
 def _run_with_timeout(
