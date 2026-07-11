@@ -32,6 +32,7 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+pythonpath = ["."]
 
 [tool.setuptools.packages.find]
 include = ["vibeguard*"]
