@@ -14,6 +14,11 @@ build/
 .env
 .DS_Store
 
+# Local scratch Java apps used to manually exercise the CLI - not
+# project fixtures, never committed.
+my-test-app/
+*-test-app/
+
 data/sample_apps/*
 !data/sample_apps/.gitkeep
 data/labeled/*
