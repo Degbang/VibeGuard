@@ -163,6 +163,22 @@ def _parse_yaml_file(path: Path, text: str, timeout_seconds: float) -> ParsedCon
             format=ConfigFileFormat.YAML,
             error_message=str(exc),
         )
+    except Exception as exc:  # pragma: no cover - defensive: e.g. RecursionError on
+        # a self-referential alias (`a: &a [*a]`). _flatten_yaml_node recurses once
+        # per alias reference, and PyYAML happily composes a node graph containing
+        # a cycle since aliases just share object references - only our own
+        # traversal detects the problem, by blowing the Python recursion limit.
+        # Caught broadly (not just RecursionError) for the same reason
+        # ast_parser._parse_source has a catch-all: a third-party parser's
+        # failure modes aren't fully enumerable, and a single bad config file
+        # must never abort a batch scan.
+        logger.warning("Unexpected error parsing %s: %s", path, exc)
+        return ParsedConfigFile(
+            path=path,
+            status=ParseStatus.PARSE_FAILED,
+            format=ConfigFileFormat.YAML,
+            error_message=str(exc),
+        )
     return ParsedConfigFile(
         path=path, status=ParseStatus.OK, format=ConfigFileFormat.YAML, entries=entries
     )
@@ -240,16 +256,35 @@ def _parse_properties(text: str) -> tuple[ConfigEntry, ...]:
 
 
 def _join_continuation_lines(lines: list[str], start_index: int) -> tuple[str, int]:
-    """Join a logical .properties line that continues via trailing backslashes."""
+    """Join a logical .properties line that continues via trailing backslashes.
+
+    Per the ``java.util.Properties`` spec, a line continues if it ends
+    in an *odd* number of backslashes: one is the continuation marker
+    (stripped), the rest are literal escaped-backslash pairs (kept, not
+    further unescaped - see the module-level note on simplifications).
+    An *even* count, including zero, means the line is complete - a
+    naive ``endswith("\\") and not endswith("\\\\")`` check only gets
+    this right for 0/1/2 trailing backslashes and misjudges 3+.
+    """
     collected = lines[start_index]
     index = start_index
-    while collected.endswith("\\") and not collected.endswith("\\\\"):
+    while _trailing_backslash_count(collected) % 2 == 1:
+        collected = collected[:-1]
         index += 1
         if index >= len(lines):
-            collected = collected[:-1]
             break
-        collected = collected[:-1] + lines[index].lstrip()
+        collected += lines[index].lstrip()
     return collected, index - start_index + 1
+
+
+def _trailing_backslash_count(text: str) -> int:
+    """Count consecutive backslashes at the end of ``text``."""
+    count = 0
+    for char in reversed(text):
+        if char != "\\":
+            break
+        count += 1
+    return count
 
 
 def _split_key_value(logical_line: str) -> tuple[str, str] | None:

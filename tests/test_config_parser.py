@@ -101,6 +101,55 @@ def test_properties_supports_comments_and_line_continuation(tmp_path: Path) -> N
     assert entries_by_key["db.url"] == "jdbc:postgresql://localhost/db?sslmode=require"
 
 
+def test_properties_continuation_handles_odd_backslash_runs(tmp_path: Path) -> None:
+    """An odd trailing-backslash count (3, 5, ...) must still continue.
+
+    A naive ``endswith("\\") and not endswith("\\\\")`` check only
+    distinguishes 0/1/2 trailing backslashes correctly; 3 trailing
+    backslashes end in "\\\\" too, so that check wrongly treats it as
+    a complete line. Per the java.util.Properties spec, an odd count
+    always continues (one marker backslash, the rest literal).
+    """
+    props_file = tmp_path / "odd_backslashes.properties"
+    props_file.write_text("key=value\\\\\\\nmore\n")
+
+    result = parse_config_file(props_file)
+
+    assert result.status == ParseStatus.OK
+    entries_by_key = {entry.key: entry.value for entry in result.entries}
+    assert entries_by_key["key"] == "value\\\\more"
+
+
+def test_properties_continuation_even_backslashes_do_not_continue(tmp_path: Path) -> None:
+    props_file = tmp_path / "even_backslashes.properties"
+    props_file.write_text("key=value\\\\\nnext=separate\n")
+
+    result = parse_config_file(props_file)
+
+    assert result.status == ParseStatus.OK
+    entries_by_key = {entry.key: entry.value for entry in result.entries}
+    assert entries_by_key["key"] == "value\\\\"
+    assert entries_by_key["next"] == "separate"
+
+
+def test_parse_self_referential_yaml_alias_reports_failure_not_crash(tmp_path: Path) -> None:
+    """A self-referential alias must not crash the scan.
+
+    It blows the Python recursion limit in our recursive flattener
+    (PyYAML itself composes the cyclic node graph fine, since aliases
+    just share object references - only our traversal recurses into
+    the cycle). Must come back as PARSE_FAILED, not an escaped
+    RecursionError that would abort a batch scan.
+    """
+    bomb_file = tmp_path / "self_referential.yml"
+    bomb_file.write_text("a: &a [*a]\n")
+
+    result = parse_config_file(bomb_file)
+
+    assert result.status == ParseStatus.PARSE_FAILED
+    assert result.error_message
+
+
 def test_yaml_alias_expansion_bomb_times_out_instead_of_hanging(tmp_path: Path) -> None:
     """A known YAML DoS pattern (anchor/alias 'billion laughs' expansion).
 
