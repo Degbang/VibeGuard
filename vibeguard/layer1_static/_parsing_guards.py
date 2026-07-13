@@ -1,21 +1,42 @@
-"""Shared input-safety guards for Layer 1 parsers.
+"""Shared infrastructure for Layer 1 parsers.
 
 Both ``ast_parser.py`` (Java source) and ``config_parser.py``
 (``.properties``/``.yml``) need the same two guarantees against
-adversarial or oversized input: a hard file-size limit enforced before
+adversarial or oversized input — a hard file-size limit enforced before
 any parsing happens, and a soft wall-clock budget around the actual
-parse call. This module centralizes both so the guarantee is
-single-sourced rather than duplicated per file format.
+parse call — and the same vocabulary for describing what happened
+(``ParseStatus``). This module centralizes all three so callers
+(``main.py``, ``scanner.py``) can treat both parsers' results
+uniformly, and so the guarantees can't drift apart per file format.
 """
 
 from __future__ import annotations
 
 import threading
 from collections.abc import Callable
+from enum import Enum
 from pathlib import Path
 from typing import TypeVar
 
 _ParseResult = TypeVar("_ParseResult")
+
+
+class ParseStatus(str, Enum):
+    """Outcome of attempting to parse a single Layer 1 input file.
+
+    Every outcome is represented explicitly so a file that can't be
+    parsed is always flagged in results, never silently dropped.
+    Shared between ``ast_parser.py`` and ``config_parser.py``;
+    ``UNSUPPORTED_FORMAT`` only ever applies to the latter (a
+    ``.java`` file is never "unsupported" to ``ast_parser.py``).
+    """
+
+    OK = "ok"
+    EMPTY_FILE = "empty_file"
+    FILE_TOO_LARGE = "file_too_large"
+    PARSE_TIMEOUT = "parse_timeout"
+    PARSE_FAILED = "parse_failed"
+    UNSUPPORTED_FORMAT = "unsupported_format"
 
 
 class ParsingGuardError(Exception):

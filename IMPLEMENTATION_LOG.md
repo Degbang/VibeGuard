@@ -90,3 +90,110 @@ key-value pairs - not `javalang`/AST alone. Chapter 4 should list
 CWE-798 evaluation should report findings split by source type
 (Java source vs. config file) to make this coverage decision visible
 in the results, not just in this log.
+
+---
+
+## [2026-07-13] - Dependency vulnerability remediation
+**What the plan said:** CLAUDE.md Section 5 asks for "periodically
+check for known-vulnerable dependencies," calling out that a security
+thesis's own tooling passing a dependency audit is a rigor point worth
+noting in Chapter 5.
+**What we actually did / found:** Ran `safety check` against
+`requirements.txt` for the first time since the baseline dependency
+list was pinned. Found 12 known vulnerabilities across 6 packages:
+`pytest` (8.0.0, DoS via insecure temp directory handling,
+CVE-2025-71176), `black` (24.1.1, two issues, one a ReDoS), `requests`
+(2.31.0, three issues including a URL-parsing flaw), `jinja2` (3.1.3,
+four issues including a sandbox escape via the `|attr` filter,
+CVE-2025-27516), `python-dotenv` (1.0.1, arbitrary file overwrite via
+unsafe symlink handling, CVE-2026-28684), and `scikit-learn` (1.4.0, a
+`TfidfVectorizer` data-leakage issue, CVE-2024-5206). Bumped all six to
+the minimum version each advisory lists as fixed (not latest, to
+minimize unrelated breaking-change risk): `pytest==9.0.3`,
+`black==26.3.1`, `requests==2.33.0`, `jinja2==3.1.6`,
+`python-dotenv==1.2.2`, `scikit-learn==1.5.0`. `safety` itself
+(3.0.1) also turned out to be broken against its own current
+transitive `typer` dependency (`AttributeError: module 'typer' has no
+attribute 'rich_utils'`) independent of any CVE - bumped to `3.8.1` to
+get a working scanner, not because 3.0.1 itself was flagged.
+Rebuilt the venv from a clean state against the updated
+`requirements.txt` and re-ran the full test suite (25 tests passing at
+the time) plus `black`/`ruff`/`mypy` to confirm the bumps introduced
+no breakage. Re-ran `safety check`: 0 vulnerabilities across all 17
+pinned dependencies.
+**Why:** None of these vulnerabilities were exploitable in VibeGuard's
+current Layer 1 code specifically (no Jinja2 templates or `.env`
+loading exist yet, for instance), but leaving known-CVE versions
+pinned in a security thesis's own `requirements.txt` is exactly the
+kind of thing a reviewer would flag, and the fix is cheap.
+**Effect on thesis chapters:** Chapter 5 gets the intended rigor point
+- "the tool's own dependency chain was audited and found (after
+remediation) to carry zero known vulnerabilities" - with a concrete
+before/after count.
+
+---
+
+## [2026-07-13] - Added `scanner.py`; reordered ahead of CWE rule modules; fixed a real path-traversal gap
+**What the plan said:** CLAUDE.md Section 7's build order lists all
+five CWE rule modules before `scanner.py`. Section 5 separately
+requires "resolve all file paths with `Path.resolve()` and verify they
+remain inside the expected sample-apps root before reading," and
+requires the "never execute/eval a target file" statement to appear
+explicitly as a comment in `scanner.py` specifically.
+**What we actually did / found:** Neither requirement was actually
+satisfied yet: `scanner.py` didn't exist, and the path-containment
+check had only ever been described in docstrings as "the caller's
+responsibility" - no caller actually implemented it, including
+`main.py`. Verified this was a real, exploitable gap (not a
+theoretical one) by constructing an actual symlink inside a scan
+directory pointing to a file outside it (`root/SneakyFile.java ->
+../outside/Secret.java`) and confirming the pre-existing `rglob`-based
+collection in `main.py` would happily discover and parse it,
+misattributing an external file's contents to the scanned project.
+Separately confirmed Python 3.10's `pathlib.rglob` does *not* recurse
+into symlinked *directories* by default (tested empirically), so the
+real residual risk was specifically file-level symlinks, not directory
+ones.
+Built `vibeguard/layer1_static/scanner.py`: walks a directory via
+`os.walk(followlinks=False)` (rules out symlinked-directory recursion
+and symlink-cycle infinite loops at the traversal level), then
+independently re-resolves and verifies containment for every candidate
+file before handing it to a parser (`Path.is_relative_to`) - defense
+in depth against the file-level symlink case, which traversal-level
+`followlinks=False` alone does not catch. Files that fail containment
+are returned as `RejectedPath(path, reason)` entries, never silently
+dropped, matching the project's fail-closed philosophy. The
+"never execute/eval" statement CLAUDE.md Section 5 requires now
+appears explicitly in `scanner.py`'s module docstring. `main.py` was
+rewired to delegate all directory scanning to `scan_directory()`,
+removing its previously duplicated `_collect_java_files`/
+`_collect_config_files` glob logic, and now prints a third report
+table for rejected paths. Two new regression tests construct real
+symlink-escape scenarios (one file-level, one directory-level) and
+assert the escape is caught - same "prove it, don't just claim it"
+standard as the YAML alias-bomb test.
+While doing this, also consolidated `ast_parser.ParseStatus` and
+`config_parser.ConfigParseStatus` (two independently-defined but
+near-identical enums) into a single shared `ParseStatus` in
+`_parsing_guards.py`, since `scanner.py` needed to compare both
+parsers' results uniformly and maintaining two drifting copies of the
+same vocabulary was the same class of duplication already fixed once
+for the guard functions. `config_parser.py` also gained a `_guard_failure`
+helper (mirroring `ast_parser.py`'s) and warning-level logging on its
+failure paths, which it previously lacked entirely - an inconsistency
+found during this audit, not a new requirement.
+**Why:** `scanner.py`'s core responsibility (safe directory
+orchestration) doesn't depend on any CWE rule existing yet, and the
+path-traversal gap it closes is a concrete, already-proven security
+issue - reordering ahead of the rule modules fixes a real problem
+sooner rather than leaving it open for the remaining build-order
+items. The enum/logging consolidation was found while building this
+and was cheap enough to fix in the same pass rather than deferring it
+into inconsistent, harder-to-untangle territory.
+**Effect on thesis chapters:** Chapter 4 should note the build order
+deviation (scanner before CWE rules) and its justification. Chapter 5
+should describe the symlink-escape finding as a concrete robustness
+result (constructed attack, demonstrated failure of the naive
+approach, demonstrated fix) rather than a hypothetical threat model -
+this is a stronger, more specific claim than "we resolve paths for
+safety."

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from vibeguard.layer1_static.config_parser import (
     ConfigFileFormat,
-    ConfigParseStatus,
+    ParseStatus,
     parse_config_file,
 )
 
@@ -17,7 +17,7 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 def test_parse_properties_extracts_flattened_entries() -> None:
     result = parse_config_file(FIXTURES_DIR / "application.properties")
 
-    assert result.status == ConfigParseStatus.OK
+    assert result.status == ParseStatus.OK
     assert result.format == ConfigFileFormat.PROPERTIES
     entries_by_key = {entry.key: entry for entry in result.entries}
     assert entries_by_key["quarkus.datasource.password"].value == "hunter2"
@@ -32,7 +32,7 @@ def test_parse_yaml_extracts_same_flattened_shape_as_properties() -> None:
     yaml_keys = {entry.key: entry.value for entry in yaml_result.entries}
     properties_keys = {entry.key: entry.value for entry in properties_result.entries}
 
-    assert yaml_result.status == ConfigParseStatus.OK
+    assert yaml_result.status == ParseStatus.OK
     assert yaml_result.format == ConfigFileFormat.YAML
     assert yaml_keys == properties_keys
 
@@ -47,7 +47,7 @@ def test_parse_yaml_line_numbers_point_at_the_value() -> None:
 def test_parse_malformed_yaml_reports_failure_not_exception() -> None:
     result = parse_config_file(FIXTURES_DIR / "malformed.yml")
 
-    assert result.status == ConfigParseStatus.PARSE_FAILED
+    assert result.status == ParseStatus.PARSE_FAILED
     assert result.error_message
     assert result.entries == ()
 
@@ -55,7 +55,7 @@ def test_parse_malformed_yaml_reports_failure_not_exception() -> None:
 def test_parse_empty_properties_file() -> None:
     result = parse_config_file(FIXTURES_DIR / "empty.properties")
 
-    assert result.status == ConfigParseStatus.EMPTY_FILE
+    assert result.status == ParseStatus.EMPTY_FILE
     assert result.entries == ()
 
 
@@ -65,13 +65,13 @@ def test_unsupported_extension_is_reported_not_skipped_silently(tmp_path: Path) 
 
     result = parse_config_file(unsupported)
 
-    assert result.status == ConfigParseStatus.UNSUPPORTED_FORMAT
+    assert result.status == ParseStatus.UNSUPPORTED_FORMAT
 
 
 def test_missing_file_does_not_raise(tmp_path: Path) -> None:
     result = parse_config_file(tmp_path / "does-not-exist.properties")
 
-    assert result.status == ConfigParseStatus.PARSE_FAILED
+    assert result.status == ParseStatus.PARSE_FAILED
     assert result.error_message
 
 
@@ -81,7 +81,7 @@ def test_file_too_large_is_rejected(tmp_path: Path) -> None:
 
     result = parse_config_file(big_file, max_bytes=10)
 
-    assert result.status == ConfigParseStatus.FILE_TOO_LARGE
+    assert result.status == ParseStatus.FILE_TOO_LARGE
 
 
 def test_properties_supports_comments_and_line_continuation(tmp_path: Path) -> None:
@@ -96,7 +96,7 @@ def test_properties_supports_comments_and_line_continuation(tmp_path: Path) -> N
 
     result = parse_config_file(props_file)
 
-    assert result.status == ConfigParseStatus.OK
+    assert result.status == ParseStatus.OK
     entries_by_key = {entry.key: entry.value for entry in result.entries}
     assert entries_by_key["db.url"] == "jdbc:postgresql://localhost/db?sslmode=require"
 
@@ -125,5 +125,5 @@ def test_yaml_alias_expansion_bomb_times_out_instead_of_hanging(tmp_path: Path) 
     result = parse_config_file(bomb_file, timeout_seconds=1.0)
     elapsed = time.monotonic() - start
 
-    assert result.status == ConfigParseStatus.PARSE_TIMEOUT
+    assert result.status == ParseStatus.PARSE_TIMEOUT
     assert elapsed < 5.0

@@ -12,6 +12,7 @@ it never executes anything from the file, and YAML is parsed with
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -19,10 +20,13 @@ from pathlib import Path
 import yaml
 
 from vibeguard.layer1_static._parsing_guards import (
+    ParseStatus,
     ParsingGuardError,
     read_text_within_limit,
     run_with_timeout,
 )
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_FILE_BYTES = 2_000_000
 DEFAULT_PARSE_TIMEOUT_SECONDS = 5.0
@@ -30,21 +34,18 @@ DEFAULT_PARSE_TIMEOUT_SECONDS = 5.0
 _PROPERTIES_SUFFIXES = frozenset({".properties"})
 _YAML_SUFFIXES = frozenset({".yml", ".yaml"})
 
+CONFIG_FILE_SUFFIXES = _PROPERTIES_SUFFIXES | _YAML_SUFFIXES
 
-class ConfigParseStatus(str, Enum):
-    """Outcome of attempting to parse a single config file.
-
-    Mirrors ``ast_parser.ParseStatus`` so callers can treat both
-    parsers' results uniformly: every outcome is explicit, none are
-    silently dropped.
-    """
-
-    OK = "ok"
-    EMPTY_FILE = "empty_file"
-    FILE_TOO_LARGE = "file_too_large"
-    PARSE_TIMEOUT = "parse_timeout"
-    PARSE_FAILED = "parse_failed"
-    UNSUPPORTED_FORMAT = "unsupported_format"
+__all__ = [
+    "CONFIG_FILE_SUFFIXES",
+    "DEFAULT_MAX_FILE_BYTES",
+    "DEFAULT_PARSE_TIMEOUT_SECONDS",
+    "ConfigEntry",
+    "ConfigFileFormat",
+    "ParseStatus",
+    "ParsedConfigFile",
+    "parse_config_file",
+]
 
 
 class ConfigFileFormat(str, Enum):
@@ -73,7 +74,7 @@ class ParsedConfigFile:
     """Structured result of parsing one config file."""
 
     path: Path
-    status: ConfigParseStatus
+    status: ParseStatus
     format: ConfigFileFormat | None = None
     entries: tuple[ConfigEntry, ...] = ()
     error_message: str | None = None
@@ -105,28 +106,31 @@ def parse_config_file(
     resolved = path.resolve()
     file_format = _detect_format(resolved)
     if file_format is None:
-        return ParsedConfigFile(path=resolved, status=ConfigParseStatus.UNSUPPORTED_FORMAT)
+        logger.debug("Unsupported config format, skipping: %s", resolved)
+        return ParsedConfigFile(path=resolved, status=ParseStatus.UNSUPPORTED_FORMAT)
 
     try:
         text = read_text_within_limit(resolved, max_bytes)
     except ParsingGuardError as exc:
-        status = (
-            ConfigParseStatus.FILE_TOO_LARGE if exc.too_large else ConfigParseStatus.PARSE_FAILED
-        )
-        return ParsedConfigFile(path=resolved, status=status, error_message=str(exc))
+        return _guard_failure(resolved, exc)
 
     if not text.strip():
-        return ParsedConfigFile(
-            path=resolved, status=ConfigParseStatus.EMPTY_FILE, format=file_format
-        )
+        return ParsedConfigFile(path=resolved, status=ParseStatus.EMPTY_FILE, format=file_format)
 
     if file_format is ConfigFileFormat.PROPERTIES:
         entries = _parse_properties(text)
         return ParsedConfigFile(
-            path=resolved, status=ConfigParseStatus.OK, format=file_format, entries=entries
+            path=resolved, status=ParseStatus.OK, format=file_format, entries=entries
         )
 
     return _parse_yaml_file(resolved, text, timeout_seconds)
+
+
+def _guard_failure(path: Path, exc: ParsingGuardError) -> ParsedConfigFile:
+    """Translate a ParsingGuardError into the right ParseStatus."""
+    status = ParseStatus.FILE_TOO_LARGE if exc.too_large else ParseStatus.PARSE_FAILED
+    logger.warning("Rejecting %s: %s", path, exc)
+    return ParsedConfigFile(path=path, status=status, error_message=str(exc))
 
 
 def _detect_format(path: Path) -> ConfigFileFormat | None:
@@ -144,21 +148,23 @@ def _parse_yaml_file(path: Path, text: str, timeout_seconds: float) -> ParsedCon
     try:
         entries = run_with_timeout(_flatten_yaml_text, text, timeout_seconds=timeout_seconds)
     except TimeoutError:
+        logger.warning("Parse timed out after %.1fs: %s", timeout_seconds, path)
         return ParsedConfigFile(
             path=path,
-            status=ConfigParseStatus.PARSE_TIMEOUT,
+            status=ParseStatus.PARSE_TIMEOUT,
             format=ConfigFileFormat.YAML,
             error_message=f"parse exceeded {timeout_seconds}s budget",
         )
     except yaml.YAMLError as exc:
+        logger.warning("YAML error parsing %s: %s", path, exc)
         return ParsedConfigFile(
             path=path,
-            status=ConfigParseStatus.PARSE_FAILED,
+            status=ParseStatus.PARSE_FAILED,
             format=ConfigFileFormat.YAML,
             error_message=str(exc),
         )
     return ParsedConfigFile(
-        path=path, status=ConfigParseStatus.OK, format=ConfigFileFormat.YAML, entries=entries
+        path=path, status=ParseStatus.OK, format=ConfigFileFormat.YAML, entries=entries
     )
 
 

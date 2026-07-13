@@ -38,3 +38,19 @@ def test_main_handles_config_only_directory() -> None:
 def test_main_returns_nonzero_when_config_file_fails_to_parse() -> None:
     exit_code = main.main([str(FIXTURES_DIR / "malformed.yml")])
     assert exit_code == 1
+
+
+def test_main_returns_nonzero_when_a_path_is_rejected_on_containment_grounds(
+    tmp_path: Path,
+) -> None:
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    (outside_dir / "Secret.java").write_text("public class Secret {}\n")
+
+    scan_root = tmp_path / "root"
+    scan_root.mkdir()
+    (scan_root / "SneakyFile.java").symlink_to(outside_dir / "Secret.java")
+
+    exit_code = main.main([str(scan_root)])
+
+    assert exit_code == 1
