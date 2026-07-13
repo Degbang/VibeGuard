@@ -197,3 +197,51 @@ result (constructed attack, demonstrated failure of the naive
 approach, demonstrated fix) rather than a hypothetical threat model -
 this is a stronger, more specific claim than "we resolve paths for
 safety."
+
+---
+
+## [2026-07-13] - Deferred: public GitHub repo ingestion, deferred entirely: hosted scanning service
+**What was proposed:** Add a `scan_repository(url, ref=None)` layer that
+clones/downloads a public GitHub repo into a temp directory, runs the
+existing `scan_directory()` on it, then deletes the checkout - exposed
+via a `--repo <github-url>` CLI flag - as a first step toward
+eventually hosting VibeGuard as a public web service that accepts
+repo URLs directly.
+**What we actually did:** Did not build either. Evaluated both against
+CLAUDE.md before writing any code:
+- The *repo-ingestion wrapper* (clone to temp dir, scan locally,
+  delete) is technically compatible with Section 3's "runs entirely
+  locally" constraint, since the scan step itself would stay local -
+  the network call is just how the input arrives, no different in
+  kind from a user running `git clone` themselves first. Not ruled
+  out architecturally.
+- It is, however, not on Section 7's build order, and Layer 1 itself
+  is not finished (zero CWE rule modules exist yet - `rules/` is
+  still just `__init__.py`). Building ingestion now would mean
+  working ahead of/outside the approved sequence without the
+  "genuinely necessary" justification Section 8 requires for doing
+  that.
+- The *hosted API/web service* idea is a different, larger claim that
+  nothing in CLAUDE.md supports: "public release intent" (Section 3)
+  means the GitHub repository is public, not that infrastructure is
+  operated to execute analysis on arbitrary internet-submitted input.
+  That also introduces new attack surface Section 5 doesn't cover at
+  all (SSRF via arbitrary fetched URLs, zip-slip/decompression bombs
+  from archive downloads, disk exhaustion from large repos, host
+  allowlisting) - none of which has been designed, let alone
+  reviewed. Section 9 notes the topic was approved specifically for
+  its narrow scope; a hosted service is a materially different
+  commitment than what was approved.
+**Why:** Chose to stay on the approved build order (`rules/cwe_798.py`
+next) rather than add a new capability while Layer 1's actual
+vulnerability-detection logic still doesn't exist. This is a "not
+now," not a "no" - the ingestion-wrapper half is architecturally
+sound and can be picked up later without touching any existing code
+(it would sit entirely in front of `scan_directory()`).
+**Effect on thesis chapters:** None yet, since nothing was built. If
+the repo-ingestion wrapper is picked up later, Chapter 3/4 should
+frame it explicitly as an ingestion/deployment-convenience extension,
+not a change to the five-layer analysis core, per this log entry's
+reasoning. The hosted-service idea should not appear in the thesis at
+all unless it is separately discussed with and approved by the
+supervisor, given it falls outside the approved narrow scope.
