@@ -132,3 +132,42 @@ def test_interface_extends_are_captured(tmp_path: Path) -> None:
     iface = result.classes[0]
     assert iface.interfaces == ("Bar", "Baz")
     assert iface.superclass is None
+
+
+def test_parse_simple_java_record(tmp_path: Path) -> None:
+    """javalang can't parse records natively; ast_parser desugars them first.
+
+    Records are the dominant modern DTO pattern in AI-generated
+    Spring/Quarkus code, so this is the highest-value part of the
+    Java 14-21 syntax gap to close (see IMPLEMENTATION_LOG.md for the
+    full compatibility assessment and why the rest - sealed classes,
+    pattern matching, text blocks - remains unsupported).
+    """
+    record_file = tmp_path / "Credentials.java"
+    record_file.write_text("public record Credentials(String username, String password) {}\n")
+
+    result = parse_file(record_file)
+
+    assert result.status == ParseStatus.OK
+    cls = result.classes[0]
+    assert cls.name == "Credentials"
+    field_names = {f.name for f in cls.fields}
+    assert field_names == {"username", "password"}
+    password_field = next(f for f in cls.fields if f.name == "password")
+    assert password_field.type_name == "String"
+
+
+def test_parse_record_with_compact_constructor_still_fails(tmp_path: Path) -> None:
+    """The record shim is intentionally narrow - a non-empty body doesn't parse."""
+    record_file = tmp_path / "Validated.java"
+    record_file.write_text(
+        "public record Validated(String value) {\n"
+        "    public Validated {\n"
+        "        value = value.trim();\n"
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(record_file)
+
+    assert result.status == ParseStatus.PARSE_FAILED
