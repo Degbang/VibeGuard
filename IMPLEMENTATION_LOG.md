@@ -245,3 +245,96 @@ not a change to the five-layer analysis core, per this log entry's
 reasoning. The hosted-service idea should not appear in the thesis at
 all unless it is separately discussed with and approved by the
 supervisor, given it falls outside the approved narrow scope.
+
+---
+
+## [2026-07-14] - scanner.py excludes build/IDE output directories
+**What the plan said:** CLAUDE.md doesn't specify directory-exclusion
+behavior for `scanner.py`; the original implementation only excluded
+`.git`.
+**What we actually did / found:** Reproduced a real correctness bug
+using an actual compiled Java project (`my-test-app`, a local scratch
+app run through `mvn compile`): scanning the repo root found
+`application.properties` three times - once under
+`src/main/resources/`, and again as build-tool copies under
+`target/classes/` and a Gradle-equivalent `build/resources/main/`.
+Any later feature extraction, scoring, or evaluation count built on
+top of scan results would double- or triple-count the same underlying
+finding purely because of how the project happens to be built.
+Expanded `_EXCLUDED_DIR_NAMES` in `scanner.py` to also skip `target`,
+`build`, `out`, `bin` (compiled output), `.gradle`, `.mvn`
+(build-tool caches/metadata), `node_modules` (occasionally present in
+monorepos), and `.idea`/`.vscode`/`.settings` (IDE metadata). Added
+two regression tests that reconstruct the Maven and Gradle
+double-copy scenarios directly and assert only the `src/` copy is
+found.
+**Why:** This is a correctness issue, not a UX nicety - CLAUDE.md's
+evaluation methodology depends on finding counts meaning something,
+and a scanner that silently multiplies findings by however many build
+tools happened to run against a repo undermines that regardless of
+how accurate the underlying CWE rules eventually are.
+**Effect on thesis chapters:** Chapter 4/5 should note that
+`scanner.py` excludes build output and IDE metadata directories, and
+that this was found via a real compiled-repo reproduction, not
+assumed necessary.
+
+---
+
+## [2026-07-14] - Java 17-21 syntax gap: assessed, and records specifically closed
+**What the plan said:** CLAUDE.md doesn't commit to a specific
+supported Java syntax version; "AI-generated Java microservices" was
+implicitly assumed to mean whatever `javalang` (the Section 6 baseline
+dependency) could parse.
+**What we actually did / found:** Verified directly (not assumed) that
+`javalang` 0.13.0 fails to parse most Java 14-21 syntax: text blocks
+(15), records (16), pattern-matching `instanceof` (16), sealed classes
+(17), switch expressions and pattern-matching `switch` (14/21) all
+raise `JavaSyntaxError`. Only `var` (10) works. Records are the
+standout problem: they are the dominant modern pattern for DTO/config
+value classes in generated Spring/Quarkus code, so failing on them
+entirely is a large real-world gap, not an edge case.
+Searched for an actively-maintained alternative parser
+(`javalang17` - a GitHub fork, not published to PyPI; `javalang-ext` -
+published to PyPI but of unknown provenance/maintenance quality).
+Did not install or evaluate either: pulling an unvetted third-party
+parser into a security thesis's dependency chain, sight unseen, was
+judged higher-risk than the problem it would solve, and the project's
+own safety tooling correctly blocked the attempt to install one
+without review.
+Instead, built `vibeguard/layer1_static/_record_preprocessor.py`: a
+narrow, self-contained, fully-owned regex-based rewrite that converts
+*simple* (empty-bodied - no compact constructor, no extra methods)
+`record` declarations into an equivalent `class` with one field per
+component, applied to source text immediately before it's handed to
+`javalang.parse.parse`. Verified against records with generics,
+`implements` clauses, and varargs. Deliberately does **not** attempt
+sealed classes, pattern matching, switch expressions, or text blocks -
+those remain `PARSE_FAILED`, same as before this change. A record with
+a non-empty body is left completely untouched (verified by test) so
+it fails exactly as it did before, rather than being silently
+mistranslated into something structurally wrong.
+The one property verified most carefully: the rewrite **never changes
+the file's total newline count**, even for a record declaration
+spread across multiple lines - proven with a test that puts a real
+class after a multi-line record and asserts it still reports its
+correct original line number. File/line traceability is Layer 1's
+core value proposition (CLAUDE.md Section 2); a fix that silently
+broke it for every line after a record would have been worse than not
+fixing records at all.
+**Why:** Records specifically were worth a targeted, fully-audited fix
+because of how common they are in the exact kind of code this thesis
+targets, and because the fix could be scoped narrowly enough (regex
+match on an empty record body only) to be simple, fully own-authored,
+and independently testable - unlike sealed classes/pattern
+matching/switch expressions/text blocks, which would each need
+meaningfully more work to handle safely and were judged not worth the
+risk of a rushed, under-tested implementation.
+**Effect on thesis chapters:** Chapter 3/4 must not claim "Java 17-21
+support." The accurate claim is: Java syntax up to and including
+Java 13, plus `var` (10) and `record` declarations with an empty body
+(16) as a targeted extension. Sealed classes, pattern matching,
+switch expressions, and text blocks are an explicit, stated
+limitation, not an oversight - Chapter 5/6 should list this as a
+concrete "future work" item (most plausibly: properly vetting a
+maintained modern-Java parser, or extending the same
+targeted-preprocessing approach to the next-highest-value construct).
