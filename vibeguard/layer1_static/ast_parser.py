@@ -293,11 +293,32 @@ def _type_name(type_node: object | None) -> str:
     """
     if type_node is None:
         return "void"
-    name = getattr(type_node, "name", None)
+    name = _base_type_name(type_node)
     if name is None:
         return type_node.__class__.__name__
     dimensions = getattr(type_node, "dimensions", None) or []
     return f"{name}{'[]' * len(dimensions)}"
+
+
+def _base_type_name(type_node: object) -> str | None:
+    """Return the actual base type name, not the first qualifier segment.
+
+    javalang represents a fully-qualified type like ``java.util.List``
+    as a chain of ``ReferenceType`` nodes linked via ``sub_type`` - one
+    node per dotted segment, in order ("java" -> "util" -> "List").
+    Reading ``.name`` off the outer node alone returns "java", the
+    package prefix, not the actual type; walking to the end of the
+    chain returns "List". Array ``dimensions`` live on the outermost
+    node regardless, so that's read separately in ``_type_name``.
+    """
+    node = type_node
+    name = getattr(node, "name", None)
+    sub_type = getattr(node, "sub_type", None)
+    while sub_type is not None:
+        node = sub_type
+        name = getattr(node, "name", name)
+        sub_type = getattr(node, "sub_type", None)
+    return name
 
 
 def _superclass_name(node: _ClassOrInterfaceDeclaration) -> str | None:

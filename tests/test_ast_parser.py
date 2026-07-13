@@ -171,3 +171,42 @@ def test_parse_record_with_compact_constructor_still_fails(tmp_path: Path) -> No
     result = parse_file(record_file)
 
     assert result.status == ParseStatus.PARSE_FAILED
+
+
+def test_multiline_record_field_reports_its_own_source_line(tmp_path: Path) -> None:
+    record_file = tmp_path / "Credentials.java"
+    record_file.write_text(
+        "public record Credentials(\n" "    String username,\n" "    String password\n" ") {}\n"
+    )
+
+    result = parse_file(record_file)
+
+    assert result.status == ParseStatus.OK
+    lines_by_field = {f.name: f.line for f in result.classes[0].fields}
+    assert lines_by_field == {"username": 2, "password": 3}
+
+
+def test_fully_qualified_type_name_returns_base_type_not_first_segment(
+    tmp_path: Path,
+) -> None:
+    """java.util.List<...> must summarize to "List", not "java".
+
+    javalang represents a fully-qualified type as a chain of
+    ReferenceType nodes linked by sub_type, one per dotted segment
+    ("java" -> "util" -> "List"). Reading .name off only the outer
+    node returns the package prefix, losing the actual type entirely -
+    not just missing generic expansion, but wrong.
+    """
+    java_file = tmp_path / "Foo.java"
+    java_file.write_text(
+        "public class Foo {\n"
+        "    java.util.List<java.util.Map<String, Integer>> values;\n"
+        "    java.util.List<String>[] items;\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    assert result.status == ParseStatus.OK
+    types_by_field = {f.name: f.type_name for f in result.classes[0].fields}
+    assert types_by_field == {"values": "List", "items": "List[]"}

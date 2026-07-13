@@ -71,3 +71,22 @@ def test_preserves_total_newline_count_for_multiline_record() -> None:
     tree = javalang.parse.parse(rewritten)
     next_class = next(t for t in tree.types if t.name == "Next")
     assert next_class.position.line == 6
+
+
+def test_multiline_record_fields_report_their_own_original_line() -> None:
+    """Each field must report its real source line, not the record's.
+
+    Compressing every field onto the record's opening line would make
+    a CWE finding on e.g. a `password` field point at the wrong line
+    in any multiline record - a real traceability regression, not
+    just a cosmetic one.
+    """
+    source = "public record UserDto(\n    String name,\n    int age\n) {}\n"
+    rewritten = desugar_simple_records(source)
+
+    tree = javalang.parse.parse(rewritten)
+    fields_by_name = {
+        d.name: field.position.line for field in tree.types[0].body for d in field.declarators
+    }
+
+    assert fields_by_name == {"name": 2, "age": 3}

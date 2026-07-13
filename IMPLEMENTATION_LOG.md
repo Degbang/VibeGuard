@@ -338,3 +338,53 @@ limitation, not an oversight - Chapter 5/6 should list this as a
 concrete "future work" item (most plausibly: properly vetting a
 maintained modern-Java parser, or extending the same
 targeted-preprocessing approach to the next-highest-value construct).
+
+---
+
+## [2026-07-14] - Two correctness bugs found by review: record field line traceability, fully-qualified type names
+**What the plan said:** N/A - both bugs were introduced by prior work
+in this log (the record preprocessor, and `_type_name` since Layer 1's
+initial implementation), not a deviation from CLAUDE.md itself.
+Documented here per Section 8's spirit of tracking every real
+correctness finding, not just methodology deviations.
+**What we actually did / found:**
+1. The record preprocessor's first version compressed an entire
+   multiline record onto one output line, correctly preserving *total*
+   newline count (so content *after* a record kept its right line
+   number) but not per-field position *within* the record: a
+   `password` field on line 3 of a 4-line record declaration was
+   reported as line 1. Verified directly before fixing. Rewrote
+   `_rewrite_match`/`_fields_by_relative_line` in
+   `_record_preprocessor.py` to track each component's actual
+   newline-relative offset within the matched span and place its
+   synthesized field declaration on that same relative output line,
+   rather than joining all fields onto the header line. Verified fixed:
+   a field on original line 3 now reports line 3.
+2. `_type_name()` read `.name` off only the outermost javalang type
+   node. For a fully-qualified type, javalang represents each dotted
+   segment as its own `ReferenceType` chained via `sub_type`
+   (`java` -> `util` -> `List`), so the outermost node's `.name` is
+   the *first package segment*, not the type. Verified directly:
+   `java.util.List<java.util.Map<String, Integer>> values;` summarized
+   as `type_name="java"`. Not a missing-generics gap, a wrong-answer
+   bug - any CWE rule pattern-matching on `type_name` (e.g. "is this a
+   `List`/`Map`/collection field") would silently fail for any
+   fully-qualified type usage, which is a common style choice, not an
+   edge case. Added `_base_type_name()`, which walks the `sub_type`
+   chain to its end (array `dimensions` still read from the *outer*
+   node, confirmed via a qualified-array-type test that this is where
+   javalang actually puts them).
+**Why:** Both are silent-wrong-answer bugs rather than crashes or
+`PARSE_FAILED` results, which makes them more dangerous than a loud
+failure: nothing in the existing output would have signaled that a
+line number or a type name was incorrect. Found by direct verification
+against constructed repro cases, not by re-reading the code, matching
+this project's standing practice of proving a fix rather than assuming
+one.
+**Effect on thesis chapters:** No new limitation to document - these
+are fixes to features already claimed as working (record support;
+Java AST field/parameter type summarization), not new scope. Worth a
+line in Chapter 5 as evidence of iterative verification (a second
+review pass over already-"working" code found two real, non-obvious
+bugs, both fixed with regression tests) rather than treating a
+passing test suite as proof of correctness on its own.
