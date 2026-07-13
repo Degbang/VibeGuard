@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from enum import Enum
 from pathlib import Path
 from typing import TypeAlias
 
@@ -24,6 +23,7 @@ from javalang.tree import (
 )
 
 from vibeguard.layer1_static._parsing_guards import (
+    ParseStatus,
     ParsingGuardError,
     read_text_within_limit,
     run_with_timeout,
@@ -36,19 +36,17 @@ DEFAULT_PARSE_TIMEOUT_SECONDS = 5.0
 
 _ClassOrInterfaceDeclaration: TypeAlias = ClassDeclaration | InterfaceDeclaration
 
-
-class ParseStatus(str, Enum):
-    """Outcome of attempting to parse a single Java source file.
-
-    Every outcome is represented explicitly so a file that can't be
-    parsed is always flagged in results, never silently dropped.
-    """
-
-    OK = "ok"
-    EMPTY_FILE = "empty_file"
-    FILE_TOO_LARGE = "file_too_large"
-    PARSE_TIMEOUT = "parse_timeout"
-    PARSE_FAILED = "parse_failed"
+__all__ = [
+    "DEFAULT_MAX_FILE_BYTES",
+    "DEFAULT_PARSE_TIMEOUT_SECONDS",
+    "ParseStatus",
+    "ParsedClass",
+    "ParsedField",
+    "ParsedFile",
+    "ParsedMethod",
+    "ParsedParameter",
+    "parse_file",
+]
 
 
 @dataclass(frozen=True)
