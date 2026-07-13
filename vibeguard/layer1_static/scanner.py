@@ -41,7 +41,28 @@ logger = logging.getLogger(__name__)
 
 _JAVA_SUFFIX = ".java"
 _RELEVANT_SUFFIXES = CONFIG_FILE_SUFFIXES | {_JAVA_SUFFIX}
-_EXCLUDED_DIR_NAMES = frozenset({".git"})
+
+# Build output, dependency caches, and IDE metadata: never source, and
+# for a compiled/packaged repo these directories contain *copies* of
+# real source files (e.g. Maven copies src/main/resources/*.properties
+# into target/classes/) that would otherwise be scanned as if they
+# were additional, distinct findings - double-counting the same
+# vulnerability and skewing any evaluation run against real repos.
+_EXCLUDED_DIR_NAMES = frozenset(
+    {
+        ".git",
+        "target",  # Maven build output
+        "build",  # Gradle build output
+        "out",  # IntelliJ default build output
+        "bin",  # Eclipse build output
+        ".gradle",  # Gradle cache/wrapper
+        ".mvn",  # Maven wrapper metadata
+        "node_modules",  # JS deps, occasionally present in monorepos
+        ".idea",  # IDE metadata
+        ".vscode",  # IDE metadata
+        ".settings",  # Eclipse project metadata
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -133,10 +154,12 @@ def _discover_candidate_files(resolved_root: Path) -> list[Path]:
     here; that's what ``_containment_rejection`` guards against, as
     defense in depth.
 
-    ``.git`` directories are skipped: they're common in real cloned
-    repositories, never contain files with a relevant suffix (git
-    stores objects under hashed names), and can be large enough to
-    meaningfully slow a scan for no benefit.
+    Directories in ``_EXCLUDED_DIR_NAMES`` (``.git``, build output like
+    ``target``/``build``, IDE metadata) are skipped - not just for
+    speed, but for correctness: a compiled repo's build output often
+    contains verbatim *copies* of source config files (Maven copies
+    ``src/main/resources/*.properties`` into ``target/classes/``),
+    which would otherwise be scanned as separate, duplicate findings.
     """
     matches: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(resolved_root, followlinks=False):

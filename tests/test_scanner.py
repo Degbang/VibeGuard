@@ -54,6 +54,43 @@ def test_scan_skips_git_internals(tmp_path: Path) -> None:
     assert result.java_files[0].path.name == "Real.java"
 
 
+def test_scan_does_not_double_count_maven_build_output(tmp_path: Path) -> None:
+    """A compiled Maven repo has target/classes/ copies of resources.
+
+    Without excluding build directories, scanning a repo root after
+    `mvn compile` finds the same config file twice: once under
+    src/main/resources, once copied into target/classes - inflating
+    finding counts for anything built on top of scan results.
+    """
+    src_resources = tmp_path / "src" / "main" / "resources"
+    src_resources.mkdir(parents=True)
+    (src_resources / "application.properties").write_text("quarkus.http.port=8080\n")
+
+    target_classes = tmp_path / "target" / "classes"
+    target_classes.mkdir(parents=True)
+    (target_classes / "application.properties").write_text("quarkus.http.port=8080\n")
+
+    result = scan_directory(tmp_path)
+
+    assert len(result.config_files) == 1
+    assert result.config_files[0].path == src_resources / "application.properties"
+
+
+def test_scan_does_not_double_count_gradle_build_output(tmp_path: Path) -> None:
+    src_resources = tmp_path / "src" / "main" / "resources"
+    src_resources.mkdir(parents=True)
+    (src_resources / "application.yml").write_text("quarkus:\n  http:\n    port: 8080\n")
+
+    build_resources = tmp_path / "build" / "resources" / "main"
+    build_resources.mkdir(parents=True)
+    (build_resources / "application.yml").write_text("quarkus:\n  http:\n    port: 8080\n")
+
+    result = scan_directory(tmp_path)
+
+    assert len(result.config_files) == 1
+    assert result.config_files[0].path == src_resources / "application.yml"
+
+
 def test_scan_raises_on_non_directory(tmp_path: Path) -> None:
     not_a_dir = tmp_path / "file.txt"
     not_a_dir.write_text("hi")
