@@ -388,3 +388,33 @@ line in Chapter 5 as evidence of iterative verification (a second
 review pass over already-"working" code found two real, non-obvious
 bugs, both fixed with regression tests) rather than treating a
 passing test suite as proof of correctness on its own.
+
+---
+
+## [2026-07-14] - _type_name fix from the previous entry was itself incomplete
+**What the plan said:** N/A - a correction to the fix logged in the
+entry immediately above, not a new deviation.
+**What we actually did / found:** The previous fix for fully-qualified
+types (`_base_type_name` walking javalang's `sub_type` chain) returned
+only the *innermost* segment's name - `java.util.List` summarized to
+`"List"`. That's no longer wrong in the "returns the wrong identifier"
+sense the original bug had, but it's still lossy: it silently
+discards the package qualification, so `java.sql.Date` and
+`java.util.Date` both summarize to `"Date"` and become
+indistinguishable. Verified this collapse directly before fixing.
+Changed `_base_type_name` to join every segment's name with `.`,
+reconstructing the type's full original dotted name
+(`java.util.List`, `java.sql.Date`) rather than truncating to the last
+segment. Unqualified types are unaffected (a single segment joins to
+itself). Updated the existing regression test to assert the fully
+reconstructed name and added the `java.sql.Date`/`java.util.Date`
+ambiguity case directly.
+**Why:** A future CWE rule pattern-matching on `type_name` may need to
+distinguish types that share a simple name but come from different
+packages (a common case for `Date`, and plausible for
+security-relevant types too, e.g. distinguishing a project's own
+`Cipher`-named class from `javax.crypto.Cipher`). Truncating to the
+simple name forecloses that distinction permanently; reconstructing
+the full name preserves it at zero extra cost.
+**Effect on thesis chapters:** None beyond the previous entry - same
+feature, corrected to actually be non-lossy this time.
