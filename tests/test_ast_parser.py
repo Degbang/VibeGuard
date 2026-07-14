@@ -186,22 +186,27 @@ def test_multiline_record_field_reports_its_own_source_line(tmp_path: Path) -> N
     assert lines_by_field == {"username": 2, "password": 3}
 
 
-def test_fully_qualified_type_name_returns_base_type_not_first_segment(
+def test_fully_qualified_type_name_reconstructs_the_full_dotted_name(
     tmp_path: Path,
 ) -> None:
-    """java.util.List<...> must summarize to "List", not "java".
+    """java.util.List<...> must summarize to "java.util.List", not "java".
 
     javalang represents a fully-qualified type as a chain of
     ReferenceType nodes linked by sub_type, one per dotted segment
     ("java" -> "util" -> "List"). Reading .name off only the outer
-    node returns the package prefix, losing the actual type entirely -
-    not just missing generic expansion, but wrong.
+    node returns the package prefix, losing the actual type entirely.
+    Taking only the innermost segment ("List") is also wrong: it
+    silently discards the qualification, making java.sql.Date and
+    java.util.Date indistinguishable. The full name must be
+    reconstructed by joining every segment.
     """
     java_file = tmp_path / "Foo.java"
     java_file.write_text(
         "public class Foo {\n"
         "    java.util.List<java.util.Map<String, Integer>> values;\n"
         "    java.util.List<String>[] items;\n"
+        "    java.sql.Date sqlDate;\n"
+        "    java.util.Date utilDate;\n"
         "}\n"
     )
 
@@ -209,4 +214,9 @@ def test_fully_qualified_type_name_returns_base_type_not_first_segment(
 
     assert result.status == ParseStatus.OK
     types_by_field = {f.name: f.type_name for f in result.classes[0].fields}
-    assert types_by_field == {"values": "List", "items": "List[]"}
+    assert types_by_field == {
+        "values": "java.util.List",
+        "items": "java.util.List[]",
+        "sqlDate": "java.sql.Date",
+        "utilDate": "java.util.Date",
+    }

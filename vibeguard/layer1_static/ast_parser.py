@@ -301,24 +301,29 @@ def _type_name(type_node: object | None) -> str:
 
 
 def _base_type_name(type_node: object) -> str | None:
-    """Return the actual base type name, not the first qualifier segment.
+    """Reconstruct a type's full dotted name from javalang's segment chain.
 
     javalang represents a fully-qualified type like ``java.util.List``
     as a chain of ``ReferenceType`` nodes linked via ``sub_type`` - one
     node per dotted segment, in order ("java" -> "util" -> "List").
-    Reading ``.name`` off the outer node alone returns "java", the
-    package prefix, not the actual type; walking to the end of the
-    chain returns "List". Array ``dimensions`` live on the outermost
-    node regardless, so that's read separately in ``_type_name``.
+    Reading ``.name`` off only the outer node returns "java", the
+    package prefix, not the type. Reading only the innermost node's
+    name would return "List" but silently discard the qualification -
+    ``java.sql.Date`` and ``java.util.Date`` would both collapse to
+    "Date", losing real information a CWE rule might need. Joining
+    every segment's name with "." reconstructs the original name
+    (unqualified types are unaffected: a single segment joins to
+    itself). Array ``dimensions`` live on the outermost node
+    regardless, so that's read separately in ``_type_name``.
     """
-    node = type_node
-    name = getattr(node, "name", None)
-    sub_type = getattr(node, "sub_type", None)
-    while sub_type is not None:
-        node = sub_type
-        name = getattr(node, "name", name)
-        sub_type = getattr(node, "sub_type", None)
-    return name
+    segments: list[str] = []
+    node: object | None = type_node
+    while node is not None:
+        name = getattr(node, "name", None)
+        if name is not None:
+            segments.append(name)
+        node = getattr(node, "sub_type", None)
+    return ".".join(segments) if segments else None
 
 
 def _superclass_name(node: _ClassOrInterfaceDeclaration) -> str | None:
