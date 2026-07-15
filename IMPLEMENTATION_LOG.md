@@ -418,3 +418,65 @@ simple name forecloses that distinction permanently; reconstructing
 the full name preserves it at zero extra cost.
 **Effect on thesis chapters:** None beyond the previous entry - same
 feature, corrected to actually be non-lossy this time.
+
+---
+
+## [2026-07-14] - First CWE rule: `rules/cwe_798.py` (hardcoded credentials)
+**What the plan said:** CLAUDE.md Section 7 build order item 2:
+`rules/cwe_798.py` validates the parser's string-literal extraction,
+first rule module.
+**What we actually did / found:** Implemented `detect_in_java()` and
+`detect_in_config()`, both returning a shared `Finding` dataclass
+(`cwe_id`, `file_path`, `line`, `identifier`, `redacted_value`,
+`message`) - the first shared data shape future CWE rule modules will
+likely reuse. Detection logic: a case-insensitive substring match
+against a credential-keyword list (password, secret, api key, token,
+...) applied to field/local-variable names (Java) or dotted config
+keys, combined with a literal string value that isn't empty, isn't a
+Spring/Quarkus `${...}` property reference (externalized, not
+hardcoded), and doesn't match an obvious-placeholder marker
+(`CHANGE_ME`, `TODO`, etc.).
+
+For Java, walks `ParsedFile.tree` directly via javalang's
+`.filter(VariableDeclarator)` rather than `ParsedClass.fields` -
+neither field nor local-variable initializer *values* are captured in
+Layer 1's flattened summary, only structure (name/type/modifiers).
+This is exactly the "traverse beyond what `classes` summarizes" use
+case `ParsedFile.tree`'s docstring was written for back when
+`ast_parser.py` was built. `.filter()` finds both class-field and
+method-local declarations uniformly (both are realistic places for a
+hardcoded secret), with line numbers read from the literal node's own
+`position` rather than the parent declaration's.
+
+Findings never carry the real matched value: `redacted_value` masks
+everything except the first/last character. Decided this deliberately
+rather than including the raw value - a security tool whose own
+reports/logs echo back the real secrets it finds becomes a secondary
+disclosure vector, which matters more once real public repos (not
+just synthetic sample apps) are being scanned.
+
+Added `tests/fixtures/HardcodedSecretService.java` (the CWE-specific
+fixture CLAUDE.md Section 4 requires) with both a true-positive case
+and three deliberate non-matches (property reference, placeholder,
+empty value) in the same file, plus reused the existing
+`application.properties`/`application.yml` fixtures (which already
+contained a real `quarkus.datasource.password=hunter2` from earlier
+work) as config-side true positives. 11 new tests, 58 total passing.
+**Why:** The `${...}` and placeholder exclusions exist because a naive
+"credential-shaped name + any literal value" rule would flag the
+correct, idiomatic way to *avoid* CWE-798 (externalizing to
+environment/config substitution) as if it were an instance of the
+vulnerability - a false positive that would actively mislead a
+report's reader. Known accepted false-positive source (not solved
+here): a `*Hash`-suffixed field holding a literal hashed value (e.g.
+bcrypt) still matches on name; distinguishing "this looks like a hash"
+from "this looks like a plaintext secret" was judged out of scope for
+a first rule module - noted for Chapter 5's limitations discussion if
+evaluation results show it matters in practice.
+**Effect on thesis chapters:** Chapter 4 should describe the `Finding`
+dataclass as the common output shape rule modules converge on.
+Chapter 5's CWE-798 evaluation should report the property-reference/
+placeholder exclusions explicitly, since they're precision-improving
+design decisions, not incidental behavior - and should flag the
+hash-field false-positive source as a known limitation rather than
+something the evaluation numbers might quietly hide.
