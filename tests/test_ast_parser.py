@@ -86,6 +86,16 @@ def test_parse_missing_file_does_not_raise(tmp_path: Path) -> None:
     assert result.error_message is not None
 
 
+def test_parse_utf8_bom_file_succeeds(tmp_path: Path) -> None:
+    java_file = tmp_path / "BomService.java"
+    java_file.write_bytes(b"\xef\xbb\xbfpublic class BomService {}\n")
+
+    result = parse_file(java_file)
+
+    assert result.status == ParseStatus.OK
+    assert result.classes[0].name == "BomService"
+
+
 def test_parse_file_too_large_is_rejected(tmp_path: Path) -> None:
     big_file = tmp_path / "Big.java"
     big_file.write_text("public class Big {}\n" + ("// padding\n" * 10))

@@ -2,11 +2,16 @@
 
 Full scope: orchestrate the five-layer pipeline against a directory of
 Java sample apps and produce the final explainable risk report. Current
-scope: only Layer 1 (Java AST parsing + config-file parsing, orchestrated
-by scanner.py) exists, so this command only parses .java/.properties/
-.yml/.yaml files and reports what it found - it is not yet a
-vulnerability scan. Layers 2-5 will extend this command as they land,
-per the build order in CLAUDE.md/IMPLEMENTATION_LOG.md.
+scope: Layer 1 parsing/orchestration (scanner.py) plus the CWE rule
+modules implemented so far (cwe_798.py, cwe_284.py) - this command
+parses .java/.properties/.yml/.yaml files AND runs those rules against
+every successfully-parsed file. It is not yet the full explainable risk
+assessment: there is no rule-based scoring (Layer 3), no ML
+classification (Layer 4), and no SHAP explanation (Layer 5) - a
+finding here is a raw, unscored candidate from one rule's pattern
+matching, not a final severity judgment. Layers 2-5 and the remaining
+CWE rule modules will extend this command as they land, per the build
+order in CLAUDE.md/IMPLEMENTATION_LOG.md.
 """
 
 from __future__ import annotations
@@ -30,22 +35,26 @@ from vibeguard.layer1_static.config_parser import (
     ParsedConfigFile,
     parse_config_file,
 )
+from vibeguard.layer1_static.rules import cwe_284, cwe_798
+from vibeguard.layer1_static.rules._finding import Finding
 from vibeguard.layer1_static.scanner import RejectedPath, ScanResult, scan_directory
 
 _JAVA_SUFFIX = ".java"
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Parse Java source and config files under a path, and print a report.
+    """Parse Java source and config files under a path, run CWE rules, and report.
 
     Args:
         argv: Command-line arguments, or ``None`` to read ``sys.argv``.
 
     Returns:
-        ``0`` if every discovered file (Java or config) parsed OK and
-        none were rejected on containment grounds, ``1`` otherwise
-        (including "nothing found"), so this can be used as a pass/fail
-        check in a script without parsing printed output.
+        ``0`` only if every discovered file parsed OK, none were
+        rejected on containment grounds, AND no CWE rule produced a
+        finding; ``1`` otherwise (including "nothing found"). This
+        exit-code contract is provisional: with no Layer 3 scoring yet,
+        "any finding at all" is the only threshold available - it will
+        become severity-based once scoring exists.
     """
     args = _parse_args(argv)
     resolved = args.path.resolve()
@@ -62,16 +71,42 @@ def main(argv: list[str] | None = None) -> int:
         print(f"No .java or config files found under {args.path}", file=sys.stderr)
         return 1
 
+    findings = _run_rules(result)
+
     if result.java_files:
         _print_java_report(result.java_files)
     if result.config_files:
         _print_config_report(result.config_files)
     if result.rejected_paths:
         _print_rejected_report(result.rejected_paths)
+    if findings:
+        _print_findings_report(findings)
 
     java_ok = all(r.status == ParseStatus.OK for r in result.java_files)
     config_ok = all(r.status == ParseStatus.OK for r in result.config_files)
-    return 0 if java_ok and config_ok and not result.rejected_paths else 1
+    return 0 if java_ok and config_ok and not result.rejected_paths and not findings else 1
+
+
+def _run_rules(result: ScanResult) -> tuple[Finding, ...]:
+    """Run every implemented CWE rule against a scan's successfully-parsed files.
+
+    Only rules/cwe_798.py and rules/cwe_284.py exist so far; more CWE
+    rule modules get added here as they land. A file that failed to
+    parse is skipped - there's no AST/entries to inspect, and that
+    failure is already surfaced separately via the parse report, not
+    silently dropped.
+    """
+    findings: list[Finding] = []
+    for java_file in result.java_files:
+        if java_file.status != ParseStatus.OK:
+            continue
+        findings.extend(cwe_798.detect_in_java(java_file))
+        findings.extend(cwe_284.detect_in_java(java_file))
+    for config_file in result.config_files:
+        if config_file.status != ParseStatus.OK:
+            continue
+        findings.extend(cwe_798.detect_in_config(config_file))
+    return tuple(findings)
 
 
 def _scan_single_file(resolved: Path, max_bytes: int, timeout_seconds: float) -> ScanResult:
@@ -105,9 +140,13 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         prog="vibeguard",
         description=(
             "VibeGuard Layer 1: parse Java source (AST) and config files "
-            "(.properties/.yml/.yaml, flattened key-value pairs) and report "
-            "the outcome. Layers 2-5 (feature extraction, scoring, ML "
-            "classification, SHAP explainability) are not implemented yet."
+            "(.properties/.yml/.yaml, flattened key-value pairs), then run "
+            "the CWE rules implemented so far (CWE-798 hardcoded credentials, "
+            "CWE-284 improper access control) against them. Findings are "
+            "unscored rule matches, not graded risk - Layers 2-5 (feature "
+            "extraction, rule-based scoring, ML classification, SHAP "
+            "explainability) are not implemented yet, and the remaining CWE "
+            "rules (287, 20, 1035) don't exist yet either."
         ),
     )
     parser.add_argument(
@@ -191,6 +230,34 @@ def _print_rejected_report(rejected: tuple[RejectedPath, ...]) -> None:
         table.add_row(str(entry.path), entry.reason)
 
     console.print(table)
+
+
+def _print_findings_report(findings: tuple[Finding, ...]) -> None:
+    """Render a Rich table of every CWE finding across the scan.
+
+    Explicitly labeled "not yet scored" in the title: without Layer 3,
+    every finding here is an unranked rule match, not a graded risk -
+    the table must not be read as if severity had already been judged.
+    """
+    console = Console()
+    table = Table(title="VibeGuard Layer 1 - Findings (CWE candidates, not yet scored)")
+    table.add_column("File")
+    table.add_column("CWE")
+    table.add_column("Line")
+    table.add_column("Identifier")
+    table.add_column("Detail")
+
+    for finding in findings:
+        table.add_row(
+            str(finding.file_path),
+            finding.cwe_id,
+            str(finding.line) if finding.line is not None else "-",
+            finding.identifier,
+            finding.message,
+        )
+
+    console.print(table)
+    console.print(f"{len(findings)} finding(s)")
 
 
 def _summarize(message: str | None, *, limit: int = 120) -> str:

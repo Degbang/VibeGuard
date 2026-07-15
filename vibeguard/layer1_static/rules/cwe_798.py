@@ -56,6 +56,18 @@ _CREDENTIAL_KEYWORDS = (
     "encryption_key",
 )
 
+# A name whose *last word* (see _last_word) is one of these describes a
+# reference to a secret - where to find it, what to call it - rather
+# than the secret material itself. "secretName" holds the name of a
+# secret to look up, not a value; "quarkus.kubernetes.env.secrets"
+# names which Kubernetes Secret resources to mount, not an embedded
+# credential. Deliberately excludes words like "key" that are
+# themselves part of a real credential-shaped name (e.g. "secretKey"
+# must still match).
+_REFERENCE_SUFFIXES = frozenset(
+    {"name", "id", "ref", "reference", "path", "alias", "arn", "uri", "url", "secrets"}
+)
+
 # Substrings that mark a value as an obvious placeholder rather than a
 # real secret, checked case-insensitively.
 _PLACEHOLDER_MARKERS = (
@@ -115,7 +127,7 @@ def _check_declarator(file_path: Path, node: javalang.tree.VariableDeclarator) -
     literal_value = _string_literal_value(node.initializer)
     if literal_value is None or _is_safe_value(literal_value):
         return None
-    line = node.initializer.position.line if node.initializer.position else None
+    line = _initializer_line(node.initializer)
     return Finding(
         cwe_id=CWE_ID,
         file_path=file_path,
@@ -127,7 +139,45 @@ def _check_declarator(file_path: Path, node: javalang.tree.VariableDeclarator) -
 
 
 def _string_literal_value(initializer: object | None) -> str | None:
-    """Return a string literal's actual text, or None if not a string literal.
+    """Return a string value's actual text, or None if not statically resolvable.
+
+    Handles two shapes: a plain string literal, and a chain of ``+``
+    concatenations where every operand is itself statically resolvable
+    (e.g. ``"hunter" + "2"``) - a compile-time-constant secret split
+    across literals is still a hardcoded secret, and this is common
+    enough in practice (line-length formatting, minor obfuscation) to
+    be worth folding rather than silently missing. Anything involving a
+    variable/method call (``"a" + x``) can't be resolved statically and
+    returns None - this rule only ever inspects source text, never
+    evaluates anything.
+    """
+    if isinstance(initializer, javalang.tree.Literal):
+        return _plain_literal_value(initializer)
+    if isinstance(initializer, javalang.tree.BinaryOperation) and initializer.operator == "+":
+        left = _string_literal_value(initializer.operandl)
+        right = _string_literal_value(initializer.operandr)
+        return None if left is None or right is None else left + right
+    return None
+
+
+def _initializer_line(initializer: object | None) -> int | None:
+    """Return the best source line for a static string initializer.
+
+    javalang does not attach a position to a ``BinaryOperation`` like
+    ``"hunter" + "2"``, even though its literal operands do have
+    positions. For traceability, report the leftmost operand's line
+    rather than losing the line number entirely.
+    """
+    position = getattr(initializer, "position", None)
+    if position is not None:
+        return position.line
+    if isinstance(initializer, javalang.tree.BinaryOperation):
+        return _initializer_line(initializer.operandl) or _initializer_line(initializer.operandr)
+    return None
+
+
+def _plain_literal_value(literal: javalang.tree.Literal) -> str | None:
+    """Return a Literal's string text, or None if it isn't a string literal.
 
     javalang keeps a literal's raw source token in ``.value``,
     including the surrounding quotes for strings (e.g. ``'"hunter2"'``)
@@ -137,9 +187,7 @@ def _string_literal_value(initializer: object | None) -> str | None:
     handling) since that's sufficient to inspect realistic secret
     values without needing a full literal-escape parser.
     """
-    if not isinstance(initializer, javalang.tree.Literal):
-        return None
-    raw = initializer.value
+    raw = literal.value
     if len(raw) < 2 or not (raw.startswith('"') and raw.endswith('"')):
         return None
     return raw[1:-1].replace('\\"', '"').replace("\\\\", "\\")
@@ -162,9 +210,29 @@ def detect_in_config(parsed_config: ParsedConfigFile) -> tuple[Finding, ...]:
 
 
 def _is_credential_name(name: str) -> bool:
-    """Case-insensitive substring match against known credential keywords."""
+    """Case-insensitive substring match against known credential keywords,
+    excluding names that are a *reference* to a secret rather than the
+    secret material itself - see ``_REFERENCE_SUFFIXES``."""
     lowered = name.lower()
-    return any(keyword in lowered for keyword in _CREDENTIAL_KEYWORDS)
+    if not any(keyword in lowered for keyword in _CREDENTIAL_KEYWORDS):
+        return False
+    return _last_word(name) not in _REFERENCE_SUFFIXES
+
+
+_WORD_PATTERN = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z0-9]+")
+
+
+def _last_word(identifier: str) -> str:
+    """Extract an identifier's final word, splitting camelCase and ./_/- separators.
+
+    "secretName" -> "name", "quarkus.kubernetes.env.secrets" -> "secrets",
+    "APIKey" -> "key". Used to check *what kind of thing* the name's
+    last component describes, without being fooled by where a
+    credential keyword happens to sit earlier in the identifier.
+    """
+    normalized = re.sub(r"[._-]", " ", identifier)
+    words = _WORD_PATTERN.findall(normalized)
+    return words[-1].lower() if words else identifier.lower()
 
 
 def _is_safe_value(value: str) -> bool:

@@ -600,3 +600,87 @@ rule modules specifically (not just the parsers), and can cite the
 fully-qualified-annotation bug as a concrete example of why static
 pattern-matching rules need testing against realistic naming variation,
 not just the "canonical" form of an annotation/expression.
+
+---
+
+## [2026-07-14] - External review found 4 more real issues; scanner now excludes test roots; CLI now runs rules
+**What the plan said:** N/A - fixes from an external code-review pass,
+plus completing work already flagged as owed ("wire the CLI up once
+more rules exist").
+**What we actually did / found:** Verified all four reported issues
+before fixing, same discipline as always:
+1. `cwe_798.py` over-flagged *references to* a secret as the secret
+   itself: `secretName = "orders-db-credential"` and
+   `quarkus.kubernetes.env.secrets=orders-db-secret` both produced
+   findings, but neither holds credential material - one names a
+   secret to look up, the other lists which Kubernetes Secret
+   resources to mount. Fixed by extracting an identifier's *last word*
+   (splitting camelCase and `./_/-` separators - `"secretName"` ->
+   `"name"`, `"quarkus.kubernetes.env.secrets"` -> `"secrets"`) and
+   excluding names whose last word is itself a reference/metadata term
+   (name, id, ref, path, alias, arn, uri, url, secrets) - deliberately
+   not excluding "key", since "secretKey" must still match.
+2. `cwe_798.py` missed compile-time-constant secrets split across
+   literals (`"hunter" + "2"`), since `_string_literal_value` only
+   handled a plain `Literal` node. Extended it to recursively fold a
+   `+`-chained `BinaryOperation` when every operand resolves
+   statically; anything involving a variable/call still can't be
+   resolved and correctly returns nothing found (this rule only
+   inspects source text, never evaluates anything). Also added
+   `_initializer_line` to recover a usable line number for the
+   concatenated case, since `BinaryOperation` itself carries no
+   `position` in javalang - falls back to the leftmost literal
+   operand's line rather than losing traceability entirely.
+3. `scanner.py` scanned `src/test/...` by default, so a repo's test
+   fixtures (which routinely contain deliberately fake secrets like
+   `"hunter2"` for test setup) got scanned and flagged as if they were
+   production findings - directly distorting evaluation precision/
+   recall against real repositories. Added `test`/`tests` to the
+   existing `_EXCLUDED_DIR_NAMES` traversal-pruning set (same
+   mechanism already used for `target`/`build`), matched
+   case-insensitively. Known, accepted false-exclusion risk: a
+   production package genuinely named exactly `test`/`tests` would be
+   silently skipped too - judged acceptable given how consistently
+   Maven/Gradle both use this convention.
+4. The implemented rules (`cwe_798.py`, `cwe_284.py`) were not run by
+   `main.py` at all - a file with an obvious hardcoded secret parsed
+   as `ok` and the process exited `0`. Wired `main.py` to run every
+   implemented rule against every successfully-parsed file (skipping
+   files that failed to parse - no AST/entries to inspect, and that
+   failure is already surfaced separately) and print a findings table.
+   Changed the exit-code contract: `0` now requires zero findings, not
+   just clean parses - documented as provisional in both the
+   docstring and `--help` text, since with no Layer 3 scoring yet
+   "any finding at all" is the only threshold available.
+
+Also (found and fixed independently while this was in progress, not
+part of the reported review): `_parsing_guards.read_text_within_limit`
+now strips a UTF-8 BOM (reads with `utf-8-sig` instead of `utf-8`) -
+BOM markers are common in real repositories and would otherwise be
+handed to `javalang`/PyYAML as an invalid first token, causing an
+avoidable `PARSE_FAILED`.
+
+New fixtures (`Cwe798AdversarialService.java`,
+`cwe798-reference.properties`) covering both the reference-suffix and
+concatenated-literal cases together. 77 tests total passing (up from
+69), all tooling clean.
+**Why:** Items 1-2 are precision/recall corrections to an existing
+rule, same category as the earlier adversarial-testing fixes - found
+by someone actually trying to break the tool against realistic naming
+conventions rather than only the cases the rule's own author thought
+to test. Item 3 changes what "scanning a repository" means and
+directly affects evaluation methodology, so it's logged distinctly
+from 1-2 (which are just bugfixes). Item 4 was flagged as "owed" in
+the previous CWE-284 log entry's working-style note
+("keep unit-test-first, don't touch CLI wiring yet") - now that two
+rules exist and the reviewer pointed out the practical cost of
+deferring it further (a real secret silently reported as `ok`), it was
+the right time to close that gap rather than let it compound with a
+third rule.
+**Effect on thesis chapters:** Chapter 4 should note the test-root
+exclusion as a scan-scope decision with its false-exclusion tradeoff
+stated explicitly, not left implicit. Chapter 5's evaluation
+methodology should state plainly that default scans exclude test
+source, and that the CLI's exit code is a provisional "any finding"
+threshold pending Layer 3 scoring, not yet a graded pass/fail
+judgment.

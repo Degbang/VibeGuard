@@ -30,9 +30,39 @@ def test_main_returns_nonzero_when_nothing_found(
     assert "No .java or config files found" in capsys.readouterr().err
 
 
-def test_main_handles_config_only_directory() -> None:
-    exit_code = main.main([str(FIXTURES_DIR / "application.properties")])
+def test_main_returns_zero_for_config_only_file_with_no_findings(tmp_path: Path) -> None:
+    config_file = tmp_path / "application.properties"
+    config_file.write_text("quarkus.http.port=8080\n")
+
+    exit_code = main.main([str(config_file)])
+
     assert exit_code == 0
+
+
+def test_main_returns_nonzero_and_reports_findings_for_config_secret(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_file = tmp_path / "application.properties"
+    config_file.write_text("password=hunter2\n")
+
+    exit_code = main.main([str(config_file)])
+
+    assert exit_code == 1
+    output = capsys.readouterr().out
+    assert "CWE-798" in output
+    assert "password" in output
+
+
+def test_main_returns_nonzero_and_reports_findings_for_java_secret(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    exit_code = main.main([str(FIXTURES_DIR / "HardcodedSecretService.java")])
+
+    assert exit_code == 1
+    output = capsys.readouterr().out
+    assert "CWE-798" in output
+    assert "apiKey" in output
 
 
 def test_main_returns_nonzero_when_config_file_fails_to_parse() -> None:
