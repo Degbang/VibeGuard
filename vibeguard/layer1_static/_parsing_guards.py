@@ -57,6 +57,10 @@ class ParsingGuardError(Exception):
 def read_text_within_limit(path: Path, max_bytes: int) -> str:
     """Return ``path``'s UTF-8 text, enforcing a hard size limit first.
 
+    UTF-8 BOM markers are stripped if present; they are common in
+    real repositories and would otherwise be handed to Java parsers as
+    an invalid first token.
+
     Args:
         path: File to read.
         max_bytes: Reject files larger than this without reading them.
@@ -75,7 +79,7 @@ def read_text_within_limit(path: Path, max_bytes: int) -> str:
     if size > max_bytes:
         raise ParsingGuardError(f"{size} bytes exceeds max_bytes={max_bytes}", too_large=True)
     try:
-        return path.read_text(encoding="utf-8", errors="strict")
+        return path.read_text(encoding="utf-8-sig", errors="strict")
     except (OSError, UnicodeDecodeError) as exc:
         raise ParsingGuardError(str(exc)) from exc
 

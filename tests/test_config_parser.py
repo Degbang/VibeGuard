@@ -75,6 +75,16 @@ def test_missing_file_does_not_raise(tmp_path: Path) -> None:
     assert result.error_message
 
 
+def test_parse_utf8_bom_properties_file_succeeds(tmp_path: Path) -> None:
+    props_file = tmp_path / "application.properties"
+    props_file.write_bytes(b"\xef\xbb\xbfquarkus.http.port=8080\n")
+
+    result = parse_config_file(props_file)
+
+    assert result.status == ParseStatus.OK
+    assert result.entries[0].key == "quarkus.http.port"
+
+
 def test_file_too_large_is_rejected(tmp_path: Path) -> None:
     big_file = tmp_path / "big.properties"
     big_file.write_text("key=value\n" * 100)

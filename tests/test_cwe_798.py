@@ -67,6 +67,7 @@ def test_redacted_value_never_contains_the_real_secret() -> None:
     findings_by_identifier = {f.identifier: f for f in detect_in_java(result)}
 
     api_key_finding = findings_by_identifier["apiKey"]
+    assert api_key_finding.redacted_value is not None
     assert "sk-live-abc123def456" not in api_key_finding.redacted_value
     assert api_key_finding.redacted_value.startswith("s")
     assert api_key_finding.redacted_value.endswith("6")
@@ -83,6 +84,7 @@ def test_detect_in_config_finds_hardcoded_password_in_properties() -> None:
     assert finding.cwe_id == CWE_ID
     assert finding.identifier == "quarkus.datasource.password"
     assert finding.line == 4
+    assert finding.redacted_value is not None
     assert "hunter2" not in finding.redacted_value
 
 
@@ -148,3 +150,30 @@ def test_detect_in_java_does_not_flag_spel_expression(tmp_path: Path) -> None:
     result = parse_file(java_file)
 
     assert detect_in_java(result) == ()
+
+
+def test_detect_in_java_finds_concatenated_string_literal_secret() -> None:
+    """A split compile-time literal is still a hardcoded credential."""
+    result = parse_file(FIXTURES_DIR / "Cwe798AdversarialService.java")
+
+    findings_by_identifier = {f.identifier: f for f in detect_in_java(result)}
+
+    assert set(findings_by_identifier) == {"password"}
+    assert findings_by_identifier["password"].line == 10
+
+
+def test_detect_in_java_does_not_flag_secret_reference_names() -> None:
+    """secretName/credentialRef name references, not the secret values."""
+    result = parse_file(FIXTURES_DIR / "Cwe798AdversarialService.java")
+
+    identifiers = {f.identifier for f in detect_in_java(result)}
+
+    assert "secretName" not in identifiers
+    assert "credentialRef" not in identifiers
+
+
+def test_detect_in_config_does_not_flag_secret_reference_keys() -> None:
+    """Secret resource names/refs are metadata, not embedded credentials."""
+    result = parse_config_file(FIXTURES_DIR / "cwe798-reference.properties")
+
+    assert detect_in_config(result) == ()

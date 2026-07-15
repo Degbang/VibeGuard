@@ -91,6 +91,23 @@ def test_scan_does_not_double_count_gradle_build_output(tmp_path: Path) -> None:
     assert result.config_files[0].path == src_resources / "application.yml"
 
 
+def test_scan_skips_test_source_roots(tmp_path: Path) -> None:
+    """Test fixtures should not be counted as production findings."""
+    main_sources = tmp_path / "src" / "main" / "java"
+    main_sources.mkdir(parents=True)
+    (main_sources / "RealService.java").write_text("public class RealService {}\n")
+
+    test_sources = tmp_path / "src" / "test" / "java"
+    test_sources.mkdir(parents=True)
+    (test_sources / "FakeSecretTest.java").write_text(
+        'public class FakeSecretTest { String password = "hunter2"; }\n'
+    )
+
+    result = scan_directory(tmp_path)
+
+    assert [parsed.path.name for parsed in result.java_files] == ["RealService.java"]
+
+
 def test_scan_raises_on_non_directory(tmp_path: Path) -> None:
     not_a_dir = tmp_path / "file.txt"
     not_a_dir.write_text("hi")

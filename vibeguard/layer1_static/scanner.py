@@ -42,12 +42,14 @@ logger = logging.getLogger(__name__)
 _JAVA_SUFFIX = ".java"
 _RELEVANT_SUFFIXES = CONFIG_FILE_SUFFIXES | {_JAVA_SUFFIX}
 
-# Build output, dependency caches, and IDE metadata: never source, and
-# for a compiled/packaged repo these directories contain *copies* of
-# real source files (e.g. Maven copies src/main/resources/*.properties
-# into target/classes/) that would otherwise be scanned as if they
-# were additional, distinct findings - double-counting the same
-# vulnerability and skewing any evaluation run against real repos.
+# Build output, dependency caches, IDE metadata, and test source roots:
+# never *production* source. Build output contains verbatim *copies*
+# of real source files (e.g. Maven copies src/main/resources/*.properties
+# into target/classes/) that would double-count the same finding; test
+# roots routinely contain intentionally fake secrets that would inflate
+# finding counts and distort evaluation precision/recall. Matched
+# case-insensitively - see _discover_candidate_files' docstring for the
+# test-root false-exclusion tradeoff.
 _EXCLUDED_DIR_NAMES = frozenset(
     {
         ".git",
@@ -61,6 +63,8 @@ _EXCLUDED_DIR_NAMES = frozenset(
         ".idea",  # IDE metadata
         ".vscode",  # IDE metadata
         ".settings",  # Eclipse project metadata
+        "test",  # Maven/Gradle test source root (src/test/...)
+        "tests",  # less common but seen in the wild
     }
 )
 
@@ -154,16 +158,25 @@ def _discover_candidate_files(resolved_root: Path) -> list[Path]:
     here; that's what ``_containment_rejection`` guards against, as
     defense in depth.
 
-    Directories in ``_EXCLUDED_DIR_NAMES`` (``.git``, build output like
-    ``target``/``build``, IDE metadata) are skipped - not just for
-    speed, but for correctness: a compiled repo's build output often
-    contains verbatim *copies* of source config files (Maven copies
-    ``src/main/resources/*.properties`` into ``target/classes/``),
-    which would otherwise be scanned as separate, duplicate findings.
+    Directories in ``_EXCLUDED_DIR_NAMES`` are skipped (case-insensitively),
+    for two distinct reasons: build output/IDE metadata (``.git``,
+    ``target``/``build``) is skipped for correctness, since a compiled
+    repo's build output often contains verbatim *copies* of source
+    config files (Maven copies ``src/main/resources/*.properties`` into
+    ``target/classes/``) that would otherwise be scanned as separate,
+    duplicate findings; test source roots (``src/test/...``, matched by
+    the conventional directory name ``test``/``tests``) are skipped
+    because test fixtures routinely contain intentionally fake secrets
+    (e.g. `"hunter2"` in a test setup), which would otherwise inflate
+    finding counts and distort evaluation precision/recall against real
+    repositories. The tradeoff: a production package genuinely named
+    exactly ``test``/``tests`` (an unusual but not impossible choice)
+    would be silently excluded too - judged an acceptable false-exclusion
+    risk given how consistently Maven/Gradle both use this convention.
     """
     matches: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(resolved_root, followlinks=False):
-        dirnames[:] = [d for d in dirnames if d not in _EXCLUDED_DIR_NAMES]
+        dirnames[:] = [d for d in dirnames if d.lower() not in _EXCLUDED_DIR_NAMES]
         for filename in filenames:
             candidate = Path(dirpath) / filename
             if candidate.suffix.lower() in _RELEVANT_SUFFIXES:
