@@ -241,11 +241,11 @@ def _print_findings_report(findings: tuple[Finding, ...]) -> None:
     """
     console = Console()
     table = Table(title="VibeGuard Layer 1 - Findings (CWE candidates, not yet scored)")
-    table.add_column("File")
+    table.add_column("File", overflow="fold")
     table.add_column("CWE")
     table.add_column("Line")
-    table.add_column("Identifier")
-    table.add_column("Detail")
+    table.add_column("Identifier", overflow="fold")
+    table.add_column("Detail", overflow="fold")
 
     for finding in findings:
         table.add_row(
