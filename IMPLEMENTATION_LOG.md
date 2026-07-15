@@ -802,3 +802,83 @@ selection and Java-version inclusion criteria. Chapter 4 must describe
 parser support and any backend migration. Chapter 5 must report parse
 success/failure rates by Java version so vulnerability results are not
 interpreted without parser-coverage context.
+
+---
+
+## [2026-07-15] - Third CWE rule (`cwe_287.py`); deferred the parser spike; extracted shared credential-name heuristic
+**What the plan said:** CLAUDE.md Section 7 build order item 3:
+remaining CWE rule modules, after `cwe_798.py`/`cwe_284.py`. The Java
+17+ parser-risk entry immediately above recommended a
+parser-compatibility spike as the next step.
+**What we actually did / found:** Explicitly asked whether to pivot to
+the parser spike or continue the rule build order; chose to finish the
+CWE rules first and revisit the parser decision once all five exist
+and Layer 1 is feature-complete, rather than mid-course-correct on a
+partial rule set.
+
+Implemented `cwe_287.py` (Improper Authentication): flags Java's
+classic authentication-bypass bug, comparing a credential-shaped value
+with `==`/`!=` instead of `.equals()` - `==` on `String`/object types
+compares reference identity, not value, so the check does not reliably
+verify the claimed credential is correct. Walks `ParsedFile.tree` via
+`.filter(BinaryOperation)` (same raw-tree approach as `cwe_284.py`,
+for the same reason: Layer 1's flattened summary doesn't capture
+expressions at all). Excludes `null`/numeric/boolean literal
+comparisons specifically to avoid flagging ordinary null-checks and
+coincidental keyword matches like `passwordAttempts == 3`.
+
+Found and fixed one real bug via self-directed adversarial testing
+before calling it done (not from external review this time): the
+initial implementation only recognized a bare `MemberReference`
+(`password`) as a credential-shaped operand, missing `this.password`
+entirely - javalang represents a `this`-qualified field access as a
+`This` node with the field access nested in `.selectors`, not as a
+`MemberReference` with a "this" qualifier. `this.field` is a very
+common way to disambiguate a field from a same-named parameter (e.g.
+in a constructor), so this was a real, meaningful false negative, not
+an edge case. Fixed by also checking a `This` node's selectors;
+fixing it exposed a second related bug in the "which side is the
+*other* operand" logic (it compared node identity against the
+top-level operand, which breaks once the credential match comes from
+inside a nested selector rather than the operand itself) - restructured
+to track which side matched directly instead of via identity
+comparison.
+
+Also extracted `CREDENTIAL_KEYWORDS`/`is_credential_name`/`last_word`
+out of `cwe_798.py` into a new shared
+`vibeguard/layer1_static/rules/_credential_names.py`, since `cwe_287.py`
+needed the identical "does this identifier look like it holds a
+credential" question - same duplication-avoidance pattern already
+applied twice this project (`Finding`, `_parsing_guards`). `cwe_798.py`
+keeps its own reference-suffix exclusion layered on top of the shared
+base check, since that narrowing (distinguishing "secretName" from
+"secret") is specific to its own concern.
+
+Before writing any of this, re-verified a QA prompt's claim from the
+previous session that this project uses `tree-sitter` (still false -
+`javalang` remains the locked parser per `CLAUDE.md`/every prior log
+entry) was not silently re-introduced by the parser-risk entry above;
+the parser-risk entry itself correctly describes `javalang` as the
+current backend and frames migration as a future decision, not a
+completed one.
+
+10 new tests (91 total, was 81), all tooling clean. Verified live
+through `main.py`'s CLI, not just unit tests, before logging this.
+**Why:** The `this.field` bug is the third time in this project that
+an initial implementation correctly handled the "obvious" case but
+missed a syntactically-different-but-semantically-identical form
+(fully-qualified annotations for `cwe_284.py`, `this`-qualified field
+access for `cwe_287.py`) - a pattern worth naming explicitly: javalang
+frequently represents the "same" Java construct differently depending
+on how it's written, and every rule module needs to be tested against
+that variation, not just its most common textual form.
+**Effect on thesis chapters:** Chapter 4 should describe
+`_credential_names.py` as the second shared cross-rule utility module
+(after `_finding.py`) and note the general pattern it and
+`_parsing_guards.py` both follow: extract on the second real need, not
+speculatively on the first. Chapter 5's CWE-287 evaluation should
+state its scope precisely: detects the `==`/`!=` reference-equality
+anti-pattern specifically, not authentication bypass via other means
+(missing checks entirely, trusting unverified client data, weak
+credential storage) - those would need separate detection logic this
+rule does not attempt.

@@ -22,41 +22,19 @@ import javalang
 
 from vibeguard.layer1_static.ast_parser import ParsedFile
 from vibeguard.layer1_static.config_parser import ParsedConfigFile
+from vibeguard.layer1_static.rules._credential_names import is_credential_name, last_word
 from vibeguard.layer1_static.rules._finding import Finding
 
 CWE_ID = "CWE-798"
 
-# Case-insensitive substring match against field/variable/config-key
-# names. Deliberately permissive (e.g. "passwordHash" also matches):
-# Layer 1's job is to surface candidates, not make the final severity
-# call - see the module docstring on Finding for where that narrowing
-# happens. Known false-positive source: a hashed value (e.g. a bcrypt
-# string) stored in a *Hash-suffixed field would still match if it's a
-# literal - not attempted to be distinguished here.
-_CREDENTIAL_KEYWORDS = (
-    "password",
-    "passwd",
-    "pwd",
-    "secret",
-    "apikey",
-    "api_key",
-    "accesskey",
-    "access_key",
-    "authtoken",
-    "auth_token",
-    "token",
-    "privatekey",
-    "private_key",
-    "clientsecret",
-    "client_secret",
-    "credential",
-    "secretkey",
-    "secret_key",
-    "encryptionkey",
-    "encryption_key",
-)
+# Known false-positive source in is_credential_name's keyword match
+# (e.g. "passwordHash" matches too): Layer 1's job is to surface
+# candidates, not make the final severity call - see the module
+# docstring on Finding for where that narrowing happens. A hashed value
+# (e.g. a bcrypt string) stored in a *Hash-suffixed field is not
+# attempted to be distinguished from a real secret here.
 
-# A name whose *last word* (see _last_word) is one of these describes a
+# A name whose *last word* (see last_word) is one of these describes a
 # reference to a secret - where to find it, what to call it - rather
 # than the secret material itself. "secretName" holds the name of a
 # secret to look up, not a value; "quarkus.kubernetes.env.secrets"
@@ -213,26 +191,9 @@ def _is_credential_name(name: str) -> bool:
     """Case-insensitive substring match against known credential keywords,
     excluding names that are a *reference* to a secret rather than the
     secret material itself - see ``_REFERENCE_SUFFIXES``."""
-    lowered = name.lower()
-    if not any(keyword in lowered for keyword in _CREDENTIAL_KEYWORDS):
+    if not is_credential_name(name):
         return False
-    return _last_word(name) not in _REFERENCE_SUFFIXES
-
-
-_WORD_PATTERN = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z0-9]+")
-
-
-def _last_word(identifier: str) -> str:
-    """Extract an identifier's final word, splitting camelCase and ./_/- separators.
-
-    "secretName" -> "name", "quarkus.kubernetes.env.secrets" -> "secrets",
-    "APIKey" -> "key". Used to check *what kind of thing* the name's
-    last component describes, without being fooled by where a
-    credential keyword happens to sit earlier in the identifier.
-    """
-    normalized = re.sub(r"[._-]", " ", identifier)
-    words = _WORD_PATTERN.findall(normalized)
-    return words[-1].lower() if words else identifier.lower()
+    return last_word(name) not in _REFERENCE_SUFFIXES
 
 
 def _is_safe_value(value: str) -> bool:
