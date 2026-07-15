@@ -54,9 +54,11 @@ def test_parse_clean_file_methods() -> None:
     assert find_by_name.return_type == "Optional"
     assert [p.name for p in find_by_name.parameters] == ["query", "candidates"]
     assert [p.type_name for p in find_by_name.parameters] == ["String", "List"]
+    assert find_by_name.annotations == ()
 
     run_method = methods_by_name["run"]
     assert run_method.return_type == "void"
+    assert run_method.annotations == ("Override",)
 
 
 def test_parse_malformed_file_reports_failure_not_exception() -> None:
