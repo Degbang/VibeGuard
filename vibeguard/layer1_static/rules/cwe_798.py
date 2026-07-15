@@ -72,9 +72,18 @@ _PLACEHOLDER_MARKERS = (
     ">",
 )
 
-# Spring/Quarkus-style property substitution, e.g. "${DB_PASSWORD}" -
-# this means the value is externalized to config/env, not hardcoded.
-_PROPERTY_REFERENCE_PATTERN = re.compile(r"^\$\{.*\}$")
+# Externalized-value syntax: Spring/Quarkus property substitution
+# ("${DB_PASSWORD}") or Spring Expression Language ("#{systemProperties[
+# 'secret']}"). Either means the value comes from config/env/a bean at
+# runtime, not a literal in source - not hardcoded, despite being a
+# string literal from javalang's point of view.
+_PROPERTY_REFERENCE_PATTERN = re.compile(r"^[$#]\{.*\}$")
+
+# Exact-match (not substring) values that are never a real secret
+# regardless of the field/key name - "null" is a common accidental or
+# deliberate non-value that a substring/placeholder check wouldn't
+# catch (it isn't a "changeme"-style placeholder marker either).
+_LITERAL_NON_VALUES = frozenset({"null"})
 
 
 def detect_in_java(parsed_file: ParsedFile) -> tuple[Finding, ...]:
@@ -159,14 +168,17 @@ def _is_credential_name(name: str) -> bool:
 
 
 def _is_safe_value(value: str) -> bool:
-    """A value that isn't actually a hardcoded secret: empty, a property
-    reference, or an obvious placeholder."""
+    """A value that isn't actually a hardcoded secret: empty, a property/
+    SpEL reference, a literal non-value like "null", or an obvious
+    placeholder."""
     stripped = value.strip()
     if not stripped:
         return True
     if _PROPERTY_REFERENCE_PATTERN.match(stripped):
         return True
     lowered = stripped.lower()
+    if lowered in _LITERAL_NON_VALUES:
+        return True
     return any(marker in lowered for marker in _PLACEHOLDER_MARKERS)
 
 

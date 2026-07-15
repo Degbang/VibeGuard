@@ -69,3 +69,48 @@ def test_detect_in_java_handles_missing_tree_gracefully() -> None:
 
     assert malformed.tree is None
     assert detect_in_java(malformed) == ()
+
+
+def test_detect_in_java_recognizes_fully_qualified_endpoint_annotation(
+    tmp_path: Path,
+) -> None:
+    """@javax.ws.rs.GET must be recognized the same as @GET.
+
+    javalang gives an annotation's name exactly as written - fully
+    qualified if the source used the fully-qualified form rather than
+    a simple-name import. Matching only the exact string "GET" would
+    silently miss this endpoint entirely (a false negative, the
+    dangerous direction for a security tool).
+    """
+    java_file = tmp_path / "Foo.java"
+    java_file.write_text("public class Foo {\n    @javax.ws.rs.GET\n    public void x() {}\n}\n")
+
+    result = parse_file(java_file)
+
+    findings = detect_in_java(result)
+    assert len(findings) == 1
+    assert findings[0].identifier == "x"
+
+
+def test_detect_in_java_recognizes_fully_qualified_authorization_annotation(
+    tmp_path: Path,
+) -> None:
+    """A fully-qualified @RolesAllowed must not be treated as absent.
+
+    Same root cause as the endpoint-side case above, opposite failure
+    mode: matching only the exact string "RolesAllowed" would flag a
+    genuinely protected endpoint as unprotected (a false positive that
+    actively misleads a report's reader).
+    """
+    java_file = tmp_path / "Foo.java"
+    java_file.write_text(
+        "public class Foo {\n"
+        '    @javax.annotation.security.RolesAllowed("ADMIN")\n'
+        "    @GET\n"
+        "    public void x() {}\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    assert detect_in_java(result) == ()

@@ -121,3 +121,30 @@ def test_detect_in_config_finds_nothing_when_no_credential_keys_present(tmp_path
     result = parse_config_file(props_file)
 
     assert detect_in_config(result) == ()
+
+
+def test_detect_in_java_does_not_flag_literal_null_string(tmp_path: Path) -> None:
+    """The literal string "null" is not a real secret regardless of the field name."""
+    java_file = tmp_path / "Foo.java"
+    java_file.write_text('public class Foo { String password = "null"; }')
+
+    result = parse_file(java_file)
+
+    assert detect_in_java(result) == ()
+
+
+def test_detect_in_java_does_not_flag_spel_expression(tmp_path: Path) -> None:
+    """SpEL references mean the value is resolved at runtime, not hardcoded.
+
+    Like ${...} property references, #{...} SpEL expressions resolve
+    from a bean or system property at runtime rather than being a
+    literal secret in source.
+    """
+    java_file = tmp_path / "Foo.java"
+    java_file.write_text(
+        "public class Foo { String password = \"#{systemProperties['secret']}\"; }"
+    )
+
+    result = parse_file(java_file)
+
+    assert detect_in_java(result) == ()

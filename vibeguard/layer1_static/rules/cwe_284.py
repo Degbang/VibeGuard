@@ -111,8 +111,20 @@ def _check_method(
 
 
 def _has_endpoint_annotation(annotations: tuple[str, ...]) -> bool:
-    return any(annotation in _ENDPOINT_ANNOTATIONS for annotation in annotations)
+    return any(_simple_name(a) in _ENDPOINT_ANNOTATIONS for a in annotations)
 
 
 def _has_authorization_annotation(annotations: tuple[str, ...]) -> bool:
-    return any(annotation in _AUTHORIZATION_ANNOTATIONS for annotation in annotations)
+    return any(_simple_name(a) in _AUTHORIZATION_ANNOTATIONS for a in annotations)
+
+
+def _simple_name(annotation: str) -> str:
+    """Strip any package qualification, e.g. "javax.ws.rs.GET" -> "GET".
+
+    javalang gives an annotation's name exactly as written in source:
+    "GET" for `@GET`, but "javax.ws.rs.GET" for
+    `@javax.ws.rs.GET` - matching against the full string would miss
+    (or wrongly flag) any endpoint/authorization annotation using its
+    fully-qualified form instead of a simple-name import.
+    """
+    return annotation.rsplit(".", 1)[-1]

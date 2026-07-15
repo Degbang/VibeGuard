@@ -543,3 +543,60 @@ shape. Chapter 5's CWE-284 evaluation should state the scope
 explicitly: detects missing access control, not misconfigured access
 control, and does not evaluate whether a given role/policy is
 semantically appropriate for an endpoint.
+
+---
+
+## [2026-07-14] - Adversarial pass over cwe_798.py/cwe_284.py found 4 real bugs
+**What the plan said:** N/A - a deliberate "try to break what we just
+built" pass, same discipline already applied to the parsers (symlink
+escape, YAML alias bomb), not previously applied to the rule modules.
+**What we actually did / found:** Constructed inputs specifically
+designed to break each rule's matching logic rather than waiting for
+review to find them:
+- `cwe_284.py`'s `_ENDPOINT_ANNOTATIONS`/`_AUTHORIZATION_ANNOTATIONS`
+  matched `annotation.name` by exact string, but javalang gives that
+  name exactly as written in source - fully qualified
+  (`javax.ws.rs.GET`) if the source used the fully-qualified form
+  instead of a simple-name import. This broke detection in *both*
+  directions from one root cause: a fully-qualified `@javax.ws.rs.GET`
+  wasn't recognized as an endpoint at all (false negative - a real
+  unprotected endpoint invisible to the rule), and a fully-qualified
+  `@javax.annotation.security.RolesAllowed` wasn't recognized as an
+  authorization annotation (false positive - a genuinely protected
+  endpoint flagged as unprotected). Verified both directions
+  concretely before fixing. Fixed by comparing against the last
+  dot-separated segment (`_simple_name()`) instead of the full string.
+- `cwe_798.py` flagged the literal string `"null"` assigned to a
+  credential-named field as a hardcoded secret. Added an exact-match
+  (not substring) `_LITERAL_NON_VALUES` check.
+- `cwe_798.py`'s property-reference exclusion only matched
+  Spring/Quarkus `${...}` syntax, not Spring Expression Language
+  `#{...}` syntax - an equally common way to externalize a value in
+  Spring apps, wrongly flagged as hardcoded. Extended
+  `_PROPERTY_REFERENCE_PATTERN` to match either prefix.
+
+Also checked (and confirmed correct, not bugs): duplicate YAML keys
+are preserved as separate `ConfigEntry` values rather than silently
+overwritten by the last one - safer for security scanning, matches
+the project's fail-closed philosophy. A broken symlink inside a scan
+root correctly resolves as still-in-root (passes containment) and
+then fails with an explicit `PARSE_FAILED` rather than crashing or
+being silently dropped.
+
+4 new regression tests, 69 total passing, all tooling clean.
+**Why:** All four were found by deliberately trying to break the
+matching logic with realistic inputs (fully-qualified annotations,
+SpEL expressions, and the literal word "null" are all things a real
+Java/Spring codebase produces routinely), not by waiting for someone
+else to report them - the same standard already applied to the
+parsers earlier in this project. The `cwe_284.py` bug in particular
+was the most serious found so far in a rule module: it undermined the
+rule's core trustworthiness in both directions simultaneously, on a
+CWE (Improper Access Control) where a false negative is the worse of
+the two failure modes.
+**Effect on thesis chapters:** Chapter 5 should describe this
+adversarial-testing pass as part of the evaluation methodology for the
+rule modules specifically (not just the parsers), and can cite the
+fully-qualified-annotation bug as a concrete example of why static
+pattern-matching rules need testing against realistic naming variation,
+not just the "canonical" form of an annotation/expression.
