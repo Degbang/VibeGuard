@@ -22,13 +22,13 @@ from javalang.tree import (
     MethodDeclaration,
 )
 
+from vibeguard.layer1_static._modern_java_preprocessor import preprocess
 from vibeguard.layer1_static._parsing_guards import (
     ParseStatus,
     ParsingGuardError,
     read_text_within_limit,
     run_with_timeout,
 )
-from vibeguard.layer1_static._record_preprocessor import desugar_simple_records
 
 logger = logging.getLogger(__name__)
 
@@ -166,14 +166,15 @@ def _guard_failure(path: Path, exc: ParsingGuardError) -> ParsedFile:
 def _parse_source(path: Path, source: str, timeout_seconds: float) -> ParsedFile:
     """Run javalang over ``source`` and convert the outcome into a ParsedFile.
 
-    ``source`` is desugared (simple ``record`` declarations rewritten
-    to classes; see ``_record_preprocessor.py``) before being handed to
-    javalang, which cannot parse records at all. This never changes
-    the file's total newline count, so reported line numbers stay
-    correct for everything in the file outside a rewritten record's
-    own declaration.
+    ``source`` is desugared (text blocks, sealed-class modifiers,
+    pattern-matching ``instanceof`` bindings, and simple ``record``
+    declarations rewritten into javalang-parseable equivalents - see
+    ``_modern_java_preprocessor.py`` for exactly what's covered and
+    why) before being handed to javalang. Every rewrite preserves the
+    file's total newline count, so reported line numbers stay correct
+    for everything outside a rewritten construct's own declaration.
     """
-    parseable_source = desugar_simple_records(source)
+    parseable_source = preprocess(source)
     try:
         tree = run_with_timeout(
             javalang.parse.parse, parseable_source, timeout_seconds=timeout_seconds

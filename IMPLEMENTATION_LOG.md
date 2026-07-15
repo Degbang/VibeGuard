@@ -1043,3 +1043,121 @@ conflated with or presented as equivalent to a comprehensive CVE
 database's coverage. With all five CWE rules now complete, this is
 also the natural point to revisit the deferred Java 17+ parser-
 compatibility spike, as previously agreed.
+
+## [2026-07-15] - Java 17-21 parser coverage extended via text preprocessing, not a parser migration
+
+**What the plan said:** The Java 17+ parser-compatibility gap (`javalang`
+0.13.0 predates Java 16 and cannot parse records-with-bodies, sealed
+classes/interfaces, pattern-matching `instanceof`, text blocks, or
+switch expressions/pattern-matching `switch`) had been repeatedly
+logged as a deferred risk across earlier entries, to be revisited once
+all five CWE rules existed.
+
+**What we actually did / found:** Empirically re-tested javalang's
+actual Java 8-21 support surface directly (both raw
+`javalang.parse.parse()` and the real `ast_parser.parse_file()` entry
+point) rather than relying on the earlier entries' characterization.
+Confirmed already-working: `var`, lambdas, method references,
+try-with-resources, and simple (empty-bodied) records (the existing
+`desugar_simple_records` shim). Confirmed still-failing: sealed
+classes/interfaces, pattern-matching `instanceof`, text blocks, and
+switch expressions/pattern-matching `switch`.
+
+Extended the existing text-preprocessing technique (already proven for
+records) to three of the four remaining gaps, renaming
+`_record_preprocessor.py` to `_modern_java_preprocessor.py` (`git mv`,
+all references and its test file updated) and adding a single
+`preprocess()` entry point that `ast_parser._parse_source` now calls
+instead of calling record desugaring directly:
+
+- **Sealed classes/interfaces**: `sealed`/`non-sealed` modifiers and
+  the trailing `permits ...` clause are stripped from a type's header,
+  leaving an ordinary class/interface declaration. Only the header is
+  touched; the `permits` list isn't needed by any current CWE rule.
+- **Pattern-matching `instanceof`** (`o instanceof String s`): the
+  bound variable name is stripped, leaving a plain `instanceof` check.
+  Safe because javalang has no semantic/symbol resolution - it never
+  checks whether a later reference to the now-unbound name was
+  actually declared - and no current CWE rule needs the binding
+  itself.
+- **Text blocks** (`"""..."""`): re-emitted as an equivalent escaped
+  string literal, implementing JEP 378's indentation-stripping
+  algorithm directly (minimum common leading whitespace across content
+  lines, trailing whitespace stripped per line, and - verified against
+  real `javac` semantics, not assumed - a closing delimiter on its own
+  line contributes a trailing `\n` to the value).
+
+**Deliberately not extended:** switch expressions and pattern-matching
+`switch` (arrow-style `case X -> ...`). Converting an arrow-style case
+body (which can be a single expression, a block, or a `throw`) back to
+colon-style `case X: yield ...; break;` needs real structural
+understanding of the body, not a text substitution - getting it wrong
+risks silently corrupting the AST rather than producing a clean
+`PARSE_FAILED`, which is a materially worse failure mode for a
+security tool. Left as an explicit, documented gap in
+`_modern_java_preprocessor.py`'s module docstring rather than
+attempted and possibly gotten wrong.
+
+Three real bugs were found and fixed during self-verification, before
+anything was committed:
+1. A naive `.replace('"', '\\"')` approach to escaping text-block
+   content would double-escape a `"` that was already part of a
+   pre-existing `\"` sequence in the source, corrupting the literal's
+   value. Fixed with a character-by-character escape-state-tracking
+   function (`_escape_for_string_literal`) that only escapes a
+   character when the previous one wasn't itself an unescaped
+   backslash.
+2. `strip_sealed_modifiers` and `strip_pattern_matching_bindings`
+   originally used plain `pattern.sub("", source)`, which deletes any
+   newlines embedded in a multi-line match (e.g. a `permits` clause
+   wrapped across lines) without replacing them - silently shifting
+   the reported line number of everything after the match. Verified
+   directly (not assumed) with a multi-line `sealed class ... permits`
+   example: a `password` field two lines later reported line 2
+   instead of the correct line 3. Fixed by adding `_blank_out()`/
+   `_keep_group_one()` helpers that replace a match with only its own
+   newline count, matching the discipline `desugar_simple_records`
+   already had.
+3. The original pattern-matching-`instanceof` regex's lookahead only
+   permitted `)`, `&`, or `|` after the bound variable name, so a
+   binding used in contexts like `return o instanceof List<String>
+   items;` (terminated by `;`, not one of those three characters) was
+   silently left unstripped, and the file would still fail to parse.
+   Found via a dedicated test case, not assumed correct because
+   simpler cases passed. Fixed by broadening the lookahead to the full
+   set of valid Java boundaries after a pattern binding (`)`, `&`,
+   `|`, `;`, `,`, `?`, `:`, `{`, or end of string).
+
+Added 12 new tests to `tests/test_modern_java_preprocessor.py`
+covering all three new transforms individually, the composed
+`preprocess()` pipeline, newline-count preservation for each
+multi-line case, and an end-to-end proof that a hardcoded secret
+embedded inside a Java text block is still detected by
+`cwe_798.detect_in_java()` with the correct identifier - not just that
+the file parses. Full suite: 135 passed (was 123), `black`/`ruff`/
+`mypy` all clean.
+
+**Why:** A full parser migration (e.g. to `tree-sitter-java`) was
+considered and explicitly rejected as disproportionate for this task -
+the student's own framing was "make this clean and direct,
+straightforward," and the existing record-preprocessing technique was
+already proven, low-risk, and directly extensible to the remaining
+constructs that don't require structural understanding to rewrite.
+Switch expressions were the one construct where that same technique
+would require real structural parsing to do safely, so it was scoped
+out rather than forced.
+
+**Effect on thesis chapters:** Chapter 3 (methodology) should describe
+the text-preprocessing/desugaring approach as the deliberate
+alternative to a parser migration, with the same tradeoff framing
+already used for the offline CVE database decision - proportionate
+engineering effort against a stated, bounded gap, not silent avoidance
+of a hard problem. Chapter 4 should list the exact construct coverage
+(records, sealed types, pattern-matching `instanceof`, text blocks)
+and the exact, deliberate exclusion (switch expressions) as part of
+Layer 1's parser scope. Chapter 5's robustness/limitations discussion
+should note that any Java 17-21 sample using switch expressions or
+pattern-matching `switch` will report `PARSE_FAILED`, not a wrong
+result - consistent with the project's fail-closed principle - and
+that this is a known, bounded, and now-documented limitation rather
+than an unbounded one.
