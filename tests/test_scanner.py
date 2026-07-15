@@ -164,3 +164,41 @@ def test_scan_does_not_recurse_into_symlinked_directories(tmp_path: Path) -> Non
 
     assert result.java_files == ()
     assert result.rejected_paths == ()
+
+
+def test_scan_discovers_pom_xml_by_exact_filename(tmp_path: Path) -> None:
+    """pom.xml is matched by exact filename, not by suffix like the other formats."""
+    (tmp_path / "pom.xml").write_text(
+        "<project>\n"
+        "  <dependencies>\n"
+        "    <dependency>\n"
+        "      <groupId>junit</groupId>\n"
+        "      <artifactId>junit</artifactId>\n"
+        "      <version>4.13.2</version>\n"
+        "    </dependency>\n"
+        "  </dependencies>\n"
+        "</project>\n"
+    )
+
+    result = scan_directory(tmp_path)
+
+    assert len(result.pom_files) == 1
+    assert result.pom_files[0].path.name == "pom.xml"
+    assert len(result.pom_files[0].dependencies) == 1
+
+
+def test_scan_ignores_pom_xml_inside_target_directory(tmp_path: Path) -> None:
+    """A copy of pom.xml under target/ must not be double-counted.
+
+    E.g. from a shade/assembly plugin - same reasoning as the Maven/
+    Gradle build-output exclusion for source/config files.
+    """
+    (tmp_path / "pom.xml").write_text("<project><dependencies></dependencies></project>\n")
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    (target_dir / "pom.xml").write_text("<project><dependencies></dependencies></project>\n")
+
+    result = scan_directory(tmp_path)
+
+    assert len(result.pom_files) == 1
+    assert result.pom_files[0].path == tmp_path.resolve() / "pom.xml"
