@@ -947,3 +947,99 @@ should state the Spring-only scope explicitly - a JAX-RS-only
 codebase would show zero CWE-20 findings from this rule regardless of
 actual input-validation posture, which must not be misread as "no
 CWE-20 issues found."
+
+---
+
+## [2026-07-15] - Fifth and final CWE rule (`cwe_1035.py`); new `pom_parser.py`; offline vulnerability database, not a live API
+**What the plan said:** CLAUDE.md Section 7 build order item 3: the
+last of five CWE rule modules. Section 3's non-negotiable constraint:
+"Runs entirely locally... no external API calls for core scanning."
+**What we actually did / found:** CWE-1035 (Using Components with
+Known Vulnerabilities) is architecturally unlike the other four rules:
+nothing in Java *source* looks vulnerable, so it needs a dependency
+manifest (Maven's `pom.xml`) and something to check declared versions
+against. The natural real-world approach - a live query against
+OSV.dev/NVD - was explicitly rejected before writing any code: that
+would put an external network call directly in the core scanning path
+on every run, which is a materially different thing from the one-off,
+manually-triggered `safety` dependency audit this project's own
+tooling gets, and would directly violate the "no external API calls
+for core scanning" constraint. Went with a small, curated, offline
+snapshot of well-known, independently-verifiable CVEs
+(`_KNOWN_VULNERABILITIES` in `cwe_1035.py`: Log4Shell, a
+jackson-databind deserialization RCE, the classic commons-collections
+gadget-chain CVE, a snakeyaml deserialization CVE) instead - the
+explicit tradeoff (this rule is only ever as current as that hardcoded
+list, not a live feed) is stated in the module docstring, not hidden.
+
+Built `vibeguard/layer1_static/pom_parser.py` as a proper Layer 1
+module (matching `ast_parser.py`/`config_parser.py`'s architecture -
+`ParseStatus`, shared `_parsing_guards`, structured dataclass output)
+rather than ad-hoc XML parsing inside the rule itself, for the same
+consistency reasons `config_parser.py` was built as its own module
+instead of parsing config text inline in `cwe_798.py`. Scoped to
+Maven only: Gradle's `build.gradle`/`build.gradle.kts` are executable
+Groovy/Kotlin DSL code, not declarative data, and parsing that
+correctly is a materially harder, different problem than structured
+XML - left for a future pass rather than guessed at with regex.
+Resolves Maven `${property}` references against the local
+`<properties>` block only; a property from an inaccessible parent POM
+resolves to `None` ("unknown"), never a guess, and `cwe_1035.py`
+explicitly never flags a dependency with an unresolved version.
+
+Verified empirically, not assumed, that parsing untrusted `pom.xml`
+files is safe against XML's two classic attacks before writing a
+single line of the rule: a "billion laughs" entity-expansion payload
+is already rejected by CPython's bundled expat parser with a
+`ParseError` (a native protection added in Python 3.7.1+, itself a
+CVE response) rather than hanging or exhausting memory; external
+entity references (XXE, e.g. reading local files via
+`<!ENTITY xxe SYSTEM "file:///etc/passwd">`) are not resolved by
+`ET.fromstring` at all - it raises `undefined entity` instead. No
+extra dependency (`defusedxml`) was needed once this was actually
+tested rather than assumed safe or assumed unsafe.
+
+Found and fixed one real bug via self-directed testing before
+shipping: naive tuple comparison of parsed version numbers treats
+`"2.15"` as *less than* `"2.15.0"` (a shorter tuple that is a prefix
+of a longer one compares as "less" in Python), which would have
+flagged the fixed version of a dependency as still vulnerable purely
+because someone omitted a trailing zero patch segment - a real,
+plausible false positive. Fixed by padding both version tuples to
+equal length with trailing zeros before comparing.
+
+Wired into `scanner.py` (`pom.xml` is matched by exact filename, not
+suffix like every other format - a new discovery mechanism, added
+`ScanResult.pom_files`) and `main.py` (`_run_rules`, a new
+`_print_pom_report`, `--help` text, single-file mode). Verified live
+end-to-end: a directory containing both a hardcoded-secret Java file
+and a Log4Shell-vulnerable `pom.xml` correctly produced findings from
+`cwe_798.py` and `cwe_1035.py` together in one scan.
+
+28 new tests (123 total, was 102), all tooling clean, `safety` 0
+vulnerabilities. All five CWE rule modules from CLAUDE.md's target
+list now exist.
+**Why:** The offline-database decision is the single most consequential
+architectural choice in this entry: it trades comprehensiveness for
+compliance with a non-negotiable constraint stated on day one of this
+project, and that tradeoff needs to be visible to anyone reading this
+rule's output, not just to whoever wrote it. The XXE/entity-expansion
+verification follows the same standard already applied to the YAML
+parser (verify the specific untrusted-input attack classes relevant to
+the format being parsed, don't assume a stdlib parser is safe by
+default) - it happened to already be safe here, which is itself worth
+recording rather than silently taking for granted.
+**Effect on thesis chapters:** Chapter 3 (methodology) should describe
+the offline-vs-live vulnerability database decision explicitly as a
+consequence of the "runs entirely locally" constraint, not as an
+oversight or a resource limitation - this was a deliberate, principled
+choice with a stated cost. Chapter 4 should list `pom_parser.py`
+alongside `ast_parser.py`/`config_parser.py` as Layer 1's third input
+parser and note the Gradle-not-yet-supported scope explicitly. Chapter
+5 should report `_KNOWN_VULNERABILITIES`'s exact size and contents as
+part of describing CWE-1035's evaluation methodology, since the rule's
+recall is fundamentally bounded by that list's size - this must not be
+conflated with or presented as equivalent to a comprehensive CVE
+database's coverage. With all five CWE rules now complete, this is
+also the natural point to revisit the deferred Java 17+ parser-
+compatibility spike, as previously agreed.

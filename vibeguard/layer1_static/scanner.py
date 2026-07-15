@@ -1,11 +1,12 @@
-"""Layer 1 scanner: orchestrates ast_parser/config_parser across a directory tree.
+"""Layer 1 scanner: orchestrates ast_parser/config_parser/pom_parser across a directory tree.
 
 Never executes or evaluates any content from a target file: Java source
-is only ever parsed into an AST via ``javalang``, and config files are
-only ever parsed into key-value pairs via a hand-rolled reader
-(``.properties``) or PyYAML's ``SafeLoader`` (``.yml``/``.yaml``) -
-neither path constructs or runs arbitrary code from the file being
-analysed.
+is only ever parsed into an AST via ``javalang``, config files are only
+ever parsed into key-value pairs via a hand-rolled reader
+(``.properties``) or PyYAML's ``SafeLoader`` (``.yml``/``.yaml``), and
+``pom.xml`` is only ever parsed into an element tree via the stdlib
+``xml.etree.ElementTree`` - none of these paths construct or run
+arbitrary code from the file being analysed.
 
 This module's one added responsibility beyond the individual parsers is
 directory-tree orchestration with path-traversal containment: every file
@@ -36,10 +37,12 @@ from vibeguard.layer1_static.config_parser import (
     ParsedConfigFile,
     parse_config_file,
 )
+from vibeguard.layer1_static.pom_parser import ParsedPomFile, parse_pom_file
 
 logger = logging.getLogger(__name__)
 
 _JAVA_SUFFIX = ".java"
+_POM_FILENAME = "pom.xml"
 _RELEVANT_SUFFIXES = CONFIG_FILE_SUFFIXES | {_JAVA_SUFFIX}
 
 # Build output, dependency caches, IDE metadata, and test source roots:
@@ -84,6 +87,7 @@ class ScanResult:
     root: Path
     java_files: tuple[ParsedFile, ...]
     config_files: tuple[ParsedConfigFile, ...]
+    pom_files: tuple[ParsedPomFile, ...]
     rejected_paths: tuple[RejectedPath, ...]
 
 
@@ -93,7 +97,8 @@ def scan_directory(
     max_bytes: int = DEFAULT_MAX_FILE_BYTES,
     timeout_seconds: float = DEFAULT_PARSE_TIMEOUT_SECONDS,
 ) -> ScanResult:
-    """Recursively parse every ``.java``/``.properties``/``.yml``/``.yaml`` file under root.
+    """Recursively parse every ``.java``/``.properties``/``.yml``/``.yaml``/
+    ``pom.xml`` file under root.
 
     Args:
         root: Directory to scan. Resolved to its canonical, symlink-free
@@ -122,6 +127,7 @@ def scan_directory(
 
     java_results: list[ParsedFile] = []
     config_results: list[ParsedConfigFile] = []
+    pom_results: list[ParsedPomFile] = []
     rejected: list[RejectedPath] = []
 
     for candidate in _discover_candidate_files(resolved_root):
@@ -129,8 +135,11 @@ def scan_directory(
         if rejection is not None:
             rejected.append(rejection)
             continue
-        suffix = candidate.suffix.lower()
-        if suffix == _JAVA_SUFFIX:
+        if candidate.name.lower() == _POM_FILENAME:
+            pom_results.append(
+                parse_pom_file(candidate, max_bytes=max_bytes, timeout_seconds=timeout_seconds)
+            )
+        elif candidate.suffix.lower() == _JAVA_SUFFIX:
             java_results.append(
                 parse_file(candidate, max_bytes=max_bytes, timeout_seconds=timeout_seconds)
             )
@@ -143,6 +152,7 @@ def scan_directory(
         root=resolved_root,
         java_files=tuple(java_results),
         config_files=tuple(config_results),
+        pom_files=tuple(pom_results),
         rejected_paths=tuple(rejected),
     )
 
@@ -179,7 +189,7 @@ def _discover_candidate_files(resolved_root: Path) -> list[Path]:
         dirnames[:] = [d for d in dirnames if d.lower() not in _EXCLUDED_DIR_NAMES]
         for filename in filenames:
             candidate = Path(dirpath) / filename
-            if candidate.suffix.lower() in _RELEVANT_SUFFIXES:
+            if candidate.suffix.lower() in _RELEVANT_SUFFIXES or filename.lower() == _POM_FILENAME:
                 matches.append(candidate)
     return sorted(matches)
 

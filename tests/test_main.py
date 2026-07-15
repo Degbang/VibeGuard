@@ -27,7 +27,7 @@ def test_main_returns_nonzero_when_nothing_found(
     exit_code = main.main([str(tmp_path)])
 
     assert exit_code == 1
-    assert "No .java or config files found" in capsys.readouterr().err
+    assert "No .java/config/pom.xml files found" in capsys.readouterr().err
 
 
 def test_main_returns_zero_for_config_only_file_with_no_findings(tmp_path: Path) -> None:
