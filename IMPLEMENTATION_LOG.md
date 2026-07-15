@@ -762,3 +762,43 @@ fixtures never exercised. Chapter 4 should note that CWE rule modules
 are not uniformly raw-tree-based vs. summary-based by design - each
 decides based on what information it actually needs, and that decision
 should be stated per rule, not assumed globally.
+
+---
+
+## [2026-07-15] - Java 17+ parser support promoted from limitation to evaluation risk
+**What the plan said:** CLAUDE.md approved `javalang` as the baseline
+Java parser, and the earlier Java 17-21 syntax-gap entry documented
+modern syntax failures as limitations, with only simple empty-body
+records handled by a narrow preprocessor.
+**What we actually did / found:** Reassessed that limitation against
+the intended evaluation target: AI-generated and public Java
+microservice repositories. Modern Spring/Quarkus applications
+increasingly target Java 17+, and Spring Boot 3 requires Java 17. That
+means records, text blocks, sealed classes, modern switch syntax,
+pattern matching, and other Java 17-21 constructs are likely to appear
+in realistic evaluation data. If VibeGuard cannot parse those files,
+the result is not just reduced syntax coverage; it can create false
+negatives because CWE rules never run on parse-failed files.
+**Why:** A Java 8-era parser is acceptable as a temporary Layer 1
+development backend, but it is not defensible as the final parser
+strategy for public-repo or AI-generated Java microservice evaluation
+unless the dataset is explicitly constrained to older/simple Java.
+Constraining the dataset that way would weaken the thesis claim. The
+project should not keep expanding regex preprocessors as the long-term
+solution; that approach does not scale safely and risks breaking
+source-line traceability.
+**Decision / next step:** Before serious public-repo evaluation,
+perform a parser-compatibility spike. Build Java 8/11/17/21 fixture
+coverage, compare current `javalang` behavior against a modern parser
+candidate such as `tree-sitter-java`, and decide whether to migrate
+parser backends behind the existing `ParsedFile`/rule interface. Keep
+the current `javalang` implementation only as a temporary development
+backend until that decision is made. Also define the evaluation
+dataset explicitly: a controlled AI-generated/vibe-coded app set for
+ground truth, plus a real public-repo sample for parser coverage and
+noise analysis.
+**Effect on thesis chapters:** Chapter 3 must describe dataset
+selection and Java-version inclusion criteria. Chapter 4 must describe
+parser support and any backend migration. Chapter 5 must report parse
+success/failure rates by Java version so vulnerability results are not
+interpreted without parser-coverage context.
