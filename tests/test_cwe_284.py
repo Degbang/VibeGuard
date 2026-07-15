@@ -114,3 +114,56 @@ def test_detect_in_java_recognizes_fully_qualified_authorization_annotation(
     result = parse_file(java_file)
 
     assert detect_in_java(result) == ()
+
+
+def test_detect_in_java_finds_unprotected_endpoint_inside_nested_class() -> None:
+    """A method inside a nested/inner class must not be invisible to this rule.
+
+    ParsedFile.classes (the flattened Layer 1 summary) only represents
+    top-level types - a rule that only iterated that summary would
+    silently miss every endpoint inside a nested static resource
+    class, a real pattern in JAX-RS/Spring codebases. This rule walks
+    the raw AST specifically to avoid that blind spot.
+    """
+    result = parse_file(FIXTURES_DIR / "NestedResource.java")
+
+    findings = detect_in_java(result)
+
+    assert len(findings) == 1
+    assert findings[0].identifier == "deleteAll"
+    assert findings[0].line == 15
+
+
+def test_detect_in_java_nested_class_method_level_protection_still_works() -> None:
+    result = parse_file(FIXTURES_DIR / "NestedResource.java")
+
+    identifiers = {f.identifier for f in detect_in_java(result)}
+
+    assert "create" not in identifiers
+
+
+def test_detect_in_java_outer_class_authorization_does_not_protect_inner_class(
+    tmp_path: Path,
+) -> None:
+    """An outer class's @RolesAllowed must not protect an inner class's methods.
+
+    JAX-RS/Spring resolve authorization per resource class, not by
+    lexical nesting, so treating the outer class as sufficient would
+    be a false negative.
+    """
+    java_file = tmp_path / "Foo.java"
+    java_file.write_text(
+        '@RolesAllowed("ADMIN")\n'
+        "public class Outer {\n"
+        "    public static class Inner {\n"
+        "        @DELETE\n"
+        "        public void x() {}\n"
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    findings = detect_in_java(result)
+    assert len(findings) == 1
+    assert findings[0].identifier == "x"

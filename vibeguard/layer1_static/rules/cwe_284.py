@@ -2,11 +2,14 @@
 
 Flags REST endpoint methods (identified by common JAX-RS/Spring
 request-mapping annotations) that carry no authorization annotation at
-all, at either the method or the enclosing class level. Works entirely
-off Layer 1's structural summary (``ParsedClass``/``ParsedMethod``
-annotations) - no raw AST walk needed, since annotation *names* (not
-values) are all this rule requires, and ``ast_parser.py`` already
-promotes annotation names to that summary.
+all, at either the method or the nearest enclosing class/interface
+level. Walks ``ParsedFile.tree`` directly via javalang's
+``.filter(MethodDeclaration)`` rather than the flattened
+``ParsedFile.classes`` summary: that summary only represents top-level
+types (see ``ast_parser.ParsedClass``'s docstring), so a method inside
+a nested/inner/anonymous class would be entirely invisible to this
+rule if it only looked there - a real false negative found and fixed
+during adversarial testing, see IMPLEMENTATION_LOG.md.
 
 Deliberately narrow scope for a first pass: this detects *missing*
 access control, not *misconfigured* access control. An endpoint
@@ -22,11 +25,16 @@ made at all," not "was it the right one."
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TypeAlias
 
-from vibeguard.layer1_static.ast_parser import ParsedFile, ParsedMethod
+import javalang
+
+from vibeguard.layer1_static.ast_parser import ParsedFile
 from vibeguard.layer1_static.rules._finding import Finding
 
 CWE_ID = "CWE-284"
+
+_TypeDeclaration: TypeAlias = javalang.tree.ClassDeclaration | javalang.tree.InterfaceDeclaration
 
 # JAX-RS and Spring MVC annotations that mark a method as a reachable
 # HTTP endpoint. Presence of any one of these is what makes "no
@@ -74,40 +82,68 @@ _AUTHORIZATION_ANNOTATIONS = frozenset(
 def detect_in_java(parsed_file: ParsedFile) -> tuple[Finding, ...]:
     """Find endpoint methods with no authorization annotation anywhere in scope.
 
-    An authorization annotation on the *class* covers every method
-    that doesn't itself carry an authorization annotation (the common
-    "secure by default, opt out per-endpoint" pattern), so a method is
-    only flagged if neither it nor its class has one.
+    An authorization annotation on the *nearest enclosing* class/
+    interface covers a method that doesn't itself carry one (the
+    common "secure by default, opt out per-endpoint" pattern) - only
+    the nearest enclosing type is checked, not every ancestor, since
+    annotations on an outer class don't apply to a nested class's own
+    members in JAX-RS/Spring's actual runtime behavior.
     """
-    findings = []
-    for cls in parsed_file.classes:
-        class_has_authorization = _has_authorization_annotation(cls.annotations)
-        for method in cls.methods:
-            finding = _check_method(parsed_file.path, method, class_has_authorization)
-            if finding is not None:
-                findings.append(finding)
+    if parsed_file.tree is None:
+        return ()
+
+    findings = [
+        finding
+        for path, node in parsed_file.tree.filter(javalang.tree.MethodDeclaration)
+        if (finding := _check_method(parsed_file.path, node, path)) is not None
+    ]
     return tuple(findings)
 
 
 def _check_method(
-    file_path: Path, method: ParsedMethod, class_has_authorization: bool
+    file_path: Path,
+    method: javalang.tree.MethodDeclaration,
+    path: tuple[object, ...],
 ) -> Finding | None:
     """Build a Finding if this method is an unprotected endpoint."""
-    if not _has_endpoint_annotation(method.annotations):
+    method_annotations = tuple(a.name for a in method.annotations)
+    if not _has_endpoint_annotation(method_annotations):
         return None
-    if class_has_authorization or _has_authorization_annotation(method.annotations):
+    if _has_authorization_annotation(method_annotations):
         return None
+    enclosing_type = _nearest_enclosing_type(path)
+    if enclosing_type is not None:
+        class_annotations = tuple(a.name for a in enclosing_type.annotations)
+        if _has_authorization_annotation(class_annotations):
+            return None
+    line = method.position.line if method.position else None
     return Finding(
         cwe_id=CWE_ID,
         file_path=file_path,
-        line=method.line,
+        line=line,
         identifier=method.name,
         message=(
             f"Endpoint method '{method.name}' has no authorization annotation "
             "(no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the "
-            "method or its class)"
+            "method or its enclosing class)"
         ),
     )
+
+
+def _nearest_enclosing_type(path: tuple[object, ...]) -> _TypeDeclaration | None:
+    """Find the closest enclosing class/interface declaration in a filter() path.
+
+    javalang's ``.filter()`` returns the full ancestor chain from the
+    ``CompilationUnit`` down; walking it in reverse finds the nearest
+    (innermost) enclosing type first, which is what "the method's own
+    class" means for a nested/inner class.
+    """
+    for ancestor in reversed(path):
+        if isinstance(
+            ancestor, javalang.tree.ClassDeclaration | javalang.tree.InterfaceDeclaration
+        ):
+            return ancestor
+    return None
 
 
 def _has_endpoint_annotation(annotations: tuple[str, ...]) -> bool:

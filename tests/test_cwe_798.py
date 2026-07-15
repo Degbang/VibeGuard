@@ -177,3 +177,31 @@ def test_detect_in_config_does_not_flag_secret_reference_keys() -> None:
     result = parse_config_file(FIXTURES_DIR / "cwe798-reference.properties")
 
     assert detect_in_config(result) == ()
+
+
+def test_detect_in_java_does_not_resolve_secret_split_across_variables(
+    tmp_path: Path,
+) -> None:
+    """Documented limitation: a secret split across variables isn't resolved.
+
+    _string_literal_value only folds a literal-to-literal `+` chain
+    within a single expression (e.g. "hunter" + "2"); resolving
+    `part1 + part2` where part1/part2 are themselves other
+    declarations would require basic constant propagation across a
+    class, a meaningfully bigger static-analysis capability this rule
+    does not attempt. This test locks in that the documented boundary
+    is the actual behavior, not accidentally different from what the
+    docstring claims.
+    """
+    java_file = tmp_path / "Split.java"
+    java_file.write_text(
+        "public class Split {\n"
+        '    private String part1 = "hunter";\n'
+        '    private String part2 = "2";\n'
+        "    private String password = part1 + part2;\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    assert detect_in_java(result) == ()
