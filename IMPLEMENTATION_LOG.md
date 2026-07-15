@@ -684,3 +684,81 @@ methodology should state plainly that default scans exclude test
 source, and that the CLI's exit code is a provisional "any finding"
 threshold pending Layer 3 scoring, not yet a graded pass/fail
 judgment.
+
+---
+
+## [2026-07-15] - Adversarial QA matrix found cwe_284's flattened-summary dependency was a real nested-class blind spot
+**What the plan said:** N/A - a structured edge-case QA pass (empty/
+malformed input, modern Java syntax, adversarial secret-hiding,
+integration boundaries) run against the current Layer 1 surface.
+**What we actually did / found:** Before running the matrix, verified
+and rejected a false premise in the QA prompt itself: it asserted this
+project uses `tree-sitter`/`tree-sitter-java` and that any `javalang`
+usage should be reported as a bug. Checked `CLAUDE.md` (Section 6's
+baseline dependency list, Section 7's build order) and every prior log
+entry: `javalang` is and has always been the locked-in parser: no
+`tree-sitter` reference exists anywhere in this project's history. Did
+not act on that part of the prompt.
+
+Ran the rest of the matrix (CRLF line endings, non-UTF-8/Latin-1
+encoding, multiple top-level classes in one file, 15-level-deep
+nesting, a 5000-field file, anonymous inner classes) against
+`ast_parser.py`/`cwe_798.py`/`cwe_284.py` - all correct, no bugs found
+in those cases specifically.
+
+Two real findings:
+- `cwe_798.py` does not resolve a secret assembled from separate
+  variable declarations (`password = part1 + part2` where `part1`/
+  `part2` are themselves other fields) - only a literal-to-literal `+`
+  chain within a single expression is folded. Checked the existing
+  docstring first: this exact boundary was already stated explicitly
+  ("Anything involving a variable/method call... can't be resolved
+  statically and returns None"), so this is a *confirmed, correctly-
+  scoped, already-documented limitation*, not an undocumented bug -
+  added a regression test locking in that the documented behavior is
+  the actual behavior, since an accurate docstring that silently
+  drifted from reality would be worse than no docstring at all.
+- `cwe_284.py` relied entirely on `ParsedFile.classes` (Layer 1's
+  flattened summary, top-level types only per `ParsedClass`'s own
+  docstring) - a real bug, not a documented limitation: an unprotected
+  endpoint inside a nested/inner static class (a real JAX-RS/Spring
+  pattern for grouping related resources) was completely invisible to
+  this rule. `cwe_798.py` never had this problem because it already
+  walked the raw tree via `.filter()`; `cwe_284.py` was rewritten to do
+  the same, using `.filter(MethodDeclaration)` and resolving each
+  method's *nearest* enclosing class/interface from the traversal path
+  (not every ancestor - confirmed via a dedicated test that an outer
+  class's `@RolesAllowed` does not protect a nested class's own
+  methods, matching real JAX-RS/Spring per-resource-class authorization
+  resolution, not lexical-scope inheritance).
+
+`ParsedMethod.annotations`/`ParsedClass.annotations` (added for
+`cwe_284.py` originally) remain in Layer 1's summary - still valid and
+useful for anything that only needs top-level-class information - but
+`cwe_284.py` itself no longer depends on them.
+
+4 new regression tests (nested-class detection, method-level
+protection still works inside a nested class, outer-class annotation
+does *not* leak protection to an inner class, the documented variable-
+split limitation). 81 tests total (was 77), all tooling clean, `safety`
+still 0 vulnerabilities.
+**Why:** This is the second time in this project a rule module's
+reliance on Layer 1's *flattened* summary (rather than the raw tree)
+produced a real false negative - the first was `cwe_798.py`'s original
+design already avoiding this by walking the tree directly for literal
+values. The lesson generalizes: any structural summary that is
+deliberately scoped to top-level types (documented as such in
+`ParsedClass`) will silently under-represent nested/inner/anonymous
+code for *any* rule that only consults it - each new rule module needs
+to explicitly decide whether raw-tree access is required, not assume
+the summary is complete.
+**Effect on thesis chapters:** Chapter 5 should describe this as a
+concrete example of the "test module-level, then test end-to-end at
+integration boundaries" methodology explicitly recommended in the QA
+process this project follows - the bug was invisible at the granularity
+of "does cwe_284 find its own test fixtures" and only surfaced when
+deliberately testing a structural edge case (nesting) the original
+fixtures never exercised. Chapter 4 should note that CWE rule modules
+are not uniformly raw-tree-based vs. summary-based by design - each
+decides based on what information it actually needs, and that decision
+should be stated per rule, not assumed globally.
