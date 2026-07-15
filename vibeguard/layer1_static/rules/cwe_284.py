@@ -30,36 +30,15 @@ from typing import TypeAlias
 import javalang
 
 from vibeguard.layer1_static.ast_parser import ParsedFile
+from vibeguard.layer1_static.rules._endpoint_annotations import (
+    has_endpoint_annotation,
+    simple_name,
+)
 from vibeguard.layer1_static.rules._finding import Finding
 
 CWE_ID = "CWE-284"
 
 _TypeDeclaration: TypeAlias = javalang.tree.ClassDeclaration | javalang.tree.InterfaceDeclaration
-
-# JAX-RS and Spring MVC annotations that mark a method as a reachable
-# HTTP endpoint. Presence of any one of these is what makes "no
-# authorization annotation" a meaningful finding at all - an ordinary
-# private helper method needs no access-control annotation because
-# nothing external can reach it.
-_ENDPOINT_ANNOTATIONS = frozenset(
-    {
-        # JAX-RS / Quarkus RESTEasy
-        "GET",
-        "POST",
-        "PUT",
-        "DELETE",
-        "PATCH",
-        "HEAD",
-        "OPTIONS",
-        # Spring MVC
-        "GetMapping",
-        "PostMapping",
-        "PutMapping",
-        "DeleteMapping",
-        "PatchMapping",
-        "RequestMapping",
-    }
-)
 
 # Annotations that represent an explicit access-control decision,
 # whether restrictive or permissive. Any one of these present (on the
@@ -107,7 +86,7 @@ def _check_method(
 ) -> Finding | None:
     """Build a Finding if this method is an unprotected endpoint."""
     method_annotations = tuple(a.name for a in method.annotations)
-    if not _has_endpoint_annotation(method_annotations):
+    if not has_endpoint_annotation(method_annotations):
         return None
     if _has_authorization_annotation(method_annotations):
         return None
@@ -146,21 +125,5 @@ def _nearest_enclosing_type(path: tuple[object, ...]) -> _TypeDeclaration | None
     return None
 
 
-def _has_endpoint_annotation(annotations: tuple[str, ...]) -> bool:
-    return any(_simple_name(a) in _ENDPOINT_ANNOTATIONS for a in annotations)
-
-
 def _has_authorization_annotation(annotations: tuple[str, ...]) -> bool:
-    return any(_simple_name(a) in _AUTHORIZATION_ANNOTATIONS for a in annotations)
-
-
-def _simple_name(annotation: str) -> str:
-    """Strip any package qualification, e.g. "javax.ws.rs.GET" -> "GET".
-
-    javalang gives an annotation's name exactly as written in source:
-    "GET" for `@GET`, but "javax.ws.rs.GET" for
-    `@javax.ws.rs.GET` - matching against the full string would miss
-    (or wrongly flag) any endpoint/authorization annotation using its
-    fully-qualified form instead of a simple-name import.
-    """
-    return annotation.rsplit(".", 1)[-1]
+    return any(simple_name(a) in _AUTHORIZATION_ANNOTATIONS for a in annotations)

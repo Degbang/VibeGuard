@@ -882,3 +882,68 @@ anti-pattern specifically, not authentication bypass via other means
 (missing checks entirely, trusting unverified client data, weak
 credential storage) - those would need separate detection logic this
 rule does not attempt.
+
+---
+
+## [2026-07-15] - Fourth CWE rule (`cwe_20.py`); extracted shared endpoint-annotation heuristic; applied the this-qualifier lesson proactively
+**What the plan said:** CLAUDE.md Section 7 build order item 3:
+remaining CWE rule modules. Four of five now exist.
+**What we actually did / found:** Implemented `cwe_20.py` (Improper
+Input Validation): flags a Spring MVC `@RequestBody` endpoint
+parameter lacking `@Valid`/`@Validated`. Bean Validation (JSR 380)
+constraints on a DTO's own fields are only enforced by Spring's
+request pipeline when the parameter carrying that DTO is itself
+annotated - without it, a malformed/malicious request body reaches
+application code completely unvalidated. Scoped to Spring specifically
+(not JAX-RS): JAX-RS has no exact equivalent of `@RequestBody` - a
+JAX-RS body parameter is identified implicitly by the *absence* of a
+param-source annotation like `@QueryParam`, a materially more
+ambiguous signal than Spring's explicit marker, left for a future
+pass rather than guessed at now. Excludes `@RequestBody` parameters
+of "not validatable" types (`String`, `Object`, `Map`, `List`,
+primitives/wrappers) - nothing for `@Valid` to cascade into, so
+flagging those would be noise.
+
+Extracted `ENDPOINT_ANNOTATIONS`/`has_endpoint_annotation`/
+`simple_name` out of `cwe_284.py` into a new shared
+`vibeguard/layer1_static/rules/_endpoint_annotations.py`, since
+`cwe_20.py` needed the identical "is this method a reachable HTTP
+endpoint" question - third shared-module extraction this project
+(`_finding.py`, `_credential_names.py`, now this), same
+extract-on-second-real-need pattern each time.
+
+Applied the lesson from the previous two entries proactively rather
+than reactively this time: `cwe_284.py` and `cwe_287.py` were each
+initially built against only the "obvious" textual form of their
+target construct and needed a follow-up fix once adversarial testing
+found a syntactically-different-but-equivalent form javalang
+represents differently (fully-qualified annotations; `this.field`
+access). For `cwe_20.py`, walked `ParsedFile.tree` directly from the
+first draft (not after discovering a flattened-summary gap), and
+tested fully-qualified annotations (`@javax.validation.Valid`,
+`@org.springframework.web.bind.annotation.RequestBody`) and a
+nested-class endpoint *before* writing fixtures, not after. Both
+passed on the first implementation - no follow-up bug this time.
+
+9 new tests (102 total, was 91), all tooling clean. Verified live
+through `main.py`'s CLI, including confirming that multiple rules
+(`CWE-284` and `CWE-20` both) correctly fire independently on the same
+fixture file without interfering with each other.
+**Why:** The Spring-only / JAX-RS-deferred scoping decision keeps this
+rule's precision high rather than guessing at a more ambiguous
+JAX-RS signal that would need its own careful false-positive analysis
+- consistent with every other rule module's "one well-scoped mechanism
+first" approach. Proactively testing the annotation-qualification and
+nested-class cases before writing fixtures (rather than after a bug
+report) is the direct, intended payoff of naming that pattern
+explicitly in the previous log entry.
+**Effect on thesis chapters:** Chapter 4 should describe
+`_endpoint_annotations.py` as the third shared cross-rule utility
+module and can cite this entry as evidence the "test against
+javalang's representational variation up front" methodology, once
+identified, was successfully applied to prevent a recurrence rather
+than just documented after the fact. Chapter 5's CWE-20 evaluation
+should state the Spring-only scope explicitly - a JAX-RS-only
+codebase would show zero CWE-20 findings from this rule regardless of
+actual input-validation posture, which must not be misread as "no
+CWE-20 issues found."

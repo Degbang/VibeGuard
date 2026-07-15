@@ -3,9 +3,10 @@
 Full scope: orchestrate the five-layer pipeline against a directory of
 Java sample apps and produce the final explainable risk report. Current
 scope: Layer 1 parsing/orchestration (scanner.py) plus the CWE rule
-modules implemented so far (cwe_798.py, cwe_284.py, cwe_287.py) - this
-command parses .java/.properties/.yml/.yaml files AND runs those rules
-against every successfully-parsed file. It is not yet the full
+modules implemented so far (cwe_798.py, cwe_284.py, cwe_287.py,
+cwe_20.py) - this command parses .java/.properties/.yml/.yaml files
+AND runs those rules against every successfully-parsed file. It is
+not yet the full
 explainable risk assessment: there is no rule-based scoring (Layer 3),
 no ML classification (Layer 4), and no SHAP explanation (Layer 5) - a
 finding here is a raw, unscored candidate from one rule's pattern
@@ -35,7 +36,7 @@ from vibeguard.layer1_static.config_parser import (
     ParsedConfigFile,
     parse_config_file,
 )
-from vibeguard.layer1_static.rules import cwe_284, cwe_287, cwe_798
+from vibeguard.layer1_static.rules import cwe_20, cwe_284, cwe_287, cwe_798
 from vibeguard.layer1_static.rules._finding import Finding
 from vibeguard.layer1_static.scanner import RejectedPath, ScanResult, scan_directory
 
@@ -90,11 +91,11 @@ def main(argv: list[str] | None = None) -> int:
 def _run_rules(result: ScanResult) -> tuple[Finding, ...]:
     """Run every implemented CWE rule against a scan's successfully-parsed files.
 
-    Only rules/cwe_798.py, rules/cwe_284.py, and rules/cwe_287.py exist
-    so far; more CWE rule modules get added here as they land. A file
-    that failed to parse is skipped - there's no AST/entries to
-    inspect, and that failure is already surfaced separately via the
-    parse report, not silently dropped.
+    Only rules/cwe_798.py, rules/cwe_284.py, rules/cwe_287.py, and
+    rules/cwe_20.py exist so far; more CWE rule modules get added here
+    as they land. A file that failed to parse is skipped - there's no
+    AST/entries to inspect, and that failure is already surfaced
+    separately via the parse report, not silently dropped.
     """
     findings: list[Finding] = []
     for java_file in result.java_files:
@@ -103,6 +104,7 @@ def _run_rules(result: ScanResult) -> tuple[Finding, ...]:
         findings.extend(cwe_798.detect_in_java(java_file))
         findings.extend(cwe_284.detect_in_java(java_file))
         findings.extend(cwe_287.detect_in_java(java_file))
+        findings.extend(cwe_20.detect_in_java(java_file))
     for config_file in result.config_files:
         if config_file.status != ParseStatus.OK:
             continue
@@ -143,11 +145,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
             "VibeGuard Layer 1: parse Java source (AST) and config files "
             "(.properties/.yml/.yaml, flattened key-value pairs), then run "
             "the CWE rules implemented so far (CWE-798 hardcoded credentials, "
-            "CWE-284 improper access control, CWE-287 improper authentication) "
-            "against them. Findings are unscored rule matches, not graded risk "
-            "- Layers 2-5 (feature extraction, rule-based scoring, ML "
-            "classification, SHAP explainability) are not implemented yet, and "
-            "the remaining CWE rules (20, 1035) don't exist yet either."
+            "CWE-284 improper access control, CWE-287 improper authentication, "
+            "CWE-20 improper input validation) against them. Findings are "
+            "unscored rule matches, not graded risk - Layers 2-5 (feature "
+            "extraction, rule-based scoring, ML classification, SHAP "
+            "explainability) are not implemented yet, and CWE-1035 (known-"
+            "vulnerable components) doesn't exist yet either."
         ),
     )
     parser.add_argument(
