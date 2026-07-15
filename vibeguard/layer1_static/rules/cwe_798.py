@@ -16,13 +16,13 @@ job.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
 from pathlib import Path
 
 import javalang
 
 from vibeguard.layer1_static.ast_parser import ParsedFile
 from vibeguard.layer1_static.config_parser import ParsedConfigFile
+from vibeguard.layer1_static.rules._finding import Finding
 
 CWE_ID = "CWE-798"
 
@@ -75,24 +75,6 @@ _PLACEHOLDER_MARKERS = (
 # Spring/Quarkus-style property substitution, e.g. "${DB_PASSWORD}" -
 # this means the value is externalized to config/env, not hardcoded.
 _PROPERTY_REFERENCE_PATTERN = re.compile(r"^\$\{.*\}$")
-
-
-@dataclass(frozen=True)
-class Finding:
-    """A single CWE-798 detection.
-
-    ``redacted_value`` never carries the real matched value verbatim -
-    a security tool that echoes real secrets back into its own report
-    output would itself become a disclosure risk, especially once
-    reports start getting generated against real public repos.
-    """
-
-    cwe_id: str
-    file_path: Path
-    line: int | None
-    identifier: str
-    redacted_value: str
-    message: str
 
 
 def detect_in_java(parsed_file: ParsedFile) -> tuple[Finding, ...]:

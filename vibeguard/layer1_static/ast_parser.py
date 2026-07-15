@@ -75,6 +75,7 @@ class ParsedMethod:
     name: str
     line: int | None
     modifiers: frozenset[str]
+    annotations: tuple[str, ...]
     parameters: tuple[ParsedParameter, ...]
     return_type: str
 
@@ -273,6 +274,7 @@ def _build_method(node: MethodDeclaration) -> ParsedMethod:
         name=node.name,
         line=_line_number_of(node),
         modifiers=frozenset(node.modifiers),
+        annotations=tuple(annotation.name for annotation in node.annotations),
         parameters=parameters,
         return_type=_type_name(node.return_type),
     )

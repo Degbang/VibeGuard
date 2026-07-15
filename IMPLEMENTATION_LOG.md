@@ -480,3 +480,66 @@ placeholder exclusions explicitly, since they're precision-improving
 design decisions, not incidental behavior - and should flag the
 hash-field false-positive source as a known limitation rather than
 something the evaluation numbers might quietly hide.
+
+---
+
+## [2026-07-14] - Second CWE rule (`cwe_284.py`); extended ParsedMethod; extracted shared Finding
+**What the plan said:** CLAUDE.md Section 7 build order item 3:
+remaining CWE rule modules, after `cwe_798.py`.
+**What we actually did / found:** Before writing `cwe_284.py`
+(Improper Access Control), addressed a design gap identified in
+review: `ParsedMethod` didn't carry annotations at all (`ParsedClass`
+already did), so a rule needing `@RolesAllowed`/`@PermitAll`/etc.
+would have had to walk the raw AST directly, same as `cwe_798.py` did
+for literal values. Judged this differently from the literal-value
+case, though: annotation *names* are structural information broadly
+useful to any future rule (not just this one CWE), the same way
+modifiers or a method's return type already are, whereas literal
+*values* are genuinely rule-specific. Extended `ParsedMethod` with
+`annotations: tuple[str, ...]` (mirroring `ParsedClass`'s existing
+field) rather than having `cwe_284.py` re-walk the tree - a one-line
+change to `_build_method` since javalang already exposes
+`node.annotations` on `MethodDeclaration` the same way it does on
+`ClassDeclaration`. As a result `cwe_284.py` needed no raw-tree
+access at all, working entirely off the Layer 1 structural summary.
+
+Also extracted `Finding` (previously defined locally inside
+`cwe_798.py`, flagged in review as due for extraction "by the second
+rule") into `vibeguard/layer1_static/rules/_finding.py`, shared by
+both rule modules now. Added an optional `redacted_value: str | None
+= None` since not every CWE's findings revolve around a literal value
+to redact - `cwe_284.py`'s findings are about a missing annotation,
+not a value.
+
+`cwe_284.py` itself: flags a method carrying a JAX-RS/Spring endpoint
+annotation (`@GET`/`@POST`/`@GetMapping`/etc.) that has no
+authorization annotation (`@RolesAllowed`/`@PermitAll`/`@Secured`/
+`@PreAuthorize`/etc.) at either the method or the enclosing class
+level - class-level coverage matters because "secure by default,
+annotate per-method to opt out" is a common real pattern, and without
+checking the class a rule would flag every method in a
+class-protected resource as a false positive. Deliberately does not
+flag an endpoint with an *explicit* `@PermitAll`, even on a
+sensitive-sounding method name: that's a made access-control decision,
+not a missing one, and judging whether a specific decision is
+*appropriate* needs semantic understanding of the app's authorization
+model that pattern matching can't provide - same "detect candidacy,
+not make the final call" scoping as `cwe_798.py`.
+
+Two new fixtures (`UnprotectedResource.java` - true positive plus
+`@RolesAllowed`/`@PermitAll`/non-endpoint negative cases in one file;
+`ClassLevelSecuredResource.java` - proves class-level coverage). 7 new
+tests, 65 total passing, all tooling clean. Verified against the real
+fixtures before writing tests, same discipline as `cwe_798.py`.
+**Why:** Promoting annotation names to `ParsedMethod` avoids every
+future annotation-driven rule needing its own raw-tree walk for the
+same structural information `ast_parser.py` can capture once. The
+`Finding` extraction avoids a third near-identical local definition
+appearing in `cwe_20.py`/`cwe_287.py`/`cwe_1035.py` next.
+**Effect on thesis chapters:** Chapter 4 should describe
+`ParsedMethod.annotations` as part of the Layer 1 summary (not a
+rule-specific addition) and `Finding` as the common cross-CWE output
+shape. Chapter 5's CWE-284 evaluation should state the scope
+explicitly: detects missing access control, not misconfigured access
+control, and does not evaluate whether a given role/policy is
+semantically appropriate for an endpoint.
