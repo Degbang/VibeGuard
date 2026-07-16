@@ -8,16 +8,24 @@ rather than guessed at with regex.
 
 Only ever parses text into a tree via Python's stdlib
 ``xml.etree.ElementTree`` - never executes anything from the file.
-Verified empirically (not assumed) against the two classic XML attack
+Verified empirically (not assumed) against the classic XML attack
 patterns before shipping, since this parses untrusted, potentially
-adversarial ``pom.xml`` files from public repos: entity-expansion
-("billion laughs") is already rejected by CPython's bundled expat
-parser with a ``ParseError`` (a native protection added in Python
-3.7.1+, itself a CVE response), and external entity references (XXE,
-e.g. reading local files) are not resolved by ``ET.fromstring`` at all
-- it raises ``undefined entity`` instead. No extra dependency
-(``defusedxml``) was needed once that was actually confirmed rather
-than assumed.
+adversarial ``pom.xml`` files from public repos: external entity
+references (XXE, e.g. reading local files) are not resolved by
+``ET.fromstring`` at all - it raises ``undefined entity`` instead.
+Internal entity-expansion ("billion laughs") is only rejected by
+CPython's bundled expat amplification-ceiling protection (a native
+guard added in Python 3.7.1+) once a payload is large enough to trip
+it - a small or moderate internal entity expands successfully and
+returns a parsed tree, confirmed directly by testing a crafted
+``<!DOCTYPE>``/``<!ENTITY>`` payload sized well under that ceiling
+(see IMPLEMENTATION_LOG.md for the earlier, now-corrected claim that
+this was fully rejected). To close that gap without a new dependency,
+any ``pom.xml`` containing a ``<!DOCTYPE`` declaration is rejected
+outright before parsing: a legitimate Maven POM never declares one, so
+this has no cost in the false-positive direction and removes internal
+entity expansion as an attack surface entirely, not just above some
+size threshold.
 
 Only *direct* ``<project>/<dependencies>/<dependency>`` entries are
 extracted - not ``<dependencyManagement>`` (those are version
@@ -47,6 +55,7 @@ DEFAULT_MAX_FILE_BYTES = 2_000_000
 DEFAULT_PARSE_TIMEOUT_SECONDS = 5.0
 
 _PROPERTY_REFERENCE_PATTERN = re.compile(r"^\$\{(.+)\}$")
+_DOCTYPE_PATTERN = re.compile(r"<!DOCTYPE", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -101,6 +110,16 @@ def parse_pom_file(
 
     if not text.strip():
         return ParsedPomFile(path=resolved, status=ParseStatus.EMPTY_FILE)
+
+    if _DOCTYPE_PATTERN.search(text):
+        return ParsedPomFile(
+            path=resolved,
+            status=ParseStatus.PARSE_FAILED,
+            error_message=(
+                "pom.xml contains a <!DOCTYPE> declaration, which is never valid in a "
+                "real Maven POM and is rejected outright to rule out XML entity injection"
+            ),
+        )
 
     try:
         root = run_with_timeout(ET.fromstring, text, timeout_seconds=timeout_seconds)

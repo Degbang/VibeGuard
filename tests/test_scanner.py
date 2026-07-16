@@ -108,6 +108,45 @@ def test_scan_skips_test_source_roots(tmp_path: Path) -> None:
     assert [parsed.path.name for parsed in result.java_files] == ["RealService.java"]
 
 
+def test_scan_does_not_skip_a_production_package_named_test(tmp_path: Path) -> None:
+    """A package literally named "test" is not the same as a test source root.
+
+    "com.example.test" is an unusual but real production package name
+    (e.g. a testing-utilities module shipped as part of the app itself).
+    Excluding every directory segment named "test"/"tests" anywhere in
+    the tree - not just the conventional src/test or root-level test(s)
+    locations - would silently drop this file from the scan with no
+    trace in rejected_paths, which is exactly the kind of silent
+    under-reporting CLAUDE.md's fail-closed philosophy forbids.
+    """
+    prod_package = tmp_path / "src" / "main" / "java" / "com" / "example" / "test"
+    prod_package.mkdir(parents=True)
+    (prod_package / "ProdSecret.java").write_text(
+        'public class ProdSecret { String password = "hunter2"; }\n'
+    )
+
+    result = scan_directory(tmp_path)
+
+    assert [parsed.path.name for parsed in result.java_files] == ["ProdSecret.java"]
+    assert result.rejected_paths == ()
+
+
+def test_scan_skips_root_level_test_directory(tmp_path: Path) -> None:
+    """A non-Maven layout's root-level test(s)/ directory is still a conventional root."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "Real.java").write_text("public class Real {}\n")
+
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "FakeSecretTest.java").write_text(
+        'public class FakeSecretTest { String password = "hunter2"; }\n'
+    )
+
+    result = scan_directory(tmp_path)
+
+    assert [parsed.path.name for parsed in result.java_files] == ["Real.java"]
+
+
 def test_scan_raises_on_non_directory(tmp_path: Path) -> None:
     not_a_dir = tmp_path / "file.txt"
     not_a_dir.write_text("hi")

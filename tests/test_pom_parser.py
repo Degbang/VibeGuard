@@ -158,6 +158,40 @@ def test_parse_rejects_entity_expansion_bomb_instead_of_hanging(tmp_path: Path) 
     assert elapsed < 5.0
 
 
+def test_parse_rejects_small_entity_expansion_not_just_large_bombs(tmp_path: Path) -> None:
+    """A small internal entity previously parsed successfully - a real gap.
+
+    CPython's expat amplification-ceiling protection only trips once a
+    payload is large enough; a small ``<!ENTITY>`` well under that
+    threshold parsed *successfully* and had its expansion silently
+    substituted into the tree, confirmed directly by testing (not
+    assumed) before this fix. Only the "billion laughs"-scale bomb was
+    covered by the earlier regression test, leaving small/moderate
+    entity injection un-guarded. The blanket <!DOCTYPE> rejection below
+    closes that gap regardless of payload size.
+    """
+    pom_file = tmp_path / "pom.xml"
+    pom_file.write_text(
+        '<?xml version="1.0"?>\n'
+        "<!DOCTYPE project [\n"
+        '  <!ENTITY lol "lol">\n'
+        "]>\n"
+        "<project>\n"
+        "  <dependencies>\n"
+        "    <dependency>\n"
+        "      <groupId>com.example</groupId>\n"
+        "      <artifactId>lib</artifactId>\n"
+        "      <version>&lol;</version>\n"
+        "    </dependency>\n"
+        "  </dependencies>\n"
+        "</project>\n"
+    )
+
+    result = parse_pom_file(pom_file)
+
+    assert result.status == ParseStatus.PARSE_FAILED
+
+
 def test_parse_does_not_resolve_external_entities(tmp_path: Path) -> None:
     """XXE (reading local files via an external entity) must not succeed."""
     pom_file = tmp_path / "pom.xml"
