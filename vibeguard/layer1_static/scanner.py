@@ -45,14 +45,11 @@ _JAVA_SUFFIX = ".java"
 _POM_FILENAME = "pom.xml"
 _RELEVANT_SUFFIXES = CONFIG_FILE_SUFFIXES | {_JAVA_SUFFIX}
 
-# Build output, dependency caches, IDE metadata, and test source roots:
-# never *production* source. Build output contains verbatim *copies*
-# of real source files (e.g. Maven copies src/main/resources/*.properties
-# into target/classes/) that would double-count the same finding; test
-# roots routinely contain intentionally fake secrets that would inflate
-# finding counts and distort evaluation precision/recall. Matched
-# case-insensitively - see _discover_candidate_files' docstring for the
-# test-root false-exclusion tradeoff.
+# Build output, dependency caches, and IDE metadata: never *production*
+# source. Build output contains verbatim *copies* of real source files
+# (e.g. Maven copies src/main/resources/*.properties into
+# target/classes/) that would double-count the same finding. Matched
+# case-insensitively.
 _EXCLUDED_DIR_NAMES = frozenset(
     {
         ".git",
@@ -66,10 +63,17 @@ _EXCLUDED_DIR_NAMES = frozenset(
         ".idea",  # IDE metadata
         ".vscode",  # IDE metadata
         ".settings",  # Eclipse project metadata
-        "test",  # Maven/Gradle test source root (src/test/...)
-        "tests",  # less common but seen in the wild
     }
 )
+
+# Test source roots are excluded too, but *only* when the directory name
+# sits in a conventional location - directly under a "src" directory
+# (Maven/Gradle's "src/test/..." layout) or at the scan root itself
+# ("<root>/test(s)/..."). A bare name match anywhere in the tree would
+# also exclude a *production* package that happens to be named "test"
+# (e.g. "com.example.test"), which is a real, not hypothetical,
+# false-exclusion risk - found via targeted testing, not assumed safe.
+_TEST_DIR_NAMES = frozenset({"test", "tests"})
 
 
 @dataclass(frozen=True)
@@ -168,30 +172,56 @@ def _discover_candidate_files(resolved_root: Path) -> list[Path]:
     here; that's what ``_containment_rejection`` guards against, as
     defense in depth.
 
-    Directories in ``_EXCLUDED_DIR_NAMES`` are skipped (case-insensitively),
-    for two distinct reasons: build output/IDE metadata (``.git``,
+    Directories in ``_EXCLUDED_DIR_NAMES`` are skipped unconditionally
+    (case-insensitively): build output/IDE metadata (``.git``,
     ``target``/``build``) is skipped for correctness, since a compiled
     repo's build output often contains verbatim *copies* of source
     config files (Maven copies ``src/main/resources/*.properties`` into
     ``target/classes/``) that would otherwise be scanned as separate,
-    duplicate findings; test source roots (``src/test/...``, matched by
-    the conventional directory name ``test``/``tests``) are skipped
-    because test fixtures routinely contain intentionally fake secrets
-    (e.g. `"hunter2"` in a test setup), which would otherwise inflate
-    finding counts and distort evaluation precision/recall against real
-    repositories. The tradeoff: a production package genuinely named
-    exactly ``test``/``tests`` (an unusual but not impossible choice)
-    would be silently excluded too - judged an acceptable false-exclusion
-    risk given how consistently Maven/Gradle both use this convention.
+    duplicate findings.
+
+    Test source roots (``test``/``tests``) are skipped too, but only
+    when found in a conventional location - see ``_is_conventional_test_root``.
+    Test fixtures routinely contain intentionally fake secrets (e.g.
+    `"hunter2"` in a test setup), which would otherwise inflate finding
+    counts and distort evaluation precision/recall against real
+    repositories; scoping the exclusion to conventional roots keeps
+    that benefit without silently dropping a production package that
+    happens to be named ``test`` anywhere else in the tree (e.g.
+    ``com.example.test``) - a real false-exclusion found via targeted
+    testing, not a hypothetical one.
     """
     matches: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(resolved_root, followlinks=False):
-        dirnames[:] = [d for d in dirnames if d.lower() not in _EXCLUDED_DIR_NAMES]
+        dirpath_obj = Path(dirpath)
+        dirnames[:] = [
+            d
+            for d in dirnames
+            if d.lower() not in _EXCLUDED_DIR_NAMES
+            and not _is_conventional_test_root(dirpath_obj, d, resolved_root)
+        ]
         for filename in filenames:
-            candidate = Path(dirpath) / filename
+            candidate = dirpath_obj / filename
             if candidate.suffix.lower() in _RELEVANT_SUFFIXES or filename.lower() == _POM_FILENAME:
                 matches.append(candidate)
     return sorted(matches)
+
+
+def _is_conventional_test_root(dirpath: Path, dirname: str, resolved_root: Path) -> bool:
+    """Whether ``dirpath/dirname`` is a conventional test source root.
+
+    Only two shapes count: directly under a ``src`` directory (Maven/
+    Gradle's ``src/test/...`` layout, including in a multi-module repo
+    where ``src`` isn't at the scan root) or directly under the scan
+    root itself (``<root>/test(s)/...``). Anything else - a nested
+    package that happens to be named ``test``/``tests`` deeper in the
+    tree without one of these two parents - is left alone and scanned
+    like any other directory, since that shape is at least as likely to
+    be production code as a real test root.
+    """
+    if dirname.lower() not in _TEST_DIR_NAMES:
+        return False
+    return dirpath == resolved_root or dirpath.name.lower() == "src"
 
 
 def _containment_rejection(candidate: Path, resolved_root: Path) -> RejectedPath | None:

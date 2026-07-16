@@ -150,6 +150,25 @@ def test_sealed_stripping_preserves_line_number_across_multiline_permits() -> No
     assert field.position.line == 3
 
 
+def test_sealed_words_inside_string_literals_are_not_stripped() -> None:
+    source = 'class A { String password = "sealed non-sealed secret permits X {"; }\n'
+    rewritten = preprocess(source)
+    tree = javalang.parse.parse(rewritten)
+
+    field = tree.types[0].body[0]
+    value = field.declarators[0].initializer.value
+    assert value == '"sealed non-sealed secret permits X {"'
+
+
+def test_sealed_words_inside_comments_are_not_rewritten() -> None:
+    source = "// public sealed class Fake permits X {\nclass A { int marker = 1; }\n"
+    rewritten = preprocess(source)
+
+    assert rewritten.startswith("// public sealed class Fake permits X {")
+    tree = javalang.parse.parse(rewritten)
+    assert tree.types[0].name == "A"
+
+
 def test_pattern_matching_instanceof_binding_is_stripped() -> None:
     """``o instanceof String s`` has no javalang grammar for the ``s`` binding."""
     source = (
@@ -194,6 +213,16 @@ def test_pattern_matching_instanceof_preserves_line_number_across_linebreak() ->
     method = tree.types[0].body[0]
     local_var = method.body[0].then_statement.statements[0]
     assert local_var.position.line == 5
+
+
+def test_pattern_instanceof_text_inside_string_literals_is_not_stripped() -> None:
+    source = 'class A { String text = "o instanceof String value"; }\n'
+    rewritten = preprocess(source)
+    tree = javalang.parse.parse(rewritten)
+
+    field = tree.types[0].body[0]
+    value = field.declarators[0].initializer.value
+    assert value == '"o instanceof String value"'
 
 
 def test_text_block_is_rewritten_to_equivalent_string_literal() -> None:
@@ -252,6 +281,79 @@ def test_text_block_does_not_double_escape_existing_escape_sequences() -> None:
     # as a trailing blank content line - real javac gives this value a
     # trailing "\n" too, not just this preprocessor.
     assert value == '"already \\"escaped\\" and a \\n literal\\n"'
+
+
+def test_text_block_backslash_s_escape_becomes_literal_trailing_space() -> None:
+    """``\\s`` marks a trailing space that JEP 378's rstrip would otherwise eat.
+
+    Without interpreting this text-block-only escape, javalang rejected
+    the rewritten literal outright ("Illegal escape character") since
+    ``\\s`` has no meaning in an ordinary Java string - a real parse
+    failure on valid Java 15+ source, not just an inexact value.
+    """
+    source = 'String s = """\n    abc\\s\n    def\n    """;\n'
+    rewritten = desugar_text_blocks(source)
+    tree = javalang.parse.parse(f"class C {{ {rewritten} }}")
+
+    field = tree.types[0].body[0]
+    value = field.declarators[0].initializer.value
+    assert value == '"abc \\ndef\\n"'
+
+
+def test_text_block_line_continuation_suppresses_the_line_break() -> None:
+    """A backslash immediately before a newline joins the two lines with no break."""
+    source = 'String s = """\n    abc\\\n    def\n    """;\n'
+    rewritten = desugar_text_blocks(source)
+    tree = javalang.parse.parse(f"class C {{ {rewritten} }}")
+
+    field = tree.types[0].body[0]
+    value = field.declarators[0].initializer.value
+    assert value == '"abcdef\\n"'
+
+
+def test_text_block_line_continuation_preserves_total_newline_count() -> None:
+    """Consuming a value-internal newline must not shift real source line numbers.
+
+    The newline removed by line-continuation lives inside the text
+    block's *value* (produced by joining stripped lines), not in the
+    surrounding file text - a subsequent declaration must still report
+    its real source line.
+    """
+    source = (
+        "public class Html {\n"
+        '    String page = """\n'
+        "        abc\\\n"
+        "        def\n"
+        '        """;\n'
+        "\n"
+        "    int marker = 1;\n"
+        "}\n"
+    )
+    rewritten = desugar_text_blocks(source)
+
+    assert rewritten.count("\n") == source.count("\n")
+
+    tree = javalang.parse.parse(rewritten)
+    marker_field = tree.types[0].body[1]
+    assert marker_field.position.line == 7
+
+
+def test_text_block_content_is_not_rewritten_by_later_code_transforms() -> None:
+    source = (
+        "public class Text {\n"
+        '    String password = """\n'
+        "        sealed class Fake permits X {\n"
+        "        o instanceof String value\n"
+        '        """;\n'
+        "}\n"
+    )
+    rewritten = preprocess(source)
+    tree = javalang.parse.parse(rewritten)
+
+    field = tree.types[0].body[0]
+    value = field.declarators[0].initializer.value
+    assert "sealed class Fake permits X" in value
+    assert "o instanceof String value" in value
 
 
 def test_text_block_with_embedded_secret_is_detected_by_cwe_798(tmp_path: Path) -> None:

@@ -1161,3 +1161,163 @@ pattern-matching `switch` will report `PARSE_FAILED`, not a wrong
 result - consistent with the project's fail-closed principle - and
 that this is a known, bounded, and now-documented limitation rather
 than an unbounded one.
+
+## [2026-07-15] - Java 17-21 preprocessor re-attacked; string/comment mutation bug fixed
+
+**What we re-tested:** After extending Layer 1's Java 17-21 coverage
+via `_modern_java_preprocessor.py`, re-ran the parser/rule pipeline
+against adversarial modern-Java inputs rather than only "happy path"
+construct examples: sealed declarations with hardcoded secrets, text
+blocks containing secrets, pattern-matching `instanceof` inside Spring
+controllers, empty-bodied records, records with bodies, switch
+expressions, and literal/comment text that merely *looked like* modern
+Java syntax.
+
+**What broke:** The regex rewrites for sealed modifiers, `permits`
+clauses, pattern-matching `instanceof`, and records were still running
+globally over the whole source file. That meant ordinary string
+literals, text-block values after desugaring, and comments could be
+silently mutated if they contained words like `sealed`, `non-sealed`,
+`permits`, or `o instanceof String value`. Example failure before the
+fix: `String password = "sealed secret";` was rewritten into
+`String password = "secret";`. For CWE-798 this is a significant
+correctness bug because the scanner reasons about literal values; a
+parseable but corrupted value is worse than a clean `PARSE_FAILED`.
+
+**Fix:** Added a source-index-preserving mask used by every regex
+preprocessor substitution. The mask blanks string literals, character
+literals, line comments, and block comments while preserving all
+indexes and newlines, then applies regex matches found on the masked
+"real code only" view back to the original source spans. This keeps
+line-number preservation intact while preventing code transforms from
+touching literal/comment content.
+
+**Regression tests added:** `tests/test_modern_java_preprocessor.py`
+now covers sealed/permits text inside normal string literals and
+comments, pattern-matching-`instanceof` text inside string literals,
+and text-block contents that contain sealed/permits/instanceof-looking
+text. The tests assert the literal value is preserved, not merely that
+the rewritten file parses.
+
+**Current verified behavior:** Java 17 constructs that are safe to
+preprocess still parse and feed the CWE rules correctly: sealed class
+with `password` -> CWE-798 finding, text block assigned to `password`
+-> CWE-798 finding, Spring endpoint using pattern-matching
+`instanceof` -> CWE-284 finding, empty-bodied record -> parses.
+Known deliberate gaps remain unchanged: switch expressions and
+records with non-empty bodies still fail closed as `PARSE_FAILED`.
+Full verification after the fix: 139 tests passed, `mypy`, `ruff`,
+`black --check`, and `git diff --check` all clean.
+
+## [2026-07-16] - Code review round: fail-closed scanner bug, pom.xml entity-expansion gap, text-block escape gap
+
+**What the plan said:** The prior two entries treated `scanner.py`'s
+test-root exclusion, `pom_parser.py`'s XML-attack hardening, and the
+Java 17-21 text-block desugaring as done and verified.
+
+**What we actually did / found:** An independent code review surfaced
+three real defects the earlier verification passes missed, none
+hypothetical - each was reproduced directly before being fixed.
+
+1. **(Blocking, fail-closed violation)** `scanner.py`'s directory walk
+   excluded *any* directory segment named `test`/`tests` anywhere in
+   the tree, not just conventional test roots. A production package
+   genuinely named `test` (e.g. `com.example.test`, a plausible name
+   for a testing-utilities module shipped as part of the app) was
+   silently dropped from the scan with **no** `rejected_paths` entry -
+   a direct violation of CLAUDE.md's fail-closed requirement that a
+   file never be dropped from results without a trace. Reproduced with
+   `src/main/java/com/example/test/ProdSecret.java` containing a
+   hardcoded password: `scan_directory()` returned it in neither
+   `java_files` nor `rejected_paths`. Fixed by scoping the exclusion to
+   two conventional shapes only - directly under a `src` directory
+   (Maven/Gradle's `src/test/...` layout, matched by immediate parent
+   name, so it still works in multi-module repos) or directly under
+   the scan root itself (`<root>/test(s)/...`) - via a new
+   `_is_conventional_test_root` helper. A nested directory named
+   `test`/`tests` anywhere else is now scanned like any other
+   directory. Two new regression tests lock this in:
+   `test_scan_does_not_skip_a_production_package_named_test` and
+   `test_scan_skips_root_level_test_directory` (the existing
+   `test_scan_skips_test_source_roots` continues to pass unchanged,
+   since `src/test/...` is still excluded).
+
+2. **(Significant, security-relevant)** `pom_parser.py`'s module
+   docstring claimed internal entity-expansion ("billion laughs") was
+   "already rejected" by CPython's expat amplification-ceiling
+   protection - true only for large payloads. A small, deliberately
+   crafted `<!DOCTYPE>`/`<!ENTITY>` payload (well under that ceiling)
+   parsed *successfully*, with its expansion silently substituted into
+   the tree - a real gap the earlier verification's single "billion
+   laughs"-scale test case didn't exercise. Fixed by rejecting any
+   `pom.xml` containing a `<!DOCTYPE` declaration outright, before
+   `ET.fromstring` ever runs: a real Maven POM never declares one, so
+   this has no false-positive cost and removes internal entity
+   expansion as an attack surface entirely, not just above some size
+   threshold. The module docstring's inaccurate claim was corrected in
+   place rather than left standing next to the fix. New regression
+   test `test_parse_rejects_small_entity_expansion_not_just_large_bombs`
+   locks in the previously-unguarded small-payload case; the existing
+   large-bomb and XXE tests continue to pass unchanged (both already
+   asserted `PARSE_FAILED`, which the new check also produces, for a
+   more direct reason).
+
+3. **(Significant)** `_modern_java_preprocessor.py`'s text-block
+   desugaring didn't interpret the two escape sequences that exist
+   only inside real Java text blocks: `\s` (an explicit trailing space
+   that JEP 378's trailing-whitespace stripping would otherwise
+   remove) and a backslash immediately followed by a line terminator
+   (line continuation, suppressing that line break). This had been
+   flagged as a "known simplification" in the prior entry, but a
+   concrete repro showed the actual failure mode was worse than
+   documented: `String password = """\n abc\s\n """;` - valid Java
+   15+ syntax found in real repos - returned `PARSE_FAILED` ("Illegal
+   escape character"), not merely an inexact value. Fixed by adding
+   `_interpret_text_block_escapes`, run on the stripped text-block
+   value before the existing `_escape_for_string_literal` step:
+   resolves `\s` to a literal space and drops a backslash-newline pair
+   entirely (removing that newline only changes the text block's
+   *value*, not the surrounding file's line count, since it operates
+   on the value-internal `"\n".join(...)` joiner, not a real source
+   newline - verified directly with a dedicated newline-count-
+   preservation test). Three new regression tests cover both escapes
+   individually and newline-count preservation across a line
+   continuation.
+
+All three fixes are additive/narrowing (tighten a check, correct
+documentation, add previously-missing interpretation) - no existing
+passing test needed its assertions changed to accommodate them, and
+the full existing coverage (`test_scan_skips_test_source_roots`, the
+large-entity-bomb and XXE tests, all prior text-block tests) still
+passes unmodified.
+
+**Regression tests added:** 8 new tests total across
+`tests/test_scanner.py` (2), `tests/test_pom_parser.py` (1), and
+`tests/test_modern_java_preprocessor.py` (5 - two escape-specific plus
+one newline-preservation case; the newline-count and double-escape
+existing tests already exercised the general text-block path). Full
+suite: 145 passed (was 139). `black --check`, `ruff`, and `mypy` all
+clean.
+
+**Why:** These are exactly the class of bug this project's own
+fail-closed and "verify, don't assume" principles exist to catch -
+each was a place where an earlier entry's *claim* ("already rejected,"
+"documented as a limitation," "verified... not just does it parse")
+turned out to not fully match the code's actual behavior once tested
+with a more targeted adversarial input than the original pass used.
+Catching this via review rather than in the thesis's own evaluation
+chapter is the cheaper place for it to surface.
+
+**Effect on thesis chapters:** Chapter 4 should describe the
+test-root-exclusion scoping (`src/test` and root-level `test(s)/` only,
+not a blanket name match) as the final, corrected version of that
+design decision - the earlier blanket-exclusion version should not be
+presented as the implemented behavior. Chapter 5's robustness
+discussion should cite the small-entity-expansion finding as a
+concrete example of why "verified against a known attack pattern" must
+specify the *size/shape* of payload tested, not just the attack class
+- the large-bomb test alone gave a false sense of completeness.
+Chapter 5 should also drop the `\s`/line-continuation "known
+simplification" framing from the parser-coverage discussion, since
+both are now handled; the switch-expression gap remains the only
+documented, deliberate Java 17-21 exclusion.

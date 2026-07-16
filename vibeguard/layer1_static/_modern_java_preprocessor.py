@@ -35,10 +35,12 @@ Current coverage, and why each one either is or isn't handled this way:
   CWE-798, which reasons about literal string values - a wrong value
   could produce a wrong hardcoded-secret verdict, silently. Verified
   against JEP 378's own canonical example, not just "does it parse."
-  Known simplification: text-block-specific escapes (``\\s`` for an
-  explicit trailing space, ``\\<newline>`` for line continuation) are
-  not interpreted, only the standard stripping/whitespace rules -
-  documented as a limitation rather than guessed at.
+  The two escapes that only exist inside text blocks - ``\\s`` (an
+  explicit trailing space that would otherwise be stripped) and a
+  backslash immediately followed by a line terminator (line
+  continuation, suppressing that line break) - are interpreted before
+  the standard string-literal escaping runs, the same order real
+  ``javac`` resolves them in.
 - **Switch expressions / pattern-matching ``switch``** (arrow-style
   ``case X -> ...``): deliberately **not** handled here. Converting
   arrow-style case bodies (which can be a single expression, a block,
@@ -52,6 +54,7 @@ Current coverage, and why each one either is or isn't handled this way:
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 
 _SEALED_MODIFIER_PATTERN = re.compile(r"\b(?:non-sealed|sealed)\s+")
 _PERMITS_CLAUSE_PATTERN = re.compile(r"\s+permits\s+[^{]+(?=\{)")
@@ -86,7 +89,7 @@ def desugar_simple_records(source: str) -> str:
     reporting a finding on a specific record field must still point at
     the field's real source line.
     """
-    return _RECORD_PATTERN.sub(_rewrite_match, source)
+    return _sub_outside_protected(source, _RECORD_PATTERN, _rewrite_match)
 
 
 def _rewrite_match(match: re.Match[str]) -> str:
@@ -219,8 +222,8 @@ def strip_sealed_modifiers(source: str) -> str:
     each match is replaced with a run of blank lines matching however
     many newlines it contained, same as every other rewrite here.
     """
-    without_modifier = _SEALED_MODIFIER_PATTERN.sub(_blank_out, source)
-    return _PERMITS_CLAUSE_PATTERN.sub(_blank_out, without_modifier)
+    without_modifier = _sub_outside_protected(source, _SEALED_MODIFIER_PATTERN, _blank_out)
+    return _sub_outside_protected(without_modifier, _PERMITS_CLAUSE_PATTERN, _blank_out)
 
 
 def strip_pattern_matching_bindings(source: str) -> str:
@@ -234,7 +237,88 @@ def strip_pattern_matching_bindings(source: str) -> str:
     line break between the type and the bound variable name is still
     newline-count-safe, same as every other rewrite here.
     """
-    return _PATTERN_INSTANCEOF_PATTERN.sub(_keep_group_one, source)
+    return _sub_outside_protected(source, _PATTERN_INSTANCEOF_PATTERN, _keep_group_one)
+
+
+def _sub_outside_protected(
+    source: str, pattern: re.Pattern[str], replacement: str | Callable[[re.Match[str]], str]
+) -> str:
+    """Apply a regex substitution only to real code, not strings/comments.
+
+    Regex-based Java rewrites are only safe if they cannot mutate text
+    inside string literals, char literals, or comments. The mask keeps
+    source indexes and newlines identical while replacing protected
+    characters with spaces, so match spans can be applied back to the
+    original source without shifting line numbers.
+    """
+    masked = _mask_protected_regions(source)
+    pieces: list[str] = []
+    last_end = 0
+    for match in pattern.finditer(masked):
+        pieces.append(source[last_end : match.start()])
+        pieces.append(replacement(match) if callable(replacement) else replacement)
+        last_end = match.end()
+    pieces.append(source[last_end:])
+    return "".join(pieces)
+
+
+def _mask_protected_regions(source: str) -> str:
+    """Blank string/char literals and comments while preserving indexes/newlines."""
+    result = list(source)
+    index = 0
+    while index < len(source):
+        if source.startswith("//", index):
+            index = _blank_until_line_end(result, source, index)
+        elif source.startswith("/*", index):
+            index = _blank_until_block_comment_end(result, source, index)
+        elif source[index] == '"':
+            index = _blank_until_quoted_literal_end(result, source, index, '"')
+        elif source[index] == "'":
+            index = _blank_until_quoted_literal_end(result, source, index, "'")
+        else:
+            index += 1
+    return "".join(result)
+
+
+def _blank_char(result: list[str], source: str, index: int) -> None:
+    if source[index] != "\n":
+        result[index] = " "
+
+
+def _blank_until_line_end(result: list[str], source: str, start: int) -> int:
+    index = start
+    while index < len(source) and source[index] != "\n":
+        _blank_char(result, source, index)
+        index += 1
+    return index
+
+
+def _blank_until_block_comment_end(result: list[str], source: str, start: int) -> int:
+    index = start
+    while index < len(source):
+        _blank_char(result, source, index)
+        if source.startswith("*/", index):
+            _blank_char(result, source, index + 1)
+            return index + 2
+        index += 1
+    return index
+
+
+def _blank_until_quoted_literal_end(result: list[str], source: str, start: int, quote: str) -> int:
+    _blank_char(result, source, start)
+    index = start + 1
+    escaped = False
+    while index < len(source):
+        char = source[index]
+        _blank_char(result, source, index)
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == quote:
+            return index + 1
+        index += 1
+    return index
 
 
 def desugar_text_blocks(source: str) -> str:
@@ -254,6 +338,7 @@ def _rewrite_text_block(match: re.Match[str]) -> str:
     lines = match.group("content").split("\n")
     stripped_lines = _strip_text_block_indentation(lines)
     value = "\n".join(stripped_lines)
+    value = _interpret_text_block_escapes(value)
     literal = _escape_for_string_literal(value)
 
     total_lines = match.group(0).count("\n") + 1
@@ -280,6 +365,50 @@ def _strip_text_block_indentation(lines: list[str]) -> list[str]:
     return [line[min_indent:].rstrip() for line in lines]
 
 
+def _interpret_text_block_escapes(value: str) -> str:
+    """Resolve the two escape sequences that only exist inside text blocks.
+
+    ``\\s`` marks a literal trailing space that JEP 378's trailing-
+    whitespace stripping would otherwise remove - by the time this
+    runs, stripping has already happened (``\\s`` isn't itself a
+    whitespace character, so it survives ``rstrip``), so it's safe to
+    resolve it to a real space here. A backslash immediately followed
+    by an actual newline (a line-continuation, joining what was two
+    source lines into one) is dropped entirely - both characters are
+    consumed and nothing is emitted for them. Removing that ``\\n``
+    only changes the text block's *value*, not the surrounding file's
+    line count: the newline being consumed here is a value-internal
+    joiner produced by ``"\\n".join(stripped_lines)``, not one of the
+    real source newlines ``_rewrite_text_block``'s padding preserves.
+
+    Every other backslash sequence (``\\"``, ``\\\\``, an already-
+    present ``\\n`` escape, ...) is passed through untouched for
+    ``_escape_for_string_literal`` to resolve afterward, in the same
+    order real ``javac`` processes text-block escapes ahead of
+    standard string escaping.
+    """
+    result: list[str] = []
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if char == "\\" and index + 1 < len(value):
+            next_char = value[index + 1]
+            if next_char == "s":
+                result.append(" ")
+                index += 2
+                continue
+            if next_char == "\n":
+                index += 2
+                continue
+            result.append(char)
+            result.append(next_char)
+            index += 2
+            continue
+        result.append(char)
+        index += 1
+    return "".join(result)
+
+
 def _escape_for_string_literal(value: str) -> str:
     """Escape a text block's stripped value for embedding as a normal string literal.
 
@@ -295,12 +424,11 @@ def _escape_for_string_literal(value: str) -> str:
     escaped - those are the two characters a normal string literal
     can't contain raw.
 
-    Known simplification: the two escapes that only exist inside text
-    blocks (``\\s`` for an explicit trailing space, ``\\`` followed by
-    a line break for line continuation) are not specially interpreted
-    here, so a text block using either would carry a slightly
-    different literal value after rewriting than true JEP 378 gives it
-    - documented, not silently assumed correct.
+    Text-block-only escapes (``\\s``, line-continuation) are already
+    resolved by ``_interpret_text_block_escapes`` before this function
+    ever runs, so by the time a backslash reaches here it's always a
+    standard Java escape (``\\"``, ``\\\\``, an already-present
+    ``\\n``, ...) to pass through unchanged.
     """
     result: list[str] = []
     previous_was_unescaped_backslash = False
