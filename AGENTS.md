@@ -136,25 +136,25 @@ vibeguard/
 
 **Dependencies (current, reflects `IMPLEMENTATION_LOG.md` remediation/addition history — extend as needed, log additions):**
 ```
-javalang tree-sitter==0.26.0 tree-sitter-java==0.23.5 pyyaml shap scikit-learn>=1.5.0 xgboost pandas numpy
-python-dotenv>=1.2.2 rich jinja2>=3.1.6 safety>=3.8.1 requests>=2.33.0 black>=26.3.1 ruff mypy pytest>=9.0.3
+javalang tree-sitter==0.26.0 tree-sitter-java==0.23.5 pyyaml shap scikit-learn>=1.5.0 numpy
+rich safety>=3.8.1 black>=26.3.1 ruff mypy pytest>=9.0.3
 ```
-Note: exact version floors above come from the 2026-07-13 dependency vulnerability remediation log entry — do not downgrade below these without checking `safety check` again first.
+Note: exact version floors above come from the 2026-07-13 dependency vulnerability remediation log entry — do not downgrade below these without checking `safety check` again first. `xgboost`, `pandas`, `python-dotenv`, `jinja2`, and `requests` were pinned early on but never actually used anywhere in the codebase; removed 2026-09-02 as dead weight in a security tool that should stay lean and auditable. `xgboost` specifically: Section 1's "Random Forest / XGBoost" ML justification is not affected by this — XGBoost remains a documented, approved future comparison (see `IMPLEMENTATION_LOG.md`'s Layer 4 entries), just not yet built; re-add it if and when that comparison is actually implemented, per this project's established "add a dependency on real need, not speculatively" practice.
 
 ---
 
 ## 7. Build Order
 
-**Current status: Layers 1–4 are frozen; Layer 5 is implemented and pending independent QA before freeze.** The build order below is the original plan — for what's actually built and what remains, `IMPLEMENTATION_LOG.md` and Section 8's freeze status are authoritative, not this list.
+**Current status: Layers 1–5 are all frozen.** Layer 5 passed its independent adversarial QA pass on 2026-07-30 (SHAP multiclass shape validation hardened, CLI reporting failures made fail-closed) and is frozen. Layer 1 has since been narrowly reopened and re-frozen twice more on the same "real-world QA found a blocking gap" grounds already established for it: once for the Layer 4 dataset-circularity fix's supporting work, and again on 2026-09-02 when scanning real, independently-maintained repositories (`.qa-repos/spring-petclinic-rest`, `.qa-repos/quarkus-super-heroes`) found CWE-284 blind to centralized Spring Security authorization config, fixed as a fail-closed caveat (never a suppression) — see `IMPLEMENTATION_LOG.md`. The build order below is the original plan — for what's actually built and what remains, `IMPLEMENTATION_LOG.md` and Section 8's freeze status are authoritative, not this list.
 
 1. ~~`ast_parser.py` — Java AST parsing via `javalang`~~ — done. Now a dual-parser dispatch: `javalang` (+ `_modern_java_preprocessor.py` text-level desugaring) as primary, `tree-sitter`/`tree-sitter-java` as fallback for syntax neither of those handles (e.g. records with bodies, switch expressions). `ParsedFile` exposes both `tree` and `tree_sitter` AST slots.
 2. ~~`rules/cwe_798.py`~~ — done, including config-file detection, assignment/call-site literal coverage, and both parser paths.
 3. ~~Remaining four CWE rule modules~~ — done (`cwe_284.py`, `cwe_287.py`, `cwe_20.py`, `cwe_1035.py`), all with both parser paths where applicable (`cwe_1035.py` is POM-only, no Java AST involved).
 4. ~~`scanner.py`~~ — done, including symlink-escape protection, build/IDE-output exclusion, and conventional-test-root exclusion scoped narrowly (not a blanket name match).
-5. Layer 2 (feature extraction) — done and frozen. Layer 3 (rule-based scoring) — done and frozen. Layer 4 (ML) — done and frozen: project-level Random Forest, labelled dataset loader, deterministic leave-one-out evaluator, controlled AI-generated Java microservice dataset, and trusted retraining-based model contract are all in place. Layer 5 (SHAP explainability + reporting) — implemented on 2026-07-22 and pending independent QA before freeze.
-6. `evaluation/evaluate.py` — implemented on 2026-07-22 as a thesis-evaluation convenience wrapper around the frozen Layer 4 contract/dataset workflow; currently renders console metrics, leave-one-out predictions, and confusion-matrix summaries.
+5. Layer 2 (feature extraction) — done and frozen. Layer 3 (rule-based scoring) — done and frozen. Layer 4 (ML) — done and frozen: project-level Random Forest, labelled dataset loader, deterministic leave-one-out evaluator, and trusted retraining-based model contract are all in place. Its labelled dataset was expanded from 8 to 15 controlled projects on 2026-09-02 after review found the original 8 could not distinguish the ML classifier from a fixed max-severity baseline (they scored identically on the expanded dataset too — see `IMPLEMENTATION_LOG.md` for the honest result and why). Layer 5 (SHAP explainability + reporting) — implemented 2026-07-22, passed independent QA 2026-07-30, frozen.
+6. `evaluation/evaluate.py` — implemented on 2026-07-22 as a thesis-evaluation convenience wrapper around the frozen Layer 4 contract/dataset workflow; renders console metrics, leave-one-out predictions, confusion-matrix summaries, and (since 2026-09-02) a fixed-baseline comparison row alongside the ML metrics.
 
-**Next actual piece of work, per Section 8's current freeze status, is:** run an independent adversarial QA pass against Layer 5 SHAP explainability/reporting and freeze it if clean.
+**Next actual piece of work:** continue evaluating precision/recall against real, independently-maintained repositories (two are already available under `.qa-repos/` for this) rather than only controlled sample apps — the 2026-09-02 pass already found and addressed two real gaps this way (see `IMPLEMENTATION_LOG.md`) and more real-repo testing is the highest-value remaining evaluation work. Public-release housekeeping (LICENSE, CI, dependency hygiene) is a parallel, lower-risk track, not a substitute for it.
 
 ---
 
@@ -232,7 +232,7 @@ Current freeze status must be respected:
   microservices, deterministic leave-one-out evaluation metrics, and a
   trusted retraining-based model contract that avoids loading arbitrary
   serialized model artifacts.
-- Layer 5 SHAP explainability and reporting is implemented but not yet frozen; reopen only for Layer 5 QA findings or blocking correctness issues.
+- Layer 5 SHAP explainability and reporting is frozen (passed independent adversarial QA 2026-07-30); reopen only for a blocking correctness issue.
 
 If a user asks to "test more" or "try to break it" after a layer is
 frozen, first clarify whether the request is:
