@@ -136,7 +136,10 @@ def _run_rules(result: ScanResult) -> tuple[Finding, ...]:
         if pom_file.status != ParseStatus.OK:
             continue
         findings.extend(cwe_1035.detect_in_pom(pom_file))
-    return tuple(findings)
+    return cwe_284.apply_centralized_authorization_context(
+        tuple(findings),
+        (jf for jf in result.java_files if jf.status == ParseStatus.OK),
+    )
 
 
 def _score_findings(findings: tuple[Finding, ...]) -> tuple[ScoredFinding, ...]:
@@ -283,25 +286,48 @@ def _print_config_report(results: tuple[ParsedConfigFile, ...]) -> None:
 
 
 def _print_pom_report(results: tuple[ParsedPomFile, ...]) -> None:
-    """Render a Rich table summarizing each pom.xml's parse outcome."""
+    """Render a Rich table summarizing each pom.xml's parse outcome.
+
+    Includes an "Unchecked" column: dependencies with no resolvable
+    version (e.g. inherited from a parent BOM VibeGuard cannot read) can
+    never be evaluated by CWE-1035, which would otherwise report "0
+    findings" indistinguishably from "0 vulnerable dependencies, all
+    checked" - a real gap found by scanning real Spring Boot/Quarkus
+    projects, where the large majority of dependencies omit an explicit
+    version by idiomatic convention. Surfacing the count keeps a clean
+    result honest rather than silently implying full coverage.
+    """
     console = Console()
     table = Table(title="VibeGuard Layer 1 - pom.xml Parse Report")
     table.add_column("File")
     table.add_column("Status")
     table.add_column("Dependencies")
+    table.add_column("Unchecked (no resolvable version)")
     table.add_column("Detail")
 
     for result in results:
+        unresolved = sum(1 for dependency in result.dependencies if dependency.version is None)
         table.add_row(
             str(result.path),
             result.status.value,
             str(len(result.dependencies)),
+            str(unresolved) if result.dependencies else "-",
             _summarize(result.error_message),
         )
 
     console.print(table)
     ok_count = sum(1 for result in results if result.status == ParseStatus.OK)
     console.print(f"{ok_count}/{len(results)} pom.xml files parsed OK")
+    total_dependencies = sum(len(result.dependencies) for result in results)
+    total_unresolved = sum(
+        1 for result in results for dependency in result.dependencies if dependency.version is None
+    )
+    if total_unresolved:
+        console.print(
+            f"{total_unresolved}/{total_dependencies} declared dependencies have no "
+            "resolvable version (e.g. inherited from a parent BOM) and could not be "
+            "checked against CWE-1035's known-vulnerability list."
+        )
 
 
 def _print_rejected_report(rejected: tuple[RejectedPath, ...]) -> None:

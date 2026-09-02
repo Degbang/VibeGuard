@@ -5,9 +5,28 @@ from __future__ import annotations
 from pathlib import Path
 
 from vibeguard.layer1_static.ast_parser import parse_file
-from vibeguard.layer1_static.rules.cwe_284 import CWE_ID, detect_in_java
+from vibeguard.layer1_static.rules.cwe_284 import (
+    CWE_ID,
+    apply_centralized_authorization_context,
+    detect_in_java,
+    has_centralized_authorization_rule,
+)
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
+
+_SECURITY_FILTER_CHAIN_JAVA = (
+    "import org.springframework.context.annotation.Bean;\n"
+    "import org.springframework.security.web.SecurityFilterChain;\n"
+    "public class SecurityConfig {\n"
+    "    @Bean\n"
+    "    public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {\n"
+    "        http\n"
+    "            .authorizeHttpRequests(authz -> authz\n"
+    "                .anyRequest().authenticated());\n"
+    "        return http.build();\n"
+    "    }\n"
+    "}\n"
+)
 
 
 def test_detect_in_java_finds_endpoint_with_no_authorization_annotation() -> None:
@@ -246,3 +265,169 @@ def test_detect_in_java_does_not_flag_tree_sitter_rest_client_interface(
 
     assert result.tree_sitter is not None
     assert detect_in_java(result) == ()
+
+
+def test_has_centralized_authorization_rule_detects_any_request_authenticated(
+    tmp_path: Path,
+) -> None:
+    """A SecurityFilterChain with a blanket .anyRequest().authenticated() rule.
+
+    This is the exact real-world pattern found by scanning
+    spring-petclinic-rest (see IMPLEMENTATION_LOG.md): a project can
+    centralize authorization this way instead of per-method annotations,
+    which this rule's annotation-only detection cannot see at all.
+    """
+    java_file = tmp_path / "SecurityConfig.java"
+    java_file.write_text(_SECURITY_FILTER_CHAIN_JAVA)
+
+    result = parse_file(java_file)
+
+    assert has_centralized_authorization_rule(result) is True
+
+
+def test_has_centralized_authorization_rule_detects_permit_all(tmp_path: Path) -> None:
+    """anyRequest().permitAll() is also a blanket decision, just a permissive one."""
+    java_file = tmp_path / "SecurityConfig.java"
+    java_file.write_text(
+        "import org.springframework.security.web.SecurityFilterChain;\n"
+        "public class SecurityConfig {\n"
+        "    public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {\n"
+        "        http.authorizeHttpRequests(authz -> authz.anyRequest().permitAll());\n"
+        "        return http.build();\n"
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    assert has_centralized_authorization_rule(result) is True
+
+
+def test_has_centralized_authorization_rule_false_with_no_security_filter_chain() -> None:
+    result = parse_file(FIXTURES_DIR / "UnprotectedResource.java")
+
+    assert has_centralized_authorization_rule(result) is False
+
+
+def test_has_centralized_authorization_rule_false_without_any_request(tmp_path: Path) -> None:
+    """A SecurityFilterChain that only rules on specific paths is not a blanket decision.
+
+    Must not be treated the same as a project-wide anyRequest() rule -
+    that would risk masking a genuine gap for every path the chain
+    doesn't actually mention.
+    """
+    java_file = tmp_path / "SecurityConfig.java"
+    java_file.write_text(
+        "import org.springframework.security.web.SecurityFilterChain;\n"
+        "public class SecurityConfig {\n"
+        "    public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {\n"
+        "        http.authorizeHttpRequests(authz -> authz\n"
+        '            .requestMatchers("/admin/**").authenticated());\n'
+        "        return http.build();\n"
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    assert has_centralized_authorization_rule(result) is False
+
+
+def test_has_centralized_authorization_rule_tree_sitter_fallback(tmp_path: Path) -> None:
+    """The same pattern must be detected on a Tree-sitter fallback parse."""
+    java_file = tmp_path / "SecurityConfig.java"
+    java_file.write_text(
+        "import org.springframework.security.web.SecurityFilterChain;\n"
+        "public class SecurityConfig {\n"
+        "    public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {\n"
+        "        int level = switch (1) {\n"
+        "            case 1 -> 1;\n"
+        "            default -> 0;\n"
+        "        };\n"
+        "        http.authorizeHttpRequests(authz -> authz.anyRequest().authenticated());\n"
+        "        return http.build();\n"
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    assert result.tree_sitter is not None
+    assert has_centralized_authorization_rule(result) is True
+
+
+def test_apply_centralized_authorization_context_appends_caveat_when_present(
+    tmp_path: Path,
+) -> None:
+    endpoint_file = tmp_path / "RootController.java"
+    endpoint_file.write_text(
+        "import org.springframework.web.bind.annotation.*;\n"
+        "@RestController\n"
+        "public class RootController {\n"
+        '    @RequestMapping("/")\n'
+        "    public void redirect() {}\n"
+        "}\n"
+    )
+    security_file = tmp_path / "SecurityConfig.java"
+    security_file.write_text(_SECURITY_FILTER_CHAIN_JAVA)
+
+    endpoint_result = parse_file(endpoint_file)
+    security_result = parse_file(security_file)
+    findings = detect_in_java(endpoint_result)
+    assert len(findings) == 1
+
+    annotated = apply_centralized_authorization_context(
+        findings, (endpoint_result, security_result)
+    )
+
+    assert len(annotated) == 1
+    assert annotated[0].identifier == "redirect"
+    assert "SecurityFilterChain" in annotated[0].message
+    assert "anyRequest" in annotated[0].message
+
+
+def test_apply_centralized_authorization_context_no_op_when_absent(tmp_path: Path) -> None:
+    endpoint_file = tmp_path / "RootController.java"
+    endpoint_file.write_text(
+        "import org.springframework.web.bind.annotation.*;\n"
+        "@RestController\n"
+        "public class RootController {\n"
+        '    @RequestMapping("/")\n'
+        "    public void redirect() {}\n"
+        "}\n"
+    )
+    endpoint_result = parse_file(endpoint_file)
+    findings = detect_in_java(endpoint_result)
+
+    unchanged = apply_centralized_authorization_context(findings, (endpoint_result,))
+
+    assert unchanged == findings
+
+
+def test_apply_centralized_authorization_context_never_drops_findings(tmp_path: Path) -> None:
+    """The caveat must never suppress a finding - only annotate its message.
+
+    A security tool that silently hides a candidate because of a coarse,
+    best-effort heuristic is worse than one that keeps flagging it.
+    """
+    endpoint_file = tmp_path / "RootController.java"
+    endpoint_file.write_text(
+        "import org.springframework.web.bind.annotation.*;\n"
+        "@RestController\n"
+        "public class RootController {\n"
+        '    @RequestMapping("/")\n'
+        "    public void redirect() {}\n"
+        "}\n"
+    )
+    security_file = tmp_path / "SecurityConfig.java"
+    security_file.write_text(_SECURITY_FILTER_CHAIN_JAVA)
+
+    endpoint_result = parse_file(endpoint_file)
+    security_result = parse_file(security_file)
+    findings = detect_in_java(endpoint_result)
+
+    annotated = apply_centralized_authorization_context(
+        findings, (endpoint_result, security_result)
+    )
+
+    assert len(annotated) == len(findings)

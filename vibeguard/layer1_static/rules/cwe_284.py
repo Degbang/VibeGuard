@@ -24,6 +24,8 @@ made at all," not "was it the right one."
 
 from __future__ import annotations
 
+import dataclasses
+from collections.abc import Iterable
 from pathlib import Path
 from typing import TypeAlias
 
@@ -34,6 +36,9 @@ from vibeguard.layer1_static._tree_sitter_java import (
     annotation_names as ts_annotation_names,
 )
 from vibeguard.layer1_static._tree_sitter_java import (
+    child_by_field as ts_child_by_field,
+)
+from vibeguard.layer1_static._tree_sitter_java import (
     declaration_name as ts_declaration_name,
 )
 from vibeguard.layer1_static._tree_sitter_java import (
@@ -41,6 +46,15 @@ from vibeguard.layer1_static._tree_sitter_java import (
 )
 from vibeguard.layer1_static._tree_sitter_java import (
     node_line as ts_node_line,
+)
+from vibeguard.layer1_static._tree_sitter_java import (
+    node_text as ts_node_text,
+)
+from vibeguard.layer1_static._tree_sitter_java import (
+    type_name as ts_type_name,
+)
+from vibeguard.layer1_static._tree_sitter_java import (
+    walk as ts_walk,
 )
 from vibeguard.layer1_static._tree_sitter_java import (
     walk_with_ancestors as ts_walk_with_ancestors,
@@ -53,6 +67,23 @@ from vibeguard.layer1_static.rules._endpoint_annotations import (
 from vibeguard.layer1_static.rules._finding import Finding
 
 CWE_ID = "CWE-284"
+
+# A project that centralizes authorization in a Spring Security
+# SecurityFilterChain bean (http.authorizeHttpRequests().anyRequest()...)
+# makes an application-wide access-control decision that per-method/
+# per-class annotation checks below cannot see at all - see
+# has_centralized_authorization_rule's docstring and IMPLEMENTATION_LOG.md
+# for a real example found by scanning a real Spring Boot application.
+_SECURITY_FILTER_CHAIN_RETURN_TYPE = "SecurityFilterChain"
+_ANY_REQUEST_CALL = "anyRequest"
+_BLANKET_AUTHORIZATION_CALLS = frozenset({"authenticated", "permitAll", "denyAll"})
+_CENTRALIZED_AUTH_CAVEAT = (
+    "Note: this project also declares a Spring Security SecurityFilterChain "
+    "with a project-wide '.anyRequest()' authorization rule elsewhere - this "
+    "endpoint may already be covered by that rule depending on path-matching "
+    "and runtime configuration (e.g. a conditional property) that is not "
+    "visible to static analysis."
+)
 
 _TypeDeclaration: TypeAlias = javalang.tree.ClassDeclaration | javalang.tree.InterfaceDeclaration
 
@@ -202,3 +233,109 @@ def _has_authorization_annotation(annotations: tuple[str, ...]) -> bool:
 def _is_http_client_type(annotations: tuple[str, ...]) -> bool:
     """Whether a type is an outbound HTTP client, not an inbound endpoint class."""
     return any(simple_name(a) in _HTTP_CLIENT_TYPE_ANNOTATIONS for a in annotations)
+
+
+def has_centralized_authorization_rule(parsed_file: ParsedFile) -> bool:
+    """Whether this file declares a Spring Security SecurityFilterChain bean
+    with a blanket, application-wide authorization rule - ``.anyRequest()``
+    followed by ``.authenticated()``/``.permitAll()``/``.denyAll()``.
+
+    This is a coarse, name-based signal, the same kind of pattern match
+    every other check in this module makes - not a semantic understanding
+    of Spring Security's path-matching precedence, and not aware of
+    whether a conditional property (e.g. ``@ConditionalOnProperty``)
+    actually activates this bean at runtime. Scanning the real
+    spring-petclinic-rest application found exactly this: a
+    SecurityFilterChain with ``anyRequest().authenticated()`` covers an
+    endpoint this rule would otherwise call unprotected, while a second,
+    differently-conditional SecurityFilterChain elsewhere in the same
+    project sets ``anyRequest().permitAll()`` - which one is actually
+    active depends on a property value that does not exist in source
+    code at all until something sets it at deploy time. Static analysis
+    cannot resolve that either way, so this signal is used to add an
+    explicit caveat to a finding (see ``apply_centralized_authorization_context``),
+    never to silently drop it - a security tool that hides a candidate
+    finding because of a coarse, best-effort heuristic is worse than one
+    that flags too much.
+    """
+    if parsed_file.tree_sitter is not None:
+        return _has_centralized_rule_tree_sitter(parsed_file)
+    if parsed_file.tree is None:
+        return False
+    for _path, method in parsed_file.tree.filter(javalang.tree.MethodDeclaration):
+        if _returns_security_filter_chain(method) and _has_blanket_authorization_call(method):
+            return True
+    return False
+
+
+def _returns_security_filter_chain(method: javalang.tree.MethodDeclaration) -> bool:
+    return getattr(method.return_type, "name", None) == _SECURITY_FILTER_CHAIN_RETURN_TYPE
+
+
+def _has_blanket_authorization_call(method: javalang.tree.MethodDeclaration) -> bool:
+    invocation_members = {
+        node.member for _path, node in method.filter(javalang.tree.MethodInvocation)
+    }
+    return _ANY_REQUEST_CALL in invocation_members and bool(
+        invocation_members & _BLANKET_AUTHORIZATION_CALLS
+    )
+
+
+def _has_centralized_rule_tree_sitter(parsed_file: ParsedFile) -> bool:
+    parsed = parsed_file.tree_sitter
+    if parsed is None:
+        return False
+    for node in ts_walk(parsed.tree.root_node):
+        if node.type != "method_declaration":
+            continue
+        return_type_node = ts_child_by_field(node, "type")
+        if return_type_node is None:
+            continue
+        if ts_type_name(parsed.source, return_type_node) != _SECURITY_FILTER_CHAIN_RETURN_TYPE:
+            continue
+        invocation_names = {
+            ts_node_text(parsed.source, name_node)
+            for child in ts_walk(node)
+            if child.type == "method_invocation"
+            for name_node in (ts_child_by_field(child, "name"),)
+            if name_node is not None
+        }
+        if (
+            _ANY_REQUEST_CALL in invocation_names
+            and invocation_names & _BLANKET_AUTHORIZATION_CALLS
+        ):
+            return True
+    return False
+
+
+def apply_centralized_authorization_context(
+    findings: tuple[Finding, ...], parsed_files: Iterable[ParsedFile]
+) -> tuple[Finding, ...]:
+    """Append a caveat to every CWE-284 finding when the scan also found a
+    centralized Spring Security authorization rule somewhere in the project.
+
+    Findings are never dropped or hidden by this: only their message gains
+    an explicit caveat, so this stays fail-closed - a reader still sees
+    every candidate, with an honest note about what static analysis could
+    not resolve, rather than a finding silently disappearing because of a
+    coarse, project-wide heuristic.
+
+    Args:
+        findings: All findings from a scan (not just CWE-284's) - findings
+            for other CWEs pass through unchanged.
+        parsed_files: Every successfully-parsed Java file from the same
+            scan, checked for the centralized-authorization pattern.
+
+    Returns:
+        The same findings, with CWE-284 messages annotated if applicable.
+    """
+    if not any(has_centralized_authorization_rule(pf) for pf in parsed_files):
+        return findings
+    return tuple(
+        (
+            dataclasses.replace(finding, message=f"{finding.message} {_CENTRALIZED_AUTH_CAVEAT}")
+            if finding.cwe_id == CWE_ID
+            else finding
+        )
+        for finding in findings
+    )

@@ -3805,3 +3805,365 @@ the student. Per Section 9, do not treat this entry as settled project
 history, and do not build further on top of it, until the student has
 reviewed the seven new sample apps' label rationale and the honest
 result above and confirmed it.
+
+---
+
+## [2026-09-02] - Real-repo QA pass finds two Layer 1 precision gaps; CWE-284 gets a fail-closed caveat, CWE-1035 gets explicit unchecked-dependency reporting
+
+**What the plan said:** Layer 1 is frozen. The next step after the
+Layer 4 dataset fix above was to run the tool against real, independently-
+maintained open-source Java projects (`.qa-repos/spring-petclinic-rest`,
+`.qa-repos/quarkus-super-heroes`) to get real precision numbers rather
+than numbers from purpose-built sample apps, per the student's request.
+
+**What we actually did / found:** Ran the full CLI against both real
+repos and verified every finding against the actual source by hand, not
+just trusted the tool's own report.
+
+1. **CWE-1035's version-omission blind spot, confirmed on two real,
+   differently-structured projects.** `spring-petclinic-rest`'s `pom.xml`
+   declares 24 dependencies; 23 have no explicit `<version>` at all,
+   inherited from `spring-boot-starter-parent`. `quarkus-super-heroes`
+   (10 modules) shows the identical pattern via the Quarkus platform BOM.
+   CWE-1035 reported zero vulnerable dependencies on both - not because
+   either is clean, but because it can only ever check a dependency that
+   states its own version, and almost none do in idiomatically-written
+   modern Spring Boot/Quarkus code. This was previously a documented but
+   unquantified limitation; it is now measured: 19/24 unchecked on
+   petclinic, 162/204 (79%) unchecked across quarkus-super-heroes'
+   ten modules.
+
+2. **A previously-undocumented CWE-284 blind spot, found by tracing why
+   only 1 of ~10 petclinic controllers was flagged.** The other
+   controllers use `@PreAuthorize` per method; `RootRestControllerV1`
+   (a Swagger-redirect endpoint) has no annotation at all. Reading
+   `BasicAuthenticationConfig.java` showed the real reason it's still
+   arguably covered: a `SecurityFilterChain` bean with
+   `http.authorizeHttpRequests().anyRequest().authenticated()` applies a
+   single, project-wide rule this rule's annotation-only detection has no
+   way to see. Centralizing authorization this way, instead of annotating
+   every controller, is at minimum as common a real Spring Security
+   pattern as the annotation style this rule already understood.
+
+   It goes further: the same repo also ships `DisableSecurityConfig`
+   (`anyRequest().permitAll()`), active when `petclinic.security.enable`
+   is unset or `false` - which is exactly its *actual default*
+   `application.properties` value. `@EnableMethodSecurity` itself lives
+   inside the conditional `BasicAuthenticationConfig`, so in the real
+   default deployment, `@PreAuthorize` enforcement is not even switched
+   on. The honest picture is close to the opposite of what static
+   analysis can report: VibeGuard says "1 endpoint unprotected, ~9
+   protected"; the actual default runtime configuration protects none of
+   them. No static analysis can resolve this specific case - the decisive
+   value lives in a property that does not exist in source at all until
+   something sets it at deploy time.
+
+3. **CWE-798's "token" name-matching is confirmed too broad in principle,
+   unconfirmed as an actual false positive in the wild.** Neither real
+   repo contains a literal credential-shaped `token` field, so this was
+   tested directly against `is_credential_name` instead:
+   `pageToken`/`nextPageToken`/`refreshToken`/`continuationToken` all
+   match. The practical risk is narrower than the name match alone
+   suggests, though, since CWE-798 additionally requires a *literal*
+   string value - pagination/continuation tokens are almost always
+   runtime values, not literals - so this remains a real but
+   lower-probability gap, left undisturbed rather than narrowed on no
+   real evidence either way.
+
+4. **CWE-798 produced a confirmed true positive on real code**:
+   `rest-fights/src/main/resources/application.properties` in
+   quarkus-super-heroes hardcodes `supersecretquarkuspassword` as a
+   Quarkus remote-dev live-reload password - a real, non-placeholder,
+   non-referenced literal, correctly flagged critical. Useful evidence
+   the core detection logic holds up outside synthetic fixtures, not
+   just a source of gaps.
+
+**What we built, and what we deliberately did not:** Considered and
+rejected fully closing both gaps before writing any code.
+
+- Fully resolving CWE-1035's unchecked dependencies means either running
+  Maven's actual resolver (network calls to Maven Central, or a
+  guaranteed-populated local cache) or bundling external BOM files this
+  tool doesn't have - either breaks CLAUDE.md Section 3's non-negotiable
+  "runs entirely locally... no external API calls for core scanning"
+  constraint, or requires an artifact this tool cannot guarantee exists.
+  Not attempted.
+- Fully closing the CWE-284 gap means understanding Spring Security's
+  fluent `HttpSecurity` API, its path-matching precedence across
+  multiple rules, and - per the petclinic case specifically - a
+  property value that is not determined until deploy time and so cannot
+  be resolved by source-only static analysis under any amount of
+  engineering effort. Not attempted as a full solution for that reason,
+  not effort.
+
+Instead, built two bounded, locally-safe improvements that stay inside
+the existing rule-module design philosophy (coarse, name/pattern-based
+signals, not semantic understanding) and that directly address what was
+actually found:
+
+1. **`cwe_284.has_centralized_authorization_rule()` /
+   `apply_centralized_authorization_context()`.** Detects a method
+   returning `SecurityFilterChain` that contains both an `anyRequest`
+   call and one of `authenticated`/`permitAll`/`denyAll` anywhere in its
+   body (both javalang and Tree-sitter paths) - the same coarse,
+   name-based pattern matching every other check in this module already
+   uses, not a semantic reconstruction of Spring Security's actual
+   behavior. When present anywhere in a scan, every CWE-284 finding's
+   *message* gains an explicit caveat naming the SecurityFilterChain and
+   stating plainly that runtime configuration not visible to static
+   analysis may already cover it. Findings are never suppressed or
+   dropped by this - deliberately, to stay fail-closed: a security tool
+   that hides a candidate because of a coarse, best-effort heuristic is a
+   worse failure mode than one that keeps flagging it with an honest
+   caveat attached. Wired into `main.py`'s `_run_rules` as a
+   post-processing step over the full findings list, not into
+   `cwe_284.detect_in_java()` itself, so Layer 1's existing per-file
+   rule contract and test suite are unaffected.
+
+2. **`main.py`'s pom.xml report now states how much it could not check.**
+   Added an "Unchecked (no resolvable version)" column plus a summary
+   line ("N/M declared dependencies have no resolvable version... and
+   could not be checked"). This does not close the recall gap - it
+   cannot - but it removes the silent, misleading part of it: previously
+   a clean scan of a real Spring Boot/Quarkus project reported "0
+   findings" in a way indistinguishable from "0 vulnerable dependencies,
+   all checked," when the real situation on both test repos was "most
+   dependencies were never evaluated at all."
+
+**Verified against the real repos again after the fix**, not just unit
+tests: petclinic's `RootRestControllerV1` finding now carries the exact
+SecurityFilterChain/anyRequest caveat; quarkus-super-heroes (which has no
+Spring Security at all) correctly shows zero caveat text anywhere,
+confirming the new signal doesn't fire indiscriminately; petclinic's pom
+report now states "19/24 declared dependencies have no resolvable
+version..."; quarkus-super-heroes' combined report states "162/204."
+
+**Regression tests added:** `tests/test_cwe_284.py` gained coverage for
+`has_centralized_authorization_rule` (positive on
+`anyRequest().authenticated()`, positive on `anyRequest().permitAll()`,
+negative with no `SecurityFilterChain` present, negative for a
+path-scoped rule with no `anyRequest()` - proving this doesn't
+over-trigger on narrowly-scoped security config, Tree-sitter fallback
+parity) and `apply_centralized_authorization_context` (caveat appended
+when present, no-op when absent, and an explicit assertion that finding
+*count* never changes - the fail-closed guarantee stated as a test, not
+just a docstring claim).
+
+**Tests/adversarial checks run:**
+- `pytest tests/test_cwe_284.py tests/test_main.py -q`: `35 passed`.
+- Full `pytest -q`: `272 passed` (was 264), clean exit.
+- `mypy .`: clean.
+- `ruff check .`: clean.
+- `black --check .`: clean.
+- `git diff --check`: clean.
+- Live re-scan of both real repos post-fix, confirmed by hand as above.
+
+**Remaining limitations, stated plainly rather than implied solved:**
+CWE-1035 still cannot evaluate the large majority of dependencies in a
+typical modern Spring Boot/Quarkus project - the new reporting makes
+that visible instead of silent, it does not fix the recall gap itself.
+CWE-284's caveat correctly flags *that* static analysis might be
+incomplete for a given finding; it cannot and does not attempt to say
+*which* endpoints are actually covered, since that depends on
+path-matching precedence and, in at least one real case found today, a
+property value that does not exist in source code at all. The
+`is_credential_name`("token") breadth issue is confirmed in principle
+and left unchanged, since narrowing it on zero real-world evidence of
+an actual false positive risked trading a known, bounded gap for an
+unmeasured one in the other direction.
+
+**Why:** Both fixes were scoped specifically to stay inside two
+constraints that mattered more than closing the gap completely: Section
+3's locked "runs entirely locally" rule, and this project's repeated,
+explicit preference for a security tool that discloses what it cannot
+determine over one that either guesses or stays silent. A rushed,
+deeper fix for either gap risked trading a well-understood, honestly
+documented limitation for a less-understood one under time pressure -
+judged the wrong trade for a thesis tool whose credibility depends on
+its stated boundaries being accurate.
+
+**Effect on thesis chapters:** Chapter 5's CWE-1035 evaluation should
+report the exact unchecked-dependency counts from both real repos (19/24
+and 162/204) as a concrete, measured recall limitation, not a
+theoretical one, and should state explicitly that resolving it fully
+would require either violating the local-execution constraint or
+bundling external BOM data this tool does not have. Chapter 5's CWE-284
+evaluation should describe the SecurityFilterChain caveat as a
+deliberate fail-closed design choice (annotate, never suppress) and use
+the petclinic `petclinic.security.enable` case as a concrete, real
+example of why static analysis has a hard - not merely
+engineering-difficulty - limit here. Chapter 3/4 should document
+`apply_centralized_authorization_context` as a project-level
+enrichment step distinct from `detect_in_java`'s per-file candidate
+detection, and the pom.xml report's unchecked-dependency count as part
+of Layer 1's stated output contract.
+
+---
+
+## [2026-09-02] - Deeper real-repo evaluation: a major CWE-284/CWE-20 blind spot found and precisely characterized (not fixed); systematic false-negative sweep; real repos kept out of the Layer 4 training set
+
+**What the plan said:** Continue evaluating precision/recall against
+`.qa-repos/spring-petclinic-rest` and `.qa-repos/quarkus-super-heroes`
+beyond the two gaps already fixed in the entry above, per Section 7's
+stated next step, and assess whether real-repo scan results belong in
+the Layer 4 labelled dataset.
+
+**What we actually did / found:**
+
+1. **Root-caused why petclinic scanned almost clean, and it is not the
+   SecurityFilterChain caveat from the previous entry.** `OwnerRestControllerV1
+   implements OwnersApi`, where `OwnersApi` is a Spring-generated
+   interface (`openapi-generator-maven-plugin`) carrying the actual
+   `@RequestMapping`/`@PostMapping` annotations; the concrete
+   implementing method carries only `@PreAuthorize` and `@Override` -
+   no endpoint annotation of its own at all. Checked systematically:
+   **9 of petclinic's ~10 controllers** use this `implements XApi`
+   pattern (`grep -rln "implements.*Api\b"` across `src/main/java`
+   confirms it - only the one-off `RootRestControllerV1` doesn't).
+   `has_endpoint_annotation()` (shared by `cwe_284.py` and `cwe_20.py`)
+   only inspects a method's own annotation list, so it never recognizes
+   the overridden methods as endpoints at all - not "checked and found
+   protected," genuinely invisible. This is the real explanation for why
+   a full REST CRUD API produced one finding: not because the app is
+   well-protected, but because the tool cannot see most of its endpoint
+   surface in the first place.
+
+   It compounds with a second, independent factor: the generated
+   `OwnersApi.java` interface exists only under
+   `target/generated-sources/openapi/...` - confirmed gitignored in
+   petclinic's own repo (`git check-ignore` on `target/`), present
+   locally only because a Maven build already ran here. `scanner.py`
+   deliberately excludes `target/` (correct, for its original reason -
+   build output duplicating committed source). So even a full fix
+   resolving `@Override` methods against implemented interfaces would
+   not change this specific repo's result unless the interface were
+   committed to `src/` directly (a legitimate alternative to codegen)
+   or the scan ran after `mvn generate-sources` - a real,
+   build-state-dependent reproducibility wrinkle stacked on top of the
+   detection gap itself.
+
+   Confirmed this is Spring-specific, not general: none of Quarkus's
+   REST resource classes in `rest-heroes`/`rest-villains`/`rest-fights`
+   use a generated-interface layer; they are hand-written JAX-RS
+   resources directly, so this exact gap does not apply to the Quarkus
+   half of the evaluation.
+
+2. **Assessed, did not attempt, a full fix - larger and riskier than
+   either gap fixed in the previous entry.** A real fix means resolving
+   `@Override` methods against every interface a class implements,
+   across files in the same scan (architecturally similar to the
+   SecurityFilterChain project-wide pass added today), but goes further:
+   the specific annotations that matter for CWE-20 (`@RequestBody`,
+   `@Valid`) live at *parameter* level, and `ParsedParameter` (Layer 1's
+   structural summary) does not capture parameter annotations at all
+   today - closing this fully would need a new index keyed by
+   (interface name, method name, parameter position), multiple-interface
+   handling, and only helps at all for projects that commit their
+   interface source (the target/-exclusion case above cannot benefit
+   regardless). Judged this too large and too edge-case-prone to build
+   under today's time pressure without risking the same mistake already
+   avoided twice this session: trading a well-understood, precisely
+   documented gap for a half-built, less-understood one. Logged as
+   future work, not attempted.
+
+3. **Systematic false-negative sweep found no additional gaps.**
+   Beyond the annotation-visibility issue above:
+   - `grep`-searched both repos for `==`/`!=` comparisons against
+     credential-shaped names (CWE-287): zero matches in either repo -
+     a genuine true negative, not a miss.
+   - Searched both repos for secret patterns outside
+     `CREDENTIAL_KEYWORDS`' vocabulary: AWS-style keys
+     (`AKIA[0-9A-Z]{16}`), PEM private-key blocks, and connection
+     strings with embedded credentials (`://user:pass@host`) - none
+     found. Also checked field names using vocabulary the credential
+     list doesn't cover (`passphrase`, `signingKey`, `dsn`) - none
+     found in either repo.
+   - Confirmed petclinic's zero CWE-20 findings are not a rule miss on
+     their own terms: it does not use `@RequestBody` anywhere in
+     committed `src/main/java` at all (confirmed by direct grep), so
+     there is nothing for CWE-20 to have found even before accounting
+     for finding #1's annotation-visibility gap.
+
+4. **Per-module breakdown of quarkus-super-heroes**, scanning each of
+   its independently-deployable services separately rather than as one
+   monorepo blob (more methodologically correct for a project-level risk
+   tool, since each module is its own real deployment unit):
+   `rest-heroes` (1: CWE-284, public HTML browse page), `rest-villains`
+   (1: CWE-284, same pattern), `rest-fights` (2: CWE-798, the real
+   `supersecretquarkuspassword` secret under two different config keys),
+   `ui-super-heroes` (1: CWE-284, a frontend-config endpoint serving a
+   non-secret base URL), `rest-narration`/`event-statistics`/
+   `grpc-locations` (0, all with 100% clean parses - genuine true
+   negatives, not scan failures).
+
+5. **Precision assessment across all 6 findings from both repos**: every
+   one is a true positive *by the rule's own stated definition* (a real
+   instance of the pattern each rule looks for) - zero outright false
+   positives observed in this pass. But three of the six (the two
+   `UIResource`-style browse pages plus the frontend-config endpoint) are
+   low real-world severity despite Layer 3's fixed CWE-284 base score of
+   80 ("high") - they are architecturally-public informational endpoints
+   with no sensitive data, not under-protected sensitive ones. This is a
+   distinct, real critique from "false positive": the rule correctly
+   identifies "no access-control decision was made," but Layer 3's rubric
+   cannot distinguish "and that matters" from "and it doesn't," since
+   severity is assigned per-CWE, not per-endpoint-sensitivity - not
+   attempted to fix today, noted as a limitation.
+
+6. **Decided, with the student, not to fold real-repo results into the
+   Layer 4 labelled training dataset.** The synthetic sample apps'
+   ground-truth labels are authoritative by construction - the label is
+   defined by design intent before scanning, per the previous entry's
+   methodology. A real, third-party, actively-maintained repository has
+   no equivalent authority behind an assigned label: it would be the
+   author's own after-the-fact judgment on someone else's software, with
+   no incident history, audit, or maintainer input behind it - a
+   meaningfully weaker source of ground truth that should not be mixed
+   into the same dataset as the by-construction synthetic labels without
+   being distinguishable, and the student's judgment (asked directly,
+   not decided unilaterally) was to keep the two separate rather than
+   flag-and-mix. Real repos remain what they were already being used
+   for: independent precision/recall evaluation evidence, not training
+   data.
+
+**Tests/adversarial checks run:** No code changed in this entry (root-cause
+investigation, evaluation, and a scoping decision only) - existing 272-test
+suite and all four static gates from the previous entry remain the
+relevant verification and were not re-run redundantly.
+
+**Remaining limitations:** The `@Override`-through-interface annotation
+blind spot is now a precisely characterized, real gap affecting CWE-284
+and CWE-20 for any Spring project using API-first/codegen controller
+interfaces (a common enterprise pattern) - not fixed. Layer 3's
+per-CWE (not per-endpoint) severity rubric cannot distinguish a
+genuinely sensitive missing-auth endpoint from an intentionally-public
+informational one - not fixed. Neither should be presented as solved.
+
+**Why:** Root-causing precisely and stopping short of a rushed fix was
+judged the right trade twice already today (CWE-1035, CWE-284's
+SecurityFilterChain gap); this is the same discipline applied a third
+time to a gap that turned out to be larger and more consequential than
+either of the first two once actually investigated. The training-data
+question was escalated rather than decided alone because it changes
+what "ground truth" means in the thesis's own evaluation methodology,
+not because it was technically difficult.
+
+**Effect on thesis chapters:** Chapter 5 gets its single strongest
+piece of real-world evaluation evidence from this entry: a precisely
+root-caused explanation (not a vague "the tool missed some things") for
+why a full real REST API scanned nearly clean, with an exact count (9 of
+10 controllers) and an exact mechanism (interface-inherited annotations,
+compounded by a gitignored generated-source directory). Chapter 5 should
+report the full precision breakdown (6/6 true positives by rule
+definition, 3/6 low real-world severity despite high Layer 3 scores) and
+state plainly that recall could not be fully assessed on petclinic
+specifically, since the tool cannot see most of its endpoint surface to
+begin with - a materially different and more honest claim than "no false
+negatives found." Chapter 3/6 (limitations/future work) should list
+full `@Override`-through-interface resolution, including parameter-level
+annotations, as a scoped, concrete, and now well-justified future-work
+item rather than an abstract one. Chapter 3 (methodology) should state
+explicitly that real-repo scan results were deliberately kept separate
+from the Layer 4 labelled training set, and why - this is itself a
+methodology decision worth defending in a viva, not an incidental
+implementation detail.
