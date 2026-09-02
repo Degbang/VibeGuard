@@ -13,6 +13,8 @@ it never executes anything from the file, and YAML is parsed with
 from __future__ import annotations
 
 import logging
+import re
+import string
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -44,8 +46,12 @@ __all__ = [
     "ConfigFileFormat",
     "ParseStatus",
     "ParsedConfigFile",
+    "is_conventional_config_path",
     "parse_config_file",
 ]
+
+_APPLICATION_CONFIG_PATTERN = re.compile(r"^(application|bootstrap)(-[^.]+)*\.(properties|ya?ml)$")
+_MICROPROFILE_CONFIG_PATTERN = re.compile(r"^microprofile-config(-[^.]+)*\.properties$")
 
 
 class ConfigFileFormat(str, Enum):
@@ -78,6 +84,23 @@ class ParsedConfigFile:
     format: ConfigFileFormat | None = None
     entries: tuple[ConfigEntry, ...] = ()
     error_message: str | None = None
+
+
+def is_conventional_config_path(path: Path) -> bool:
+    """Whether ``path`` is a conventional application config filename.
+
+    Layer 1's config-side CWE-798 support is intentionally scoped to
+    application configuration, not every arbitrary YAML/properties
+    resource that happens to live in a Java repository. Resource bundles
+    (e.g. ``messages_de.properties``) and API docs (e.g. ``openapi.yml``)
+    are not application config and can produce blocking false positives
+    if scanned as though they were.
+    """
+    lowered_name = path.name.lower()
+    return bool(
+        _APPLICATION_CONFIG_PATTERN.match(lowered_name)
+        or _MICROPROFILE_CONFIG_PATTERN.match(lowered_name)
+    )
 
 
 def parse_config_file(
@@ -228,14 +251,11 @@ def _flatten_yaml_sequence(node: yaml.SequenceNode, prefix: str) -> list[ConfigE
 def _parse_properties(text: str) -> tuple[ConfigEntry, ...]:
     """Parse Java .properties syntax into ConfigEntry values.
 
-    Simplified relative to the full ``java.util.Properties`` spec:
-    supports comments (``#``/``!``), blank lines, ``key=value``/
-    ``key:value`` pairs, and line continuation via a trailing
-    unescaped backslash. Does not support whitespace-only key/value
-    separators or ``\\uXXXX`` unicode escapes - real Quarkus/Spring
-    config files essentially always use ``=`` and plain UTF-8 text, so
-    this covers the realistic case without a full spec-compliant
-    parser.
+    Supports the Java properties basics used by Spring/Quarkus config:
+    comments (``#``/``!``), blank lines, ``key=value``/``key:value``/
+    whitespace-separated entries, line continuation via a trailing
+    unescaped backslash, and standard backslash escapes including
+    ``\\uXXXX``.
     """
     lines = text.splitlines()
     entries: list[ConfigEntry] = []
@@ -288,16 +308,89 @@ def _trailing_backslash_count(text: str) -> int:
 
 
 def _split_key_value(logical_line: str) -> tuple[str, str] | None:
-    """Split ``key=value`` or ``key:value`` on the first unescaped separator."""
+    """Split a Java properties logical line into an unescaped key/value pair."""
+    line = logical_line.lstrip()
+    separator = _find_property_separator(line)
+    if separator is None:
+        return None
+    separator_index, separator_char = separator
+    key = line[:separator_index].strip()
+    value_start = separator_index + 1
+    if separator_char.isspace():
+        value_start = _skip_spaces(line, value_start)
+        if value_start < len(line) and line[value_start] in ("=", ":"):
+            value_start = _skip_spaces(line, value_start + 1)
+    else:
+        value_start = _skip_spaces(line, value_start)
+    if not key:
+        return None
+    return _unescape_property_text(key), _unescape_property_text(line[value_start:].strip())
+
+
+def _find_property_separator(line: str) -> tuple[int, str] | None:
+    """Find the first unescaped Java properties separator."""
     index = 0
-    while index < len(logical_line):
-        char = logical_line[index]
+    while index < len(line):
+        char = line[index]
         if char == "\\":
             index += 2
             continue
-        if char in ("=", ":"):
-            key = logical_line[:index].strip()
-            value = logical_line[index + 1 :].strip()
-            return (key, value) if key else None
+        if char in ("=", ":") or char.isspace():
+            return index, char
         index += 1
     return None
+
+
+def _skip_spaces(text: str, start: int) -> int:
+    """Return the first index at or after ``start`` that is not whitespace."""
+    index = start
+    while index < len(text) and text[index].isspace():
+        index += 1
+    return index
+
+
+def _unescape_property_text(text: str) -> str:
+    """Decode Java properties backslash escapes without raising on malformed input."""
+    result: list[str] = []
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char != "\\":
+            result.append(char)
+            index += 1
+            continue
+        if index + 1 >= len(text):
+            result.append("\\")
+            index += 1
+            continue
+        escaped = text[index + 1]
+        if escaped == "u":
+            decoded, consumed = _decode_unicode_escape(text, index + 2)
+            if decoded is not None:
+                result.append(decoded)
+                index = consumed
+                continue
+        result.append(_decode_simple_escape(escaped))
+        index += 2
+    return "".join(result)
+
+
+def _decode_unicode_escape(text: str, start: int) -> tuple[str | None, int]:
+    """Decode a ``\\uXXXX`` escape starting after the first ``u``."""
+    index = start
+    while index < len(text) and text[index] == "u":
+        index += 1
+    digits = text[index : index + 4]
+    if len(digits) != 4 or any(char not in string.hexdigits for char in digits):
+        return None, start
+    return chr(int(digits, 16)), index + 4
+
+
+def _decode_simple_escape(escaped: str) -> str:
+    """Decode non-Unicode Java properties escapes."""
+    return {
+        "t": "\t",
+        "r": "\r",
+        "n": "\n",
+        "f": "\f",
+    }.get(escaped, escaped)

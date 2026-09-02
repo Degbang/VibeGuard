@@ -28,7 +28,23 @@ from pathlib import Path
 from typing import TypeAlias
 
 import javalang
+from tree_sitter import Node
 
+from vibeguard.layer1_static._tree_sitter_java import (
+    annotation_names as ts_annotation_names,
+)
+from vibeguard.layer1_static._tree_sitter_java import (
+    declaration_name as ts_declaration_name,
+)
+from vibeguard.layer1_static._tree_sitter_java import (
+    nearest_enclosing_type as ts_nearest_enclosing_type,
+)
+from vibeguard.layer1_static._tree_sitter_java import (
+    node_line as ts_node_line,
+)
+from vibeguard.layer1_static._tree_sitter_java import (
+    walk_with_ancestors as ts_walk_with_ancestors,
+)
 from vibeguard.layer1_static.ast_parser import ParsedFile
 from vibeguard.layer1_static.rules._endpoint_annotations import (
     has_endpoint_annotation,
@@ -56,6 +72,12 @@ _AUTHORIZATION_ANNOTATIONS = frozenset(
         "RequiresRoles",  # Apache Shiro
     }
 )
+_HTTP_CLIENT_TYPE_ANNOTATIONS = frozenset(
+    {
+        "RegisterRestClient",  # Quarkus / MicroProfile REST client
+        "FeignClient",  # Spring OpenFeign client
+    }
+)
 
 
 def detect_in_java(parsed_file: ParsedFile) -> tuple[Finding, ...]:
@@ -68,6 +90,8 @@ def detect_in_java(parsed_file: ParsedFile) -> tuple[Finding, ...]:
     annotations on an outer class don't apply to a nested class's own
     members in JAX-RS/Spring's actual runtime behavior.
     """
+    if parsed_file.tree_sitter is not None:
+        return _detect_in_tree_sitter_java(parsed_file)
     if parsed_file.tree is None:
         return ()
 
@@ -77,6 +101,50 @@ def detect_in_java(parsed_file: ParsedFile) -> tuple[Finding, ...]:
         if (finding := _check_method(parsed_file.path, node, path)) is not None
     ]
     return tuple(findings)
+
+
+def _detect_in_tree_sitter_java(parsed_file: ParsedFile) -> tuple[Finding, ...]:
+    """Find unprotected endpoints in a Tree-sitter fallback parse."""
+    parsed = parsed_file.tree_sitter
+    if parsed is None:
+        return ()
+    findings = [
+        finding
+        for ancestors, node in ts_walk_with_ancestors(parsed.tree.root_node)
+        if node.type == "method_declaration"
+        if (finding := _check_tree_sitter_method(parsed_file.path, parsed.source, node, ancestors))
+        is not None
+    ]
+    return tuple(findings)
+
+
+def _check_tree_sitter_method(
+    file_path: Path, source: bytes, method: Node, ancestors: tuple[Node, ...]
+) -> Finding | None:
+    method_annotations = ts_annotation_names(source, method)
+    if not has_endpoint_annotation(method_annotations):
+        return None
+    if _has_authorization_annotation(method_annotations):
+        return None
+    enclosing_type = ts_nearest_enclosing_type(ancestors)
+    if enclosing_type is not None:
+        type_annotations = ts_annotation_names(source, enclosing_type)
+        if _is_http_client_type(type_annotations):
+            return None
+        if _has_authorization_annotation(type_annotations):
+            return None
+    method_name = ts_declaration_name(source, method)
+    return Finding(
+        cwe_id=CWE_ID,
+        file_path=file_path,
+        line=ts_node_line(method),
+        identifier=method_name,
+        message=(
+            f"Endpoint method '{method_name}' has no authorization annotation "
+            "(no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the "
+            "method or its enclosing class)"
+        ),
+    )
 
 
 def _check_method(
@@ -92,8 +160,10 @@ def _check_method(
         return None
     enclosing_type = _nearest_enclosing_type(path)
     if enclosing_type is not None:
-        class_annotations = tuple(a.name for a in enclosing_type.annotations)
-        if _has_authorization_annotation(class_annotations):
+        type_annotations = tuple(a.name for a in enclosing_type.annotations)
+        if _is_http_client_type(type_annotations):
+            return None
+        if _has_authorization_annotation(type_annotations):
             return None
     line = method.position.line if method.position else None
     return Finding(
@@ -127,3 +197,8 @@ def _nearest_enclosing_type(path: tuple[object, ...]) -> _TypeDeclaration | None
 
 def _has_authorization_annotation(annotations: tuple[str, ...]) -> bool:
     return any(simple_name(a) in _AUTHORIZATION_ANNOTATIONS for a in annotations)
+
+
+def _is_http_client_type(annotations: tuple[str, ...]) -> bool:
+    """Whether a type is an outbound HTTP client, not an inbound endpoint class."""
+    return any(simple_name(a) in _HTTP_CLIENT_TYPE_ANNOTATIONS for a in annotations)

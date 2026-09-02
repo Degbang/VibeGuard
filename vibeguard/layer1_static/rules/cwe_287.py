@@ -23,7 +23,20 @@ from __future__ import annotations
 from pathlib import Path
 
 import javalang
+from tree_sitter import Node
 
+from vibeguard.layer1_static._tree_sitter_java import (
+    child_by_field as ts_child_by_field,
+)
+from vibeguard.layer1_static._tree_sitter_java import (
+    node_line as ts_node_line,
+)
+from vibeguard.layer1_static._tree_sitter_java import (
+    node_text as ts_node_text,
+)
+from vibeguard.layer1_static._tree_sitter_java import (
+    walk as ts_walk,
+)
 from vibeguard.layer1_static.ast_parser import ParsedFile
 from vibeguard.layer1_static.rules._credential_names import is_credential_name
 from vibeguard.layer1_static.rules._finding import Finding
@@ -35,6 +48,8 @@ _REFERENCE_EQUALITY_OPERATORS = frozenset({"==", "!="})
 
 def detect_in_java(parsed_file: ParsedFile) -> tuple[Finding, ...]:
     """Find ``==``/``!=`` comparisons involving a credential-shaped operand."""
+    if parsed_file.tree_sitter is not None:
+        return _detect_in_tree_sitter_java(parsed_file)
     if parsed_file.tree is None:
         return ()
 
@@ -44,6 +59,82 @@ def detect_in_java(parsed_file: ParsedFile) -> tuple[Finding, ...]:
         if (finding := _check_comparison(parsed_file.path, node)) is not None
     ]
     return tuple(findings)
+
+
+def _detect_in_tree_sitter_java(parsed_file: ParsedFile) -> tuple[Finding, ...]:
+    """Find unsafe credential comparisons in a Tree-sitter fallback parse."""
+    parsed = parsed_file.tree_sitter
+    if parsed is None:
+        return ()
+    findings: list[Finding] = []
+    for node in ts_walk(parsed.tree.root_node):
+        if node.type != "binary_expression":
+            continue
+        finding = _check_tree_sitter_comparison(parsed_file.path, parsed.source, node)
+        if finding is not None:
+            findings.append(finding)
+    return tuple(findings)
+
+
+def _check_tree_sitter_comparison(file_path: Path, source: bytes, node: Node) -> Finding | None:
+    operator_node = ts_child_by_field(node, "operator")
+    if operator_node is None:
+        return None
+    operator = ts_node_text(source, operator_node).strip()
+    if operator not in _REFERENCE_EQUALITY_OPERATORS:
+        return None
+    left = ts_child_by_field(node, "left")
+    right = ts_child_by_field(node, "right")
+    left_ref = _tree_sitter_credential_operand(source, left)
+    credential_ref, other = (
+        (left_ref, right)
+        if left_ref is not None
+        else (_tree_sitter_credential_operand(source, right), left)
+    )
+    if credential_ref is None or other is None:
+        return None
+    if not _is_plausible_tree_sitter_credential_operand(other):
+        return None
+    return Finding(
+        cwe_id=CWE_ID,
+        file_path=file_path,
+        line=ts_node_line(node),
+        identifier=credential_ref,
+        message=(
+            f"'{credential_ref}' compared with '{operator}' instead of "
+            ".equals() - Java's == compares object reference identity, not value, "
+            "so this comparison does not reliably verify the credential"
+        ),
+    )
+
+
+def _tree_sitter_credential_operand(source: bytes, operand: Node | None) -> str | None:
+    if operand is None:
+        return None
+    if getattr(operand, "type", None) == "identifier":
+        name = ts_node_text(source, operand)
+        return name if is_credential_name(name) else None
+    if getattr(operand, "type", None) == "field_access":
+        field = ts_child_by_field(operand, "field")
+        if field is not None:
+            name = ts_node_text(source, field)
+            return name if is_credential_name(name) else None
+    if getattr(operand, "type", None) == "method_invocation":
+        name_node = ts_child_by_field(operand, "name")
+        arguments = ts_child_by_field(operand, "arguments")
+        if name_node is not None and arguments is not None and not arguments.named_children:
+            name = ts_node_text(source, name_node)
+            return name if is_credential_name(name) else None
+    return None
+
+
+def _is_plausible_tree_sitter_credential_operand(operand: Node) -> bool:
+    return getattr(operand, "type", None) in {
+        "identifier",
+        "field_access",
+        "method_invocation",
+        "string_literal",
+    }
 
 
 def _check_comparison(file_path: Path, node: javalang.tree.BinaryOperation) -> Finding | None:
@@ -65,9 +156,9 @@ def _check_comparison(file_path: Path, node: javalang.tree.BinaryOperation) -> F
         cwe_id=CWE_ID,
         file_path=file_path,
         line=line,
-        identifier=credential_ref.member,
+        identifier=credential_ref,
         message=(
-            f"'{credential_ref.member}' compared with '{node.operator}' instead of "
+            f"'{credential_ref}' compared with '{node.operator}' instead of "
             ".equals() - Java's == compares object reference identity, not value, "
             "so this comparison does not reliably verify the credential"
         ),
@@ -90,7 +181,7 @@ def _comparison_line(node: javalang.tree.BinaryOperation) -> int | None:
     return None
 
 
-def _credential_operand(operand: object) -> javalang.tree.MemberReference | None:
+def _credential_operand(operand: object) -> str | None:
     """Return the credential-shaped field/variable reference inside operand, if any.
 
     Handles both a bare reference (``password``) and a ``this``-
@@ -102,13 +193,19 @@ def _credential_operand(operand: object) -> javalang.tree.MemberReference | None
     same-named parameter (as in a constructor or setter).
     """
     if isinstance(operand, javalang.tree.MemberReference) and is_credential_name(operand.member):
-        return operand
+        return operand.member
     if isinstance(operand, javalang.tree.This):
         for selector in operand.selectors or []:
             if isinstance(selector, javalang.tree.MemberReference) and is_credential_name(
                 selector.member
             ):
-                return selector
+                return selector.member
+    if (
+        isinstance(operand, javalang.tree.MethodInvocation)
+        and not operand.arguments
+        and is_credential_name(operand.member)
+    ):
+        return operand.member
     return None
 
 
@@ -126,6 +223,8 @@ def _is_plausible_credential_operand(operand: object) -> bool:
     kind of false positive this guards against.
     """
     if isinstance(operand, javalang.tree.MemberReference):
+        return True
+    if isinstance(operand, javalang.tree.MethodInvocation):
         return True
     if isinstance(operand, javalang.tree.Literal):
         raw = operand.value

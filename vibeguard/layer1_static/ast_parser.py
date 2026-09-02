@@ -1,9 +1,9 @@
 """Layer 1 AST parsing: converts Java source files into structured ParsedFile objects.
 
 This module only ever tokenizes and parses Java source text via
-``javalang``. It never executes, compiles, or ``eval``s any content from
-a target file — VibeGuard analyses untrusted, AI-generated code and must
-never run it.
+``javalang``/Tree-sitter. It never executes, compiles, or ``eval``s any
+content from a target file — VibeGuard analyses untrusted,
+AI-generated code and must never run it.
 """
 
 from __future__ import annotations
@@ -21,13 +21,40 @@ from javalang.tree import (
     InterfaceDeclaration,
     MethodDeclaration,
 )
+from tree_sitter import Node
 
+from vibeguard.layer1_static._java_unicode import translate_java_unicode_escapes
 from vibeguard.layer1_static._modern_java_preprocessor import preprocess
 from vibeguard.layer1_static._parsing_guards import (
     ParseStatus,
     ParsingGuardError,
     read_text_within_limit,
     run_with_timeout,
+)
+from vibeguard.layer1_static._tree_sitter_java import (
+    TreeSitterJavaFile,
+    parse_java_source,
+)
+from vibeguard.layer1_static._tree_sitter_java import (
+    annotation_names as ts_annotation_names,
+)
+from vibeguard.layer1_static._tree_sitter_java import (
+    child_by_field as ts_child_by_field,
+)
+from vibeguard.layer1_static._tree_sitter_java import (
+    declaration_name as ts_declaration_name,
+)
+from vibeguard.layer1_static._tree_sitter_java import (
+    modifiers as ts_modifiers,
+)
+from vibeguard.layer1_static._tree_sitter_java import (
+    node_line as ts_node_line,
+)
+from vibeguard.layer1_static._tree_sitter_java import (
+    node_text as ts_node_text,
+)
+from vibeguard.layer1_static._tree_sitter_java import (
+    type_name as ts_type_name,
 )
 
 logger = logging.getLogger(__name__)
@@ -103,10 +130,10 @@ class ParsedClass:
 class ParsedFile:
     """Structured result of parsing one Java source file.
 
-    ``tree`` retains the full javalang AST so downstream CWE rule
-    modules can traverse beyond what ``classes`` summarizes (e.g.
-    locating string literals or call expressions anywhere in the file).
-    It is ``None`` whenever ``status`` is not ``ParseStatus.OK``.
+    ``tree`` retains the full javalang AST when javalang handled the
+    file. ``tree_sitter`` retains the full Tree-sitter AST when the
+    modern-Java fallback handled the file. Both are ``None`` whenever
+    ``status`` is not ``ParseStatus.OK``.
     """
 
     path: Path
@@ -116,6 +143,7 @@ class ParsedFile:
     classes: tuple[ParsedClass, ...] = ()
     error_message: str | None = None
     tree: CompilationUnit | None = field(default=None, repr=False, compare=False)
+    tree_sitter: TreeSitterJavaFile | None = field(default=None, repr=False, compare=False)
 
 
 def parse_file(
@@ -164,7 +192,7 @@ def _guard_failure(path: Path, exc: ParsingGuardError) -> ParsedFile:
 
 
 def _parse_source(path: Path, source: str, timeout_seconds: float) -> ParsedFile:
-    """Run javalang over ``source`` and convert the outcome into a ParsedFile.
+    """Run javalang, then Tree-sitter fallback, and return a ParsedFile.
 
     ``source`` is desugared (text blocks, sealed-class modifiers,
     pattern-matching ``instanceof`` bindings, and simple ``record``
@@ -174,7 +202,8 @@ def _parse_source(path: Path, source: str, timeout_seconds: float) -> ParsedFile
     file's total newline count, so reported line numbers stay correct
     for everything outside a rewritten construct's own declaration.
     """
-    parseable_source = preprocess(source)
+    java_source = translate_java_unicode_escapes(source)
+    parseable_source = preprocess(java_source)
     try:
         tree = run_with_timeout(
             javalang.parse.parse, parseable_source, timeout_seconds=timeout_seconds
@@ -188,13 +217,38 @@ def _parse_source(path: Path, source: str, timeout_seconds: float) -> ParsedFile
         )
     except javalang.parser.JavaSyntaxError as exc:
         message = _syntax_error_message(exc)
-        logger.warning("Syntax error parsing %s: %s", path, message)
-        return ParsedFile(path=path, status=ParseStatus.PARSE_FAILED, error_message=message)
+        logger.info("javalang could not parse %s, trying Tree-sitter: %s", path, message)
+        return _parse_source_with_tree_sitter(path, java_source, timeout_seconds, message)
     except Exception as exc:  # pragma: no cover - defensive: javalang internals are not fully typed
-        logger.warning("Unexpected error parsing %s: %s", path, exc)
-        return ParsedFile(path=path, status=ParseStatus.PARSE_FAILED, error_message=str(exc))
+        message = str(exc)
+        logger.info("javalang errored on %s, trying Tree-sitter: %s", path, message)
+        return _parse_source_with_tree_sitter(path, java_source, timeout_seconds, message)
 
     return _build_parsed_file(path, tree)
+
+
+def _parse_source_with_tree_sitter(
+    path: Path, source: str, timeout_seconds: float, javalang_error: str
+) -> ParsedFile:
+    """Parse ``source`` with Tree-sitter after javalang failed."""
+    try:
+        parsed = run_with_timeout(parse_java_source, source, timeout_seconds=timeout_seconds)
+    except TimeoutError:
+        logger.warning("Tree-sitter parse timed out after %.1fs: %s", timeout_seconds, path)
+        return ParsedFile(
+            path=path,
+            status=ParseStatus.PARSE_TIMEOUT,
+            error_message=f"parse exceeded {timeout_seconds}s budget",
+        )
+    except Exception as exc:  # pragma: no cover - defensive: parser internals are external
+        logger.warning("Tree-sitter error parsing %s: %s", path, exc)
+        return ParsedFile(path=path, status=ParseStatus.PARSE_FAILED, error_message=str(exc))
+
+    if parsed.tree.root_node.has_error:
+        logger.warning("Syntax error parsing %s: %s", path, javalang_error)
+        return ParsedFile(path=path, status=ParseStatus.PARSE_FAILED, error_message=javalang_error)
+
+    return _build_tree_sitter_parsed_file(path, parsed)
 
 
 def _syntax_error_message(exc: javalang.parser.JavaSyntaxError) -> str:
@@ -228,6 +282,166 @@ def _build_parsed_file(path: Path, tree: CompilationUnit) -> ParsedFile:
         imports=imports,
         classes=tuple(parsed_classes),
         tree=tree,
+    )
+
+
+def _build_tree_sitter_parsed_file(path: Path, parsed: TreeSitterJavaFile) -> ParsedFile:
+    """Flatten a Tree-sitter Java tree into a successful ParsedFile."""
+    root = parsed.tree.root_node
+    package = _tree_sitter_package_name(parsed)
+    imports = tuple(
+        ts_node_text(parsed.source, node).removeprefix("import").removesuffix(";").strip()
+        for node in root.children
+        if node.type == "import_declaration"
+    )
+    classes = tuple(
+        _build_tree_sitter_class(parsed, node)
+        for node in root.children
+        if node.type in {"class_declaration", "interface_declaration", "record_declaration"}
+    )
+    return ParsedFile(
+        path=path,
+        status=ParseStatus.OK,
+        package=package,
+        imports=imports,
+        classes=classes,
+        tree_sitter=parsed,
+    )
+
+
+def _tree_sitter_package_name(parsed: TreeSitterJavaFile) -> str | None:
+    root = parsed.tree.root_node
+    for child in root.children:
+        if child.type != "package_declaration":
+            continue
+        for package_child in child.children:
+            if package_child.is_named and package_child.type != "package":
+                return ts_node_text(parsed.source, package_child)
+    return None
+
+
+def _build_tree_sitter_class(parsed: TreeSitterJavaFile, node: Node) -> ParsedClass:
+    """Convert a Tree-sitter class/interface/record declaration into ParsedClass."""
+    body = ts_child_by_field(node, "body")
+    fields = _tree_sitter_fields(parsed, node, body)
+    methods = _tree_sitter_methods(parsed, body)
+    return ParsedClass(
+        name=ts_declaration_name(parsed.source, node),
+        line=ts_node_line(node),
+        modifiers=ts_modifiers(node),
+        annotations=ts_annotation_names(parsed.source, node),
+        superclass=_tree_sitter_superclass(parsed, node),
+        interfaces=_tree_sitter_interfaces(parsed, node),
+        fields=fields,
+        methods=methods,
+    )
+
+
+def _tree_sitter_fields(
+    parsed: TreeSitterJavaFile, declaration_node: Node, body: Node | None
+) -> tuple[ParsedField, ...]:
+    fields: list[ParsedField] = []
+    if getattr(declaration_node, "type", None) == "record_declaration":
+        parameters = ts_child_by_field(declaration_node, "parameters")
+        if parameters is not None:
+            for parameter in parameters.named_children:
+                if parameter.type == "formal_parameter":
+                    fields.append(_tree_sitter_field_from_parameter(parsed, parameter))
+    if body is None:
+        return tuple(fields)
+    for child in body.children:
+        if child.type == "field_declaration":
+            fields.extend(_tree_sitter_fields_from_declaration(parsed, child))
+    return tuple(fields)
+
+
+def _tree_sitter_field_from_parameter(parsed: TreeSitterJavaFile, parameter: Node) -> ParsedField:
+    return ParsedField(
+        name=ts_declaration_name(parsed.source, parameter),
+        type_name=ts_type_name(parsed.source, ts_child_by_field(parameter, "type")),
+        modifiers=frozenset({"private", "final"}),
+        line=ts_node_line(parameter),
+    )
+
+
+def _tree_sitter_fields_from_declaration(
+    parsed: TreeSitterJavaFile, declaration: Node
+) -> tuple[ParsedField, ...]:
+    type_name = ts_type_name(parsed.source, ts_child_by_field(declaration, "type"))
+    result = []
+    for child in declaration.children:
+        if child.type == "variable_declarator":
+            result.append(
+                ParsedField(
+                    name=ts_declaration_name(parsed.source, child),
+                    type_name=type_name,
+                    modifiers=ts_modifiers(declaration),
+                    line=ts_node_line(declaration),
+                )
+            )
+    return tuple(result)
+
+
+def _tree_sitter_methods(parsed: TreeSitterJavaFile, body: Node | None) -> tuple[ParsedMethod, ...]:
+    if body is None:
+        return ()
+    return tuple(
+        _tree_sitter_method(parsed, child)
+        for child in body.children
+        if child.type == "method_declaration"
+    )
+
+
+def _tree_sitter_method(parsed: TreeSitterJavaFile, node: Node) -> ParsedMethod:
+    parameters_node = ts_child_by_field(node, "parameters")
+    parameters = []
+    if parameters_node is not None:
+        for child in parameters_node.named_children:
+            if child.type == "formal_parameter":
+                parameters.append(
+                    ParsedParameter(
+                        name=ts_declaration_name(parsed.source, child),
+                        type_name=ts_type_name(parsed.source, ts_child_by_field(child, "type")),
+                    )
+                )
+    return ParsedMethod(
+        name=ts_declaration_name(parsed.source, node),
+        line=ts_node_line(node),
+        modifiers=ts_modifiers(node),
+        annotations=ts_annotation_names(parsed.source, node),
+        parameters=tuple(parameters),
+        return_type=ts_type_name(parsed.source, ts_child_by_field(node, "type")),
+    )
+
+
+def _tree_sitter_superclass(parsed: TreeSitterJavaFile, node: Node) -> str | None:
+    superclass = ts_child_by_field(node, "superclass")
+    if superclass is None:
+        return None
+    for child in superclass.named_children:
+        if child.type not in {"extends", "superclass"}:
+            return ts_node_text(parsed.source, child)
+    return None
+
+
+def _tree_sitter_interfaces(parsed: TreeSitterJavaFile, node: Node) -> tuple[str, ...]:
+    interfaces = ts_child_by_field(node, "interfaces")
+    if interfaces is None:
+        return ()
+    type_list = next(
+        (child for child in interfaces.named_children if child.type == "type_list"),
+        None,
+    )
+    if type_list is not None:
+        return tuple(
+            ts_node_text(parsed.source, child)
+            for child in type_list.named_children
+            if child.type.endswith("identifier")
+        )
+    return tuple(
+        ts_node_text(parsed.source, child)
+        for child in interfaces.named_children
+        if child.type not in {"implements", "extends", "type_list"}
     )
 
 

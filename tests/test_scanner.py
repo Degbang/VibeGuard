@@ -91,6 +91,24 @@ def test_scan_does_not_double_count_gradle_build_output(tmp_path: Path) -> None:
     assert result.config_files[0].path == src_resources / "application.yml"
 
 
+def test_scan_only_treats_conventional_application_config_files_as_config(
+    tmp_path: Path,
+) -> None:
+    resources = tmp_path / "src" / "main" / "resources"
+    resources.mkdir(parents=True)
+    (resources / "application.properties").write_text("quarkus.datasource.password=hunter2\n")
+    (resources / "openapi.yml").write_text(
+        "components:\n  schemas:\n    User:\n      properties:\n        password:\n"
+        "          title: Password\n"
+    )
+    (resources / "messages_de.properties").write_text("welcome=Willkommen\n", encoding="latin-1")
+
+    result = scan_directory(tmp_path)
+
+    assert [parsed.path.name for parsed in result.config_files] == ["application.properties"]
+    assert result.config_files[0].status == ParseStatus.OK
+
+
 def test_scan_skips_test_source_roots(tmp_path: Path) -> None:
     """Test fixtures should not be counted as production findings."""
     main_sources = tmp_path / "src" / "main" / "java"

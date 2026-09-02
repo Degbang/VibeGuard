@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-import time
+import os
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
 
 from vibeguard.layer1_static.config_parser import (
@@ -12,6 +15,26 @@ from vibeguard.layer1_static.config_parser import (
 )
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _run_child_python(snippet: str) -> subprocess.CompletedProcess[str]:
+    env = dict(os.environ)
+    existing_pythonpath = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = (
+        str(REPO_ROOT)
+        if not existing_pythonpath
+        else f"{REPO_ROOT}{os.pathsep}{existing_pythonpath}"
+    )
+    return subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(snippet)],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
 
 
 def test_parse_properties_extracts_flattened_entries() -> None:
@@ -111,6 +134,29 @@ def test_properties_supports_comments_and_line_continuation(tmp_path: Path) -> N
     assert entries_by_key["db.url"] == "jdbc:postgresql://localhost/db?sslmode=require"
 
 
+def test_properties_supports_whitespace_separator(tmp_path: Path) -> None:
+    props_file = tmp_path / "whitespace.properties"
+    props_file.write_text("db.password hunter2\n")
+
+    result = parse_config_file(props_file)
+
+    assert result.status == ParseStatus.OK
+    assert result.entries[0].key == "db.password"
+    assert result.entries[0].value == "hunter2"
+
+
+def test_properties_decodes_escaped_key_and_value_text(tmp_path: Path) -> None:
+    props_file = tmp_path / "escaped.properties"
+    props_file.write_text("db.pass\\u0077ord=hunter\\u0032\nescaped\\:key=value\\ with\\ spaces\n")
+
+    result = parse_config_file(props_file)
+
+    assert result.status == ParseStatus.OK
+    entries_by_key = {entry.key: entry.value for entry in result.entries}
+    assert entries_by_key["db.password"] == "hunter2"
+    assert entries_by_key["escaped:key"] == "value with spaces"
+
+
 def test_properties_continuation_handles_odd_backslash_runs(tmp_path: Path) -> None:
     """An odd trailing-backslash count (3, 5, ...) must still continue.
 
@@ -127,7 +173,7 @@ def test_properties_continuation_handles_odd_backslash_runs(tmp_path: Path) -> N
 
     assert result.status == ParseStatus.OK
     entries_by_key = {entry.key: entry.value for entry in result.entries}
-    assert entries_by_key["key"] == "value\\\\more"
+    assert entries_by_key["key"] == "value\\more"
 
 
 def test_properties_continuation_even_backslashes_do_not_continue(tmp_path: Path) -> None:
@@ -138,7 +184,7 @@ def test_properties_continuation_even_backslashes_do_not_continue(tmp_path: Path
 
     assert result.status == ParseStatus.OK
     entries_by_key = {entry.key: entry.value for entry in result.entries}
-    assert entries_by_key["key"] == "value\\\\"
+    assert entries_by_key["key"] == "value\\"
     assert entries_by_key["next"] == "separate"
 
 
@@ -160,7 +206,7 @@ def test_parse_self_referential_yaml_alias_reports_failure_not_crash(tmp_path: P
     assert result.error_message
 
 
-def test_yaml_alias_expansion_bomb_times_out_instead_of_hanging(tmp_path: Path) -> None:
+def test_yaml_alias_expansion_bomb_times_out_instead_of_hanging() -> None:
     """A known YAML DoS pattern (anchor/alias 'billion laughs' expansion).
 
     PyYAML's own node composition is cheap (aliases share object
@@ -170,19 +216,32 @@ def test_yaml_alias_expansion_bomb_times_out_instead_of_hanging(tmp_path: Path) 
     even though the underlying background thread is left to run its
     course (documented limitation, same as ast_parser.py's timeout).
     """
-    payload = 'a0: &a0 ["x","x","x","x","x","x","x","x","x"]\n'
-    for i in range(1, 9):
-        payload += (
-            f"a{i}: &a{i} "
-            f"[*a{i - 1},*a{i - 1},*a{i - 1},*a{i - 1},*a{i - 1},"
-            f"*a{i - 1},*a{i - 1},*a{i - 1},*a{i - 1}]\n"
-        )
-    bomb_file = tmp_path / "bomb.yml"
-    bomb_file.write_text(payload)
+    completed = _run_child_python("""
+        import tempfile
+        import time
+        from pathlib import Path
 
-    start = time.monotonic()
-    result = parse_config_file(bomb_file, timeout_seconds=1.0)
-    elapsed = time.monotonic() - start
+        from vibeguard.layer1_static.config_parser import ParseStatus, parse_config_file
 
-    assert result.status == ParseStatus.PARSE_TIMEOUT
-    assert elapsed < 5.0
+        payload = 'a0: &a0 ["x","x","x","x","x","x","x","x","x"]\\n'
+        for i in range(1, 9):
+            payload += (
+                f"a{i}: &a{i} "
+                f"[*a{i - 1},*a{i - 1},*a{i - 1},*a{i - 1},*a{i - 1},"
+                f"*a{i - 1},*a{i - 1},*a{i - 1},*a{i - 1}]\\n"
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bomb_file = Path(tmpdir) / "bomb.yml"
+            bomb_file.write_text(payload)
+            start = time.monotonic()
+            result = parse_config_file(bomb_file, timeout_seconds=1.0)
+            elapsed = time.monotonic() - start
+            assert result.status == ParseStatus.PARSE_TIMEOUT
+            assert elapsed < 5.0
+
+        print("child-ok")
+        """)
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "child-ok" in completed.stdout

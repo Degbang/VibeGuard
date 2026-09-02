@@ -86,6 +86,22 @@ def test_detect_in_java_flags_credential_compared_to_string_literal(tmp_path: Pa
     assert findings[0].identifier == "token"
 
 
+def test_detect_in_java_flags_credential_getter_comparison(tmp_path: Path) -> None:
+    java_file = tmp_path / "GetterComparison.java"
+    java_file.write_text(
+        "public class GetterComparison {\n"
+        "    boolean ok(User user, String input) {\n"
+        "        return user.getPassword() == input;\n"
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    findings = detect_in_java(result)
+    assert [(finding.identifier, finding.line) for finding in findings] == [("getPassword", 3)]
+
+
 def test_detect_in_java_finds_nothing_in_clean_file() -> None:
     result = parse_file(FIXTURES_DIR / "CleanService.java")
 
@@ -118,3 +134,48 @@ def test_detect_in_java_does_not_resolve_non_credential_named_operand(
     result = parse_file(java_file)
 
     assert detect_in_java(result) == ()
+
+
+def test_detect_in_java_finds_unsafe_comparison_with_modern_switch(tmp_path: Path) -> None:
+    """Tree-sitter fallback files must still feed CWE-287."""
+    java_file = tmp_path / "ModernAuth.java"
+    java_file.write_text(
+        "public class ModernAuth {\n"
+        "    boolean check(String password, int level) {\n"
+        "        String role = switch (level) {\n"
+        '            case 1 -> "admin";\n'
+        '            default -> "user";\n'
+        "        };\n"
+        '        return password == "hunter2";\n'
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    assert result.tree_sitter is not None
+    findings = detect_in_java(result)
+    assert [(f.identifier, f.line) for f in findings] == [("password", 7)]
+
+
+def test_detect_in_java_flags_credential_getter_comparison_on_tree_sitter_fallback(
+    tmp_path: Path,
+) -> None:
+    java_file = tmp_path / "ModernGetterComparison.java"
+    java_file.write_text(
+        "public record ModernGetterComparison(String name) {\n"
+        "    boolean ok(User user, String input) {\n"
+        "        String role = switch (input) {\n"
+        '            case "x" -> "admin";\n'
+        '            default -> "user";\n'
+        "        };\n"
+        "        return user.getPassword() == input;\n"
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    assert result.tree_sitter is not None
+    findings = detect_in_java(result)
+    assert [(f.identifier, f.line) for f in findings] == [("getPassword", 7)]

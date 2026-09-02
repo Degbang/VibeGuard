@@ -29,7 +29,26 @@ from __future__ import annotations
 from pathlib import Path
 
 import javalang
+from tree_sitter import Node
 
+from vibeguard.layer1_static._tree_sitter_java import (
+    annotation_names as ts_annotation_names,
+)
+from vibeguard.layer1_static._tree_sitter_java import (
+    child_by_field as ts_child_by_field,
+)
+from vibeguard.layer1_static._tree_sitter_java import (
+    declaration_name as ts_declaration_name,
+)
+from vibeguard.layer1_static._tree_sitter_java import (
+    node_line as ts_node_line,
+)
+from vibeguard.layer1_static._tree_sitter_java import (
+    type_name as ts_type_name,
+)
+from vibeguard.layer1_static._tree_sitter_java import (
+    walk as ts_walk,
+)
 from vibeguard.layer1_static.ast_parser import ParsedFile
 from vibeguard.layer1_static.rules._endpoint_annotations import (
     has_endpoint_annotation,
@@ -64,6 +83,8 @@ _NOT_VALIDATABLE_TYPES = frozenset(
 
 def detect_in_java(parsed_file: ParsedFile) -> tuple[Finding, ...]:
     """Find endpoint methods whose @RequestBody parameter isn't @Valid/@Validated."""
+    if parsed_file.tree_sitter is not None:
+        return _detect_in_tree_sitter_java(parsed_file)
     if parsed_file.tree is None:
         return ()
 
@@ -77,6 +98,57 @@ def detect_in_java(parsed_file: ParsedFile) -> tuple[Finding, ...]:
             if finding is not None:
                 findings.append(finding)
     return tuple(findings)
+
+
+def _detect_in_tree_sitter_java(parsed_file: ParsedFile) -> tuple[Finding, ...]:
+    """Find unvalidated request bodies in a Tree-sitter fallback parse."""
+    parsed = parsed_file.tree_sitter
+    if parsed is None:
+        return ()
+    findings: list[Finding] = []
+    for method in ts_walk(parsed.tree.root_node):
+        if method.type != "method_declaration":
+            continue
+        method_annotations = ts_annotation_names(parsed.source, method)
+        if not has_endpoint_annotation(method_annotations):
+            continue
+        parameters = ts_child_by_field(method, "parameters")
+        if parameters is None:
+            continue
+        for parameter in parameters.named_children:
+            if parameter.type != "formal_parameter":
+                continue
+            finding = _check_tree_sitter_parameter(
+                parsed_file.path, parsed.source, method, parameter
+            )
+            if finding is not None:
+                findings.append(finding)
+    return tuple(findings)
+
+
+def _check_tree_sitter_parameter(
+    file_path: Path, source: bytes, method: Node, parameter: Node
+) -> Finding | None:
+    param_annotations = ts_annotation_names(source, parameter)
+    if not _has_annotation(param_annotations, _REQUEST_BODY_ANNOTATION):
+        return None
+    if _has_annotation(param_annotations, *_VALIDATION_ANNOTATIONS):
+        return None
+    type_name = ts_type_name(source, ts_child_by_field(parameter, "type"))
+    if type_name in _NOT_VALIDATABLE_TYPES:
+        return None
+    param_name = ts_declaration_name(source, parameter)
+    return Finding(
+        cwe_id=CWE_ID,
+        file_path=file_path,
+        line=ts_node_line(method),
+        identifier=param_name,
+        message=(
+            f"Parameter '{param_name}' (@RequestBody) has no @Valid/@Validated "
+            f"annotation - Bean Validation constraints on {type_name} won't be "
+            "enforced automatically"
+        ),
+    )
 
 
 def _check_parameter(

@@ -134,3 +134,27 @@ def test_detect_in_java_handles_missing_tree_gracefully() -> None:
 
     assert malformed.tree is None
     assert detect_in_java(malformed) == ()
+
+
+def test_detect_in_java_finds_unvalidated_body_with_modern_switch(tmp_path: Path) -> None:
+    """Tree-sitter fallback files must still feed CWE-20."""
+    java_file = tmp_path / "ModernBody.java"
+    java_file.write_text(
+        "import org.springframework.web.bind.annotation.*;\n"
+        "@RestController\n"
+        "public class ModernBody {\n"
+        '    @PostMapping("/orders")\n'
+        "    public String create(@RequestBody OrderDto dto, int level) {\n"
+        "        return switch (level) {\n"
+        '            case 1 -> "priority";\n'
+        '            default -> "normal";\n'
+        "        };\n"
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    assert result.tree_sitter is not None
+    findings = detect_in_java(result)
+    assert [(f.identifier, f.line) for f in findings] == [("dto", 4)]

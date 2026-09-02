@@ -1,12 +1,11 @@
 """CWE-798: Use of Hard-Coded Credentials.
 
-Flags credential-shaped identifiers (password, secret, API key, token,
-...) that are assigned a literal, non-placeholder value - in Java source
-(field and local variable declarations) and in flattened config-file
-entries (``.properties``/``.yml``/``.yaml``). This never inspects
-runtime values or executes anything; it is pure pattern matching over
-what Layer 1 already parsed (``ParsedFile.tree``, ``ParsedConfigFile.
-entries``).
+Flags credential-shaped identifiers (password, secret, API key, token, ...)
+that are assigned a literal, non-placeholder value - in Java declarations,
+Java assignments, Java call sites, and flattened config-file entries
+(``.properties``/``.yml``/``.yaml``). This never inspects runtime values or
+executes anything; it is pure pattern matching over what Layer 1 already
+parsed.
 
 This is a detection rule, not a scorer: it decides *candidacy*, not
 severity. Turning a list of Findings into a risk score is Layer 3's
@@ -17,9 +16,27 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import TypeGuard
 
 import javalang
+from tree_sitter import Node
 
+from vibeguard.layer1_static._java_literals import decode_java_string_literal
+from vibeguard.layer1_static._tree_sitter_java import (
+    child_by_field as ts_child_by_field,
+)
+from vibeguard.layer1_static._tree_sitter_java import (
+    node_line as ts_node_line,
+)
+from vibeguard.layer1_static._tree_sitter_java import (
+    node_text as ts_node_text,
+)
+from vibeguard.layer1_static._tree_sitter_java import (
+    string_literal_value as ts_string_literal_value,
+)
+from vibeguard.layer1_static._tree_sitter_java import (
+    walk as ts_walk,
+)
 from vibeguard.layer1_static.ast_parser import ParsedFile
 from vibeguard.layer1_static.config_parser import ParsedConfigFile
 from vibeguard.layer1_static.rules._credential_names import is_credential_name, last_word
@@ -74,19 +91,22 @@ _PROPERTY_REFERENCE_PATTERN = re.compile(r"^[$#]\{.*\}$")
 # deliberate non-value that a substring/placeholder check wouldn't
 # catch (it isn't a "changeme"-style placeholder marker either).
 _LITERAL_NON_VALUES = frozenset({"null"})
+_MAP_PUT_METHOD = "put"
+_SYSTEM_SET_PROPERTY_METHOD = "setProperty"
+_SPRING_VALUE_ANNOTATION = "value"
+_LITERAL_PASSTHROUGH_METHODS = frozenset({"toCharArray"})
+_SPRING_PROPERTY_DEFAULT_PATTERN = re.compile(r"^\$\{(?P<key>[^:}]+):(?P<default>[^}]*)\}$")
 
 
 def detect_in_java(parsed_file: ParsedFile) -> tuple[Finding, ...]:
     """Find hardcoded-credential-shaped literals in a parsed Java file.
 
-    Walks the raw javalang AST via ``.filter()`` rather than
-    ``ParsedFile.classes`` - neither field nor local-variable
-    initializer values are captured in that flattened summary (see
-    ``ParsedFile.tree``'s docstring for why the raw tree is kept
-    around at all). Covers both class fields and local variables
-    inside method bodies; ``VariableDeclarator`` is the node type
-    javalang uses for the declared-name-plus-initializer part of both.
+    Walks the raw parser AST rather than ``ParsedFile.classes``:
+    declaration initializers and later assignments are not captured in
+    that flattened summary.
     """
+    if parsed_file.tree_sitter is not None:
+        return _detect_in_tree_sitter_java(parsed_file)
     if parsed_file.tree is None:
         return ()
 
@@ -95,25 +115,392 @@ def detect_in_java(parsed_file: ParsedFile) -> tuple[Finding, ...]:
         for _path, node in parsed_file.tree.filter(javalang.tree.VariableDeclarator)
         if (finding := _check_declarator(parsed_file.path, node)) is not None
     ]
+    findings.extend(
+        finding
+        for _path, node in parsed_file.tree.filter(javalang.tree.Assignment)
+        if (finding := _check_assignment(parsed_file.path, node)) is not None
+    )
+    findings.extend(
+        finding
+        for _path, node in parsed_file.tree.filter(javalang.tree.MethodInvocation)
+        if (finding := _check_method_invocation(parsed_file.path, node)) is not None
+    )
+    findings.extend(
+        finding
+        for _path, node in parsed_file.tree.filter(javalang.tree.ClassCreator)
+        if (finding := _check_class_creator(parsed_file.path, node)) is not None
+    )
+    findings.extend(
+        finding
+        for _path, node in parsed_file.tree.filter(javalang.tree.Annotation)
+        if (finding := _check_annotation(parsed_file.path, node)) is not None
+    )
     return tuple(findings)
+
+
+def _detect_in_tree_sitter_java(parsed_file: ParsedFile) -> tuple[Finding, ...]:
+    """Find hardcoded credentials in a Tree-sitter fallback parse."""
+    parsed = parsed_file.tree_sitter
+    if parsed is None:
+        return ()
+    findings: list[Finding] = []
+    for node in ts_walk(parsed.tree.root_node):
+        if node.type == "variable_declarator":
+            finding = _check_tree_sitter_declarator(parsed_file.path, parsed.source, node)
+        elif node.type == "assignment_expression":
+            finding = _check_tree_sitter_assignment(parsed_file.path, parsed.source, node)
+        elif node.type == "method_invocation":
+            finding = _check_tree_sitter_method_invocation(parsed_file.path, parsed.source, node)
+        elif node.type == "object_creation_expression":
+            finding = _check_tree_sitter_object_creation(parsed_file.path, parsed.source, node)
+        elif node.type == "annotation":
+            finding = _check_tree_sitter_annotation(parsed_file.path, parsed.source, node)
+        else:
+            continue
+        if finding is not None:
+            findings.append(finding)
+    return tuple(findings)
+
+
+def _check_tree_sitter_declarator(file_path: Path, source: bytes, node: Node) -> Finding | None:
+    name_node = ts_child_by_field(node, "name")
+    if name_node is None:
+        return None
+    name = ts_node_text(source, name_node)
+    if not _is_credential_name(name):
+        return None
+    value_node = ts_child_by_field(node, "value")
+    literal_value = _tree_sitter_expression_literal_value(source, value_node)
+    if literal_value is None or _is_safe_value(literal_value):
+        return None
+    line = _tree_sitter_expression_literal_line(source, value_node)
+    if line is None and value_node is not None:
+        line = ts_node_line(value_node)
+    return _hardcoded_credential_finding(file_path, line, name, literal_value)
+
+
+def _check_tree_sitter_assignment(file_path: Path, source: bytes, node: Node) -> Finding | None:
+    operator = ts_child_by_field(node, "operator")
+    if operator is None or ts_node_text(source, operator) != "=":
+        return None
+    target_node = ts_child_by_field(node, "left")
+    name = _tree_sitter_assignment_target_name(source, target_node)
+    if name is None or not _is_credential_name(name):
+        return None
+    value_node = ts_child_by_field(node, "right")
+    literal_value = _tree_sitter_expression_literal_value(source, value_node)
+    if literal_value is None or _is_safe_value(literal_value):
+        return None
+    line = _tree_sitter_expression_literal_line(source, value_node) or ts_node_line(node)
+    return _hardcoded_credential_finding(file_path, line, name, literal_value)
+
+
+def _tree_sitter_assignment_target_name(source: bytes, node: Node | None) -> str | None:
+    if node is None:
+        return None
+    if node.type == "identifier":
+        return ts_node_text(source, node)
+    if node.type != "field_access":
+        return None
+    field_node = ts_child_by_field(node, "field")
+    if field_node is None:
+        return None
+    return ts_node_text(source, field_node)
+
+
+def _check_tree_sitter_method_invocation(
+    file_path: Path, source: bytes, node: Node
+) -> Finding | None:
+    method_name = _tree_sitter_call_name(source, node)
+    arguments = _tree_sitter_arguments(node)
+    if method_name is None or not arguments:
+        return None
+    if method_name == _SYSTEM_SET_PROPERTY_METHOD and len(arguments) >= 2:
+        key = ts_string_literal_value(source, arguments[0])
+        value = _tree_sitter_call_literal_value(source, arguments[1])
+        if key is not None and _is_credential_name(key) and _is_reportable_literal(value):
+            return _hardcoded_credential_finding(file_path, ts_node_line(arguments[1]), key, value)
+    if method_name == _MAP_PUT_METHOD and len(arguments) >= 2:
+        key = ts_string_literal_value(source, arguments[0])
+        value = _tree_sitter_call_literal_value(source, arguments[1])
+        if key is not None and _is_credential_name(key) and _is_reportable_literal(value):
+            return _hardcoded_credential_finding(file_path, ts_node_line(arguments[1]), key, value)
+    if not _is_credential_name(method_name):
+        return None
+    for argument in arguments:
+        value = _tree_sitter_call_literal_value(source, argument)
+        if _is_reportable_literal(value):
+            return _hardcoded_credential_finding(
+                file_path, ts_node_line(argument), method_name, value
+            )
+    return None
+
+
+def _check_tree_sitter_object_creation(
+    file_path: Path, source: bytes, node: Node
+) -> Finding | None:
+    type_node = ts_child_by_field(node, "type")
+    if type_node is None:
+        return None
+    type_name = ts_node_text(source, type_node)
+    if not _is_credential_name(type_name):
+        return None
+    for argument in reversed(_tree_sitter_arguments(node)):
+        value = _tree_sitter_call_literal_value(source, argument)
+        if _is_reportable_literal(value):
+            return _hardcoded_credential_finding(
+                file_path, ts_node_line(argument), type_name, value
+            )
+    return None
+
+
+def _check_tree_sitter_annotation(file_path: Path, source: bytes, node: Node) -> Finding | None:
+    name_node = ts_child_by_field(node, "name")
+    if name_node is None or last_word(ts_node_text(source, name_node)) != _SPRING_VALUE_ANNOTATION:
+        return None
+    arguments = _tree_sitter_arguments(node)
+    if not arguments:
+        return None
+    raw_value = ts_string_literal_value(source, arguments[0])
+    parsed_default = _spring_property_default(raw_value)
+    if parsed_default is None:
+        return None
+    key, default = parsed_default
+    if not _is_credential_name(key) or _is_safe_value(default):
+        return None
+    return _hardcoded_credential_finding(file_path, ts_node_line(arguments[0]), key, default)
+
+
+def _tree_sitter_call_name(source: bytes, node: Node) -> str | None:
+    name_node = ts_child_by_field(node, "name")
+    return ts_node_text(source, name_node) if name_node is not None else None
+
+
+def _tree_sitter_arguments(node: Node) -> tuple[Node, ...]:
+    arguments_node = ts_child_by_field(node, "arguments")
+    if arguments_node is None:
+        return ()
+    return tuple(child for child in arguments_node.named_children)
+
+
+def _tree_sitter_call_literal_value(source: bytes, node: Node | None) -> str | None:
+    value = _tree_sitter_expression_literal_value(source, node)
+    if value is not None:
+        return value
+    if node is None or node.type != "method_invocation":
+        return None
+    method_name = _tree_sitter_call_name(source, node)
+    receiver = ts_child_by_field(node, "object")
+    if method_name not in _LITERAL_PASSTHROUGH_METHODS:
+        return None
+    return ts_string_literal_value(source, receiver)
+
+
+def _tree_sitter_expression_literal_value(source: bytes, node: Node | None) -> str | None:
+    value = ts_string_literal_value(source, node)
+    if value is not None:
+        return value
+    if node is None:
+        return None
+    if node.type == "ternary_expression":
+        return _first_reportable_tree_sitter_literal(
+            source,
+            (
+                ts_child_by_field(node, "consequence"),
+                ts_child_by_field(node, "alternative"),
+            ),
+        )
+    if node.type == "array_initializer":
+        char_value = _tree_sitter_char_array_literal_value(source, node)
+        if char_value is not None:
+            return char_value
+        return _first_reportable_tree_sitter_literal(source, tuple(node.named_children))
+    if node.type in {
+        "switch_expression",
+        "switch_block",
+        "switch_rule",
+        "expression_statement",
+    }:
+        return _first_reportable_tree_sitter_literal(source, tuple(node.named_children))
+    if node.type == "character_literal":
+        return _tree_sitter_character_literal_value(source, node)
+    return None
+
+
+def _first_reportable_tree_sitter_literal(
+    source: bytes, nodes: tuple[Node | None, ...]
+) -> str | None:
+    for node in nodes:
+        value = _tree_sitter_expression_literal_value(source, node)
+        if _is_reportable_literal(value):
+            return value
+    return None
+
+
+def _tree_sitter_expression_literal_line(source: bytes, node: Node | None) -> int | None:
+    if node is None:
+        return None
+    if _is_reportable_literal(_tree_sitter_expression_literal_value(source, node)):
+        if node.type in {"string_literal", "character_literal"}:
+            return ts_node_line(node)
+        for child in node.named_children:
+            line = _tree_sitter_expression_literal_line(source, child)
+            if line is not None:
+                return line
+    return None
+
+
+def _tree_sitter_character_literal_value(source: bytes, node: Node) -> str | None:
+    raw = ts_node_text(source, node)
+    if len(raw) < 2 or not (raw.startswith("'") and raw.endswith("'")):
+        return None
+    # Reuse the Java string decoder for the same escape forms.
+    return decode_java_string_literal(f'"{raw[1:-1]}"')
+
+
+def _tree_sitter_char_array_literal_value(source: bytes, node: Node) -> str | None:
+    chars = []
+    for child in node.named_children:
+        if child.type != "character_literal":
+            return None
+        char = _tree_sitter_character_literal_value(source, child)
+        if char is None:
+            return None
+        chars.append(char)
+    return "".join(chars) if chars else None
 
 
 def _check_declarator(file_path: Path, node: javalang.tree.VariableDeclarator) -> Finding | None:
     """Build a Finding if this declarator assigns a real secret-shaped value."""
     if not _is_credential_name(node.name):
         return None
-    literal_value = _string_literal_value(node.initializer)
+    literal_value = _expression_literal_value(node.initializer)
     if literal_value is None or _is_safe_value(literal_value):
         return None
     line = _initializer_line(node.initializer)
+    return _hardcoded_credential_finding(file_path, line, node.name, literal_value)
+
+
+def _check_assignment(file_path: Path, node: javalang.tree.Assignment) -> Finding | None:
+    """Build a Finding if an assignment writes a real secret-shaped value."""
+    if node.type != "=":
+        return None
+    name = _assignment_target_name(node.expressionl)
+    if name is None or not _is_credential_name(name):
+        return None
+    literal_value = _expression_literal_value(node.value)
+    if literal_value is None or _is_safe_value(literal_value):
+        return None
+    line = _initializer_line(node.value)
+    return _hardcoded_credential_finding(file_path, line, name, literal_value)
+
+
+def _check_method_invocation(
+    file_path: Path, node: javalang.tree.MethodInvocation
+) -> Finding | None:
+    if node.member == _SYSTEM_SET_PROPERTY_METHOD and len(node.arguments) >= 2:
+        key = _string_literal_value(node.arguments[0])
+        value = _call_literal_value(node.arguments[1])
+        if key is not None and _is_credential_name(key) and _is_reportable_literal(value):
+            return _hardcoded_credential_finding(
+                file_path, _initializer_line(node.arguments[1]), key, value
+            )
+    if node.member == _MAP_PUT_METHOD and len(node.arguments) >= 2:
+        key = _string_literal_value(node.arguments[0])
+        value = _call_literal_value(node.arguments[1])
+        if key is not None and _is_credential_name(key) and _is_reportable_literal(value):
+            return _hardcoded_credential_finding(
+                file_path, _initializer_line(node.arguments[1]), key, value
+            )
+    if not _is_credential_name(node.member):
+        return None
+    for argument in node.arguments:
+        value = _call_literal_value(argument)
+        if _is_reportable_literal(value):
+            return _hardcoded_credential_finding(
+                file_path, _initializer_line(argument), node.member, value
+            )
+    return None
+
+
+def _check_annotation(file_path: Path, node: javalang.tree.Annotation) -> Finding | None:
+    if last_word(node.name) != _SPRING_VALUE_ANNOTATION:
+        return None
+    raw_value = _string_literal_value(node.element)
+    parsed_default = _spring_property_default(raw_value)
+    if parsed_default is None:
+        return None
+    key, default = parsed_default
+    if not _is_credential_name(key) or _is_safe_value(default):
+        return None
+    return _hardcoded_credential_finding(file_path, _initializer_line(node.element), key, default)
+
+
+def _check_class_creator(file_path: Path, node: javalang.tree.ClassCreator) -> Finding | None:
+    type_name = _javalang_type_name(node.type)
+    if type_name is None or not _is_credential_name(type_name):
+        return None
+    for argument in reversed(node.arguments):
+        value = _call_literal_value(argument)
+        if _is_reportable_literal(value):
+            return _hardcoded_credential_finding(
+                file_path, _initializer_line(argument), type_name, value
+            )
+    return None
+
+
+def _hardcoded_credential_finding(
+    file_path: Path, line: int | None, name: str, literal_value: str
+) -> Finding:
     return Finding(
         cwe_id=CWE_ID,
         file_path=file_path,
         line=line,
-        identifier=node.name,
+        identifier=name,
         redacted_value=_redact(literal_value),
-        message=f"Hardcoded credential-like value assigned to '{node.name}'",
+        message=f"Hardcoded credential-like value assigned to '{name}'",
     )
+
+
+def _assignment_target_name(target: object) -> str | None:
+    if isinstance(target, javalang.tree.MemberReference):
+        return target.member
+    if isinstance(target, javalang.tree.This) and target.selectors:
+        selector = target.selectors[-1]
+        if isinstance(selector, javalang.tree.MemberReference):
+            return selector.member
+    return None
+
+
+def _call_literal_value(argument: object | None) -> str | None:
+    value = _expression_literal_value(argument)
+    if value is not None:
+        return value
+    if not isinstance(argument, javalang.tree.MethodInvocation):
+        return None
+    if argument.member not in _LITERAL_PASSTHROUGH_METHODS:
+        return None
+    return _string_literal_value(argument.qualifier)
+
+
+def _spring_property_default(value: str | None) -> tuple[str, str] | None:
+    if value is None:
+        return None
+    match = _SPRING_PROPERTY_DEFAULT_PATTERN.match(value.strip())
+    if match is None:
+        return None
+    return match.group("key"), match.group("default")
+
+
+def _javalang_type_name(type_node: object) -> str | None:
+    name = getattr(type_node, "name", None)
+    if not isinstance(name, str):
+        return None
+    sub_type = getattr(type_node, "sub_type", None)
+    if sub_type is None:
+        return name
+    sub_name = _javalang_type_name(sub_type)
+    return name if sub_name is None else f"{name}.{sub_name}"
 
 
 def _string_literal_value(initializer: object | None) -> str | None:
@@ -138,6 +525,47 @@ def _string_literal_value(initializer: object | None) -> str | None:
     return None
 
 
+def _expression_literal_value(initializer: object | None) -> str | None:
+    value = _string_literal_value(initializer)
+    if value is not None:
+        return value
+    if isinstance(initializer, javalang.tree.TernaryExpression):
+        return _first_reportable_javalang_literal((initializer.if_true, initializer.if_false))
+    if isinstance(initializer, javalang.tree.ArrayInitializer):
+        char_value = _char_array_literal_value(initializer)
+        if char_value is not None:
+            return char_value
+        return _first_reportable_javalang_literal(tuple(initializer.initializers))
+    return None
+
+
+def _first_reportable_javalang_literal(nodes: tuple[object | None, ...]) -> str | None:
+    for node in nodes:
+        value = _expression_literal_value(node)
+        if _is_reportable_literal(value):
+            return value
+    return None
+
+
+def _char_array_literal_value(initializer: javalang.tree.ArrayInitializer) -> str | None:
+    chars = []
+    for item in initializer.initializers:
+        if not isinstance(item, javalang.tree.Literal):
+            return None
+        char = _character_literal_value(item)
+        if char is None:
+            return None
+        chars.append(char)
+    return "".join(chars) if chars else None
+
+
+def _character_literal_value(literal: javalang.tree.Literal) -> str | None:
+    raw = literal.value
+    if len(raw) < 2 or not (raw.startswith("'") and raw.endswith("'")):
+        return None
+    return decode_java_string_literal(f'"{raw[1:-1]}"')
+
+
 def _initializer_line(initializer: object | None) -> int | None:
     """Return the best source line for a static string initializer.
 
@@ -151,6 +579,13 @@ def _initializer_line(initializer: object | None) -> int | None:
         return position.line
     if isinstance(initializer, javalang.tree.BinaryOperation):
         return _initializer_line(initializer.operandl) or _initializer_line(initializer.operandr)
+    if isinstance(initializer, javalang.tree.TernaryExpression):
+        return _initializer_line(initializer.if_true) or _initializer_line(initializer.if_false)
+    if isinstance(initializer, javalang.tree.ArrayInitializer):
+        for item in initializer.initializers:
+            line = _initializer_line(item)
+            if line is not None:
+                return line
     return None
 
 
@@ -161,14 +596,10 @@ def _plain_literal_value(literal: javalang.tree.Literal) -> str | None:
     including the surrounding quotes for strings (e.g. ``'"hunter2"'``)
     and no quotes for numbers/booleans (e.g. ``'5'``, ``'true'``) -
     that's how a string literal is distinguished from any other kind.
-    Unescapes only ``\\"`` and ``\\\\`` (not full Java string-escape
-    handling) since that's sufficient to inspect realistic secret
-    values without needing a full literal-escape parser.
+    Actual string decoding is centralized in ``_java_literals.py`` so
+    the javalang and Tree-sitter paths cannot drift apart.
     """
-    raw = literal.value
-    if len(raw) < 2 or not (raw.startswith('"') and raw.endswith('"')):
-        return None
-    return raw[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+    return decode_java_string_literal(literal.value)
 
 
 def detect_in_config(parsed_config: ParsedConfigFile) -> tuple[Finding, ...]:
@@ -211,8 +642,13 @@ def _is_safe_value(value: str) -> bool:
     return any(marker in lowered for marker in _PLACEHOLDER_MARKERS)
 
 
+def _is_reportable_literal(value: str | None) -> TypeGuard[str]:
+    return value is not None and not _is_safe_value(value)
+
+
 def _redact(value: str) -> str:
     """Mask a matched value for safe inclusion in a Finding/report."""
+    value = value.strip()
     if len(value) <= 2:
         return "*" * len(value)
     return f"{value[0]}{'*' * (len(value) - 2)}{value[-1]}"

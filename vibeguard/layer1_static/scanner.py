@@ -1,12 +1,12 @@
 """Layer 1 scanner: orchestrates ast_parser/config_parser/pom_parser across a directory tree.
 
 Never executes or evaluates any content from a target file: Java source
-is only ever parsed into an AST via ``javalang``, config files are only
-ever parsed into key-value pairs via a hand-rolled reader
-(``.properties``) or PyYAML's ``SafeLoader`` (``.yml``/``.yaml``), and
-``pom.xml`` is only ever parsed into an element tree via the stdlib
-``xml.etree.ElementTree`` - none of these paths construct or run
-arbitrary code from the file being analysed.
+is only ever parsed into an AST via ``javalang``/Tree-sitter, config
+files are only ever parsed into key-value pairs via a hand-rolled
+reader (``.properties``) or PyYAML's ``SafeLoader`` (``.yml``/
+``.yaml``), and ``pom.xml`` is only ever parsed into an element tree
+via the stdlib ``xml.etree.ElementTree`` - none of these paths
+construct or run arbitrary code from the file being analysed.
 
 This module's one added responsibility beyond the individual parsers is
 directory-tree orchestration with path-traversal containment: every file
@@ -35,6 +35,7 @@ from vibeguard.layer1_static.ast_parser import (
 from vibeguard.layer1_static.config_parser import (
     CONFIG_FILE_SUFFIXES,
     ParsedConfigFile,
+    is_conventional_config_path,
     parse_config_file,
 )
 from vibeguard.layer1_static.pom_parser import ParsedPomFile, parse_pom_file
@@ -43,8 +44,6 @@ logger = logging.getLogger(__name__)
 
 _JAVA_SUFFIX = ".java"
 _POM_FILENAME = "pom.xml"
-_RELEVANT_SUFFIXES = CONFIG_FILE_SUFFIXES | {_JAVA_SUFFIX}
-
 # Build output, dependency caches, and IDE metadata: never *production*
 # source. Build output contains verbatim *copies* of real source files
 # (e.g. Maven copies src/main/resources/*.properties into
@@ -190,6 +189,15 @@ def _discover_candidate_files(resolved_root: Path) -> list[Path]:
     happens to be named ``test`` anywhere else in the tree (e.g.
     ``com.example.test``) - a real false-exclusion found via targeted
     testing, not a hypothetical one.
+
+    Config-file discovery is intentionally narrower than "any
+    .properties/.yml/.yaml file": only conventional application config
+    filenames (``application*``, ``bootstrap*``,
+    ``microprofile-config*``) feed the config-scanning path. Arbitrary
+    YAML/properties resources like OpenAPI specs and i18n bundles are
+    real repository content but not application config, and scanning
+    them as though they were can create blocking CWE-798 false
+    positives.
     """
     matches: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(resolved_root, followlinks=False):
@@ -202,7 +210,11 @@ def _discover_candidate_files(resolved_root: Path) -> list[Path]:
         ]
         for filename in filenames:
             candidate = dirpath_obj / filename
-            if candidate.suffix.lower() in _RELEVANT_SUFFIXES or filename.lower() == _POM_FILENAME:
+            if filename.lower() == _POM_FILENAME or candidate.suffix.lower() == _JAVA_SUFFIX:
+                matches.append(candidate)
+            elif candidate.suffix.lower() in CONFIG_FILE_SUFFIXES and is_conventional_config_path(
+                candidate
+            ):
                 matches.append(candidate)
     return sorted(matches)
 

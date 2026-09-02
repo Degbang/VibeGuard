@@ -2,16 +2,37 @@
 
 from __future__ import annotations
 
-import time
+import os
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
 
-import javalang
 import pytest
 
-from vibeguard.layer1_static import ast_parser
 from vibeguard.layer1_static.ast_parser import ParseStatus, parse_file
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _run_child_python(snippet: str) -> subprocess.CompletedProcess[str]:
+    env = dict(os.environ)
+    existing_pythonpath = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = (
+        str(REPO_ROOT)
+        if not existing_pythonpath
+        else f"{REPO_ROOT}{os.pathsep}{existing_pythonpath}"
+    )
+    return subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(snippet)],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
 
 
 def test_parse_clean_file_succeeds() -> None:
@@ -96,6 +117,16 @@ def test_parse_utf8_bom_file_succeeds(tmp_path: Path) -> None:
     assert result.classes[0].name == "BomService"
 
 
+def test_parse_java_unicode_escape_in_identifier(tmp_path: Path) -> None:
+    java_file = tmp_path / "EscapedIdentifier.java"
+    java_file.write_text(r"public class EscapedIdentifier { String pass\u0077ord; }")
+
+    result = parse_file(java_file)
+
+    assert result.status == ParseStatus.OK
+    assert result.classes[0].fields[0].name == "password"
+
+
 def test_parse_file_too_large_is_rejected(tmp_path: Path) -> None:
     big_file = tmp_path / "Big.java"
     big_file.write_text("public class Big {}\n" + ("// padding\n" * 10))
@@ -106,22 +137,37 @@ def test_parse_file_too_large_is_rejected(tmp_path: Path) -> None:
     assert result.error_message is not None
 
 
-def test_parse_timeout_is_reported_not_raised(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def _slow_parse(source: str) -> object:
-        time.sleep(0.3)
-        return javalang.parse.parse(source)
+def test_parse_timeout_is_reported_not_raised() -> None:
+    completed = _run_child_python("""
+        import tempfile
+        import time
+        from pathlib import Path
 
-    monkeypatch.setattr(javalang.parse, "parse", _slow_parse)
+        import javalang
 
-    slow_file = tmp_path / "Slow.java"
-    slow_file.write_text("public class Slow {}\n")
+        from vibeguard.layer1_static import ast_parser
+        from vibeguard.layer1_static.ast_parser import ParseStatus
 
-    result = ast_parser.parse_file(slow_file, timeout_seconds=0.05)
+        original_parse = javalang.parse.parse
 
-    assert result.status == ParseStatus.PARSE_TIMEOUT
-    assert result.error_message is not None
+        def _slow_parse(source: str) -> object:
+            time.sleep(0.3)
+            return original_parse(source)
+
+        javalang.parse.parse = _slow_parse
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            slow_file = Path(tmpdir) / "Slow.java"
+            slow_file.write_text("public class Slow {}\\n")
+            result = ast_parser.parse_file(slow_file, timeout_seconds=0.05)
+            assert result.status == ParseStatus.PARSE_TIMEOUT
+            assert result.error_message is not None
+
+        print("child-ok")
+        """)
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "child-ok" in completed.stdout
 
 
 def test_parsed_file_is_frozen_and_hashable_when_no_tree() -> None:
@@ -147,13 +193,11 @@ def test_interface_extends_are_captured(tmp_path: Path) -> None:
 
 
 def test_parse_simple_java_record(tmp_path: Path) -> None:
-    """javalang can't parse records natively; ast_parser desugars them first.
+    """Simple records stay on the lightweight javalang preprocessing path.
 
     Records are the dominant modern DTO pattern in AI-generated
-    Spring/Quarkus code, so this is the highest-value part of the
-    Java 14-21 syntax gap to close (see IMPLEMENTATION_LOG.md for the
-    full compatibility assessment and why the rest - sealed classes,
-    pattern matching, text blocks - remains unsupported).
+    Spring/Quarkus code. Empty records remain handled by the existing
+    preprocessor; records with bodies fall through to Tree-sitter.
     """
     record_file = tmp_path / "Credentials.java"
     record_file.write_text("public record Credentials(String username, String password) {}\n")
@@ -169,20 +213,73 @@ def test_parse_simple_java_record(tmp_path: Path) -> None:
     assert password_field.type_name == "String"
 
 
-def test_parse_record_with_compact_constructor_still_fails(tmp_path: Path) -> None:
-    """The record shim is intentionally narrow - a non-empty body doesn't parse."""
+def test_parse_record_with_compact_constructor_uses_tree_sitter_fallback(tmp_path: Path) -> None:
+    """Records with bodies are valid modern Java and must parse via Tree-sitter."""
     record_file = tmp_path / "Validated.java"
     record_file.write_text(
-        "public record Validated(String value) {\n"
+        "public record Validated(String username, String password) {\n"
         "    public Validated {\n"
-        "        value = value.trim();\n"
+        "        username = username.trim();\n"
         "    }\n"
+        "    public String normalized() { return username; }\n"
         "}\n"
     )
 
     result = parse_file(record_file)
 
-    assert result.status == ParseStatus.PARSE_FAILED
+    assert result.status == ParseStatus.OK
+    assert result.tree is None
+    assert result.tree_sitter is not None
+    cls = result.classes[0]
+    assert cls.name == "Validated"
+    assert {f.name for f in cls.fields} == {"username", "password"}
+    assert {m.name for m in cls.methods} == {"normalized"}
+
+
+def test_parse_switch_expression_uses_tree_sitter_fallback(tmp_path: Path) -> None:
+    java_file = tmp_path / "Switchy.java"
+    java_file.write_text(
+        "public class Switchy {\n"
+        "    String role(int level) {\n"
+        "        return switch (level) {\n"
+        '            case 1 -> "admin";\n'
+        '            default -> "user";\n'
+        "        };\n"
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    assert result.status == ParseStatus.OK
+    assert result.tree is None
+    assert result.tree_sitter is not None
+    assert result.classes[0].name == "Switchy"
+
+
+def test_tree_sitter_fallback_preserves_extends_and_implements_summary(tmp_path: Path) -> None:
+    java_file = tmp_path / "Modern.java"
+    java_file.write_text(
+        "interface I {}\n"
+        "interface J {}\n"
+        "class Base {}\n"
+        "public class Modern extends Base implements I, J {\n"
+        "    String role(int level) {\n"
+        "        return switch (level) {\n"
+        '            case 1 -> "admin";\n'
+        '            default -> "user";\n'
+        "        };\n"
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    assert result.status == ParseStatus.OK
+    assert result.tree_sitter is not None
+    modern = next(cls for cls in result.classes if cls.name == "Modern")
+    assert modern.superclass == "Base"
+    assert modern.interfaces == ("I", "J")
 
 
 def test_multiline_record_field_reports_its_own_source_line(tmp_path: Path) -> None:

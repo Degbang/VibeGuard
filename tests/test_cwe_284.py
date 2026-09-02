@@ -167,3 +167,82 @@ def test_detect_in_java_outer_class_authorization_does_not_protect_inner_class(
     findings = detect_in_java(result)
     assert len(findings) == 1
     assert findings[0].identifier == "x"
+
+
+def test_detect_in_java_finds_unprotected_endpoint_with_modern_switch(
+    tmp_path: Path,
+) -> None:
+    """Tree-sitter fallback files must still feed CWE-284."""
+    java_file = tmp_path / "ModernResource.java"
+    java_file.write_text(
+        "import org.springframework.web.bind.annotation.*;\n"
+        "@RestController\n"
+        "public class ModernResource {\n"
+        '    @PostMapping("/role")\n'
+        "    public String role(int level) {\n"
+        "        return switch (level) {\n"
+        '            case 1 -> "admin";\n'
+        '            default -> "user";\n'
+        "        };\n"
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    assert result.tree_sitter is not None
+    findings = detect_in_java(result)
+    assert [(f.identifier, f.line) for f in findings] == [("role", 4)]
+
+
+def test_detect_in_java_does_not_flag_quarkus_rest_client_interface(
+    tmp_path: Path,
+) -> None:
+    """Outbound REST clients are not inbound access-control candidates."""
+    java_file = tmp_path / "HeroClient.java"
+    java_file.write_text(
+        "import jakarta.ws.rs.GET;\n"
+        "import jakarta.ws.rs.Path;\n"
+        "import org.eclipse.microprofile.rest.client.inject.RegisterRestClient;\n"
+        '@Path("/heroes")\n'
+        "@RegisterRestClient\n"
+        "interface HeroClient {\n"
+        "    @GET\n"
+        '    @Path("/random")\n'
+        "    String findRandomHero();\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    assert detect_in_java(result) == ()
+
+
+def test_detect_in_java_does_not_flag_tree_sitter_rest_client_interface(
+    tmp_path: Path,
+) -> None:
+    """Tree-sitter fallback must preserve the same REST-client exclusion."""
+    java_file = tmp_path / "HeroClient.java"
+    java_file.write_text(
+        "import jakarta.ws.rs.GET;\n"
+        "import jakarta.ws.rs.Path;\n"
+        "import org.eclipse.microprofile.rest.client.inject.RegisterRestClient;\n"
+        '@Path("/heroes")\n'
+        "@RegisterRestClient\n"
+        "interface HeroClient {\n"
+        "    @GET\n"
+        '    @Path("/random")\n'
+        "    String findRandomHero();\n"
+        "    default int helper(int level) {\n"
+        "        return switch (level) {\n"
+        "            case 1 -> 1;\n"
+        "            default -> 0;\n"
+        "        };\n"
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    assert result.tree_sitter is not None
+    assert detect_in_java(result) == ()
