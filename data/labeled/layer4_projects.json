@@ -1,0 +1,106 @@
+{
+  "projects": [
+    {
+      "project_id": "clean-orders-service",
+      "source_path": "data/sample_apps/layer4_training/clean-orders-service",
+      "label": "low",
+      "findings": []
+    },
+    {
+      "project_id": "clean-profile-service",
+      "source_path": "data/sample_apps/layer4_training/clean-profile-service",
+      "label": "low",
+      "findings": []
+    },
+    {
+      "project_id": "config-secret-service",
+      "source_path": "data/sample_apps/layer4_training/config-secret-service",
+      "label": "critical",
+      "findings": [
+        {
+          "cwe_id": "CWE-798",
+          "file_path": "src/main/resources/application.properties",
+          "line": 3,
+          "identifier": "spring.datasource.password",
+          "message": "Hardcoded credential-like value assigned to 'spring.datasource.password'",
+          "redacted_value": "h*****2"
+        }
+      ]
+    },
+    {
+      "project_id": "unprotected-reports-service",
+      "source_path": "data/sample_apps/layer4_training/unprotected-reports-service",
+      "label": "high",
+      "findings": [
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/example/unprotectedreports/ReportController.java",
+          "line": 11,
+          "identifier": "daily",
+          "message": "Endpoint method 'daily' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        }
+      ]
+    },
+    {
+      "project_id": "unsafe-auth-service",
+      "source_path": "data/sample_apps/layer4_training/unsafe-auth-service",
+      "label": "high",
+      "findings": [
+        {
+          "cwe_id": "CWE-287",
+          "file_path": "src/main/java/com/example/unsafeauth/AuthService.java",
+          "line": 5,
+          "identifier": "password",
+          "message": "'password' compared with '==' instead of .equals() - Java's == compares object reference identity, not value, so this comparison does not reliably verify the credential",
+          "redacted_value": null
+        }
+      ]
+    },
+    {
+      "project_id": "unvalidated-customers-service",
+      "source_path": "data/sample_apps/layer4_training/unvalidated-customers-service",
+      "label": "medium",
+      "findings": [
+        {
+          "cwe_id": "CWE-20",
+          "file_path": "src/main/java/com/example/unvalidatedcustomers/CustomerController.java",
+          "line": 14,
+          "identifier": "request",
+          "message": "Parameter 'request' (@RequestBody) has no @Valid/@Validated annotation - Bean Validation constraints on CustomerRequest won't be enforced automatically",
+          "redacted_value": null
+        }
+      ]
+    },
+    {
+      "project_id": "unvalidated-orders-service",
+      "source_path": "data/sample_apps/layer4_training/unvalidated-orders-service",
+      "label": "medium",
+      "findings": [
+        {
+          "cwe_id": "CWE-20",
+          "file_path": "src/main/java/com/example/unvalidatedorders/OrderController.java",
+          "line": 14,
+          "identifier": "request",
+          "message": "Parameter 'request' (@RequestBody) has no @Valid/@Validated annotation - Bean Validation constraints on OrderRequest won't be enforced automatically",
+          "redacted_value": null
+        }
+      ]
+    },
+    {
+      "project_id": "vulnerable-dependency-service",
+      "source_path": "data/sample_apps/layer4_training/vulnerable-dependency-service",
+      "label": "critical",
+      "findings": [
+        {
+          "cwe_id": "CWE-1035",
+          "file_path": "pom.xml",
+          "line": 9,
+          "identifier": "org.apache.logging.log4j:log4j-core",
+          "message": "org.apache.logging.log4j:log4j-core:2.14.1 matches CVE-2021-44228 (Log4Shell: unauthenticated remote code execution via JNDI lookup in log messages) - fix: upgrade to 2.15.0 or later",
+          "redacted_value": null
+        }
+      ]
+    }
+  ]
+}
