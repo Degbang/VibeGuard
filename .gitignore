@@ -6,6 +6,7 @@ venv/
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
+.pytest-tmp/
 .coverage
 htmlcov/
 dist/
@@ -19,7 +20,23 @@ build/
 my-test-app/
 *-test-app/
 
+# Real third-party repos cloned locally for QA/precision testing against
+# the actual codebase they came from - not this project's own code, must
+# never be committed or redistributed as part of it.
+.qa-repos/
+
 data/sample_apps/*
 !data/sample_apps/.gitkeep
+# Layer 4's labelled training corpus is real project data the trusted
+# model contract depends on - it must be tracked, not just the
+# directory placeholder, or a fresh clone can't reproduce Layer 4/5.
+!data/sample_apps/layer4_training/
+data/sample_apps/layer4_training/*/target/
+
 data/labeled/*
 !data/labeled/.gitkeep
+# The labelled dataset and its trusted model contract are the actual
+# Layer 4 artifacts main.py/evaluation depend on by default - same
+# reasoning as above, they must be tracked.
+!data/labeled/layer4_projects.json
+!data/labeled/layer4_random_forest_contract.json

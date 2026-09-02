@@ -101,6 +101,190 @@
           "redacted_value": null
         }
       ]
+    },
+    {
+      "project_id": "multi-issue-gateway-service",
+      "source_path": "data/sample_apps/layer4_training/multi-issue-gateway-service",
+      "label": "critical",
+      "label_rationale": "Hardcoded upstream API key (CWE-798, in application.properties) plus an unauthenticated endpoint (CWE-284, in a separate controller file). Labelled before scanning: a leaked credential is already critical on its own; combined with a second, independent access-control gap in the same project, critical is the only defensible label. Exercises has_secret_and_access_control without exercising the same-file variant (the two findings are in different files by design).",
+      "findings": [
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/example/multiissuegateway/RouteController.java",
+          "line": 11,
+          "identifier": "status",
+          "message": "Endpoint method 'status' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        },
+        {
+          "cwe_id": "CWE-798",
+          "file_path": "src/main/resources/application.properties",
+          "line": 2,
+          "identifier": "gateway.upstream.apikey",
+          "message": "Hardcoded credential-like value assigned to 'gateway.upstream.apikey'",
+          "redacted_value": "s***************d"
+        }
+      ]
+    },
+    {
+      "project_id": "insecure-admin-service",
+      "source_path": "data/sample_apps/layer4_training/insecure-admin-service",
+      "label": "critical",
+      "label_rationale": "A hardcoded API key held directly on the same controller class as an unauthenticated admin endpoint (CWE-798 + CWE-284, same file). Labelled before scanning: this is worse in kind than the gateway case above, not just in count - the exposed secret and the missing access-control decision sit on the exact same admin surface, so anyone who reaches the unprotected endpoint is one field-read away from the key. Still critical (the scale tops out there), but the reasoning is compounding proximity, not merely 'two findings present'. Exercises same_file_secret_and_access_control, which no other project in this dataset turns on.",
+      "findings": [
+        {
+          "cwe_id": "CWE-798",
+          "file_path": "src/main/java/com/example/insecureadmin/AdminController.java",
+          "line": 10,
+          "identifier": "apiKey",
+          "message": "Hardcoded credential-like value assigned to 'apiKey'",
+          "redacted_value": "s******************a"
+        },
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/example/insecureadmin/AdminController.java",
+          "line": 13,
+          "identifier": "status",
+          "message": "Endpoint method 'status' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        }
+      ]
+    },
+    {
+      "project_id": "leaky-session-service",
+      "source_path": "data/sample_apps/layer4_training/leaky-session-service",
+      "label": "critical",
+      "label_rationale": "A hardcoded session secret in config (CWE-798) alongside a broken == token comparison (CWE-287). Labelled before scanning: the hardcoded secret alone already reaches critical; the broken comparison compounds it by weakening the one mechanism that might otherwise limit the blast radius of that leaked value. Exercises has_secret_and_authentication.",
+      "findings": [
+        {
+          "cwe_id": "CWE-287",
+          "file_path": "src/main/java/com/example/leakysession/SessionService.java",
+          "line": 5,
+          "identifier": "token",
+          "message": "'token' compared with '==' instead of .equals() - Java's == compares object reference identity, not value, so this comparison does not reliably verify the credential",
+          "redacted_value": null
+        },
+        {
+          "cwe_id": "CWE-798",
+          "file_path": "src/main/resources/application.properties",
+          "line": 2,
+          "identifier": "session.secret",
+          "message": "Hardcoded credential-like value assigned to 'session.secret'",
+          "redacted_value": "s******x"
+        }
+      ]
+    },
+    {
+      "project_id": "legacy-deps-service",
+      "source_path": "data/sample_apps/layer4_training/legacy-deps-service",
+      "label": "critical",
+      "label_rationale": "A hardcoded datasource password (CWE-798) declared alongside a directly-declared Log4Shell-vulnerable dependency (CWE-1035). Labelled before scanning: both findings independently reach critical by Layer 3's own rubric (798 base 90; 1035 base 85 plus the +5 pom.xml adjustment = 90), so this project is the 'double critical' case in the dataset - included specifically to check that stacking two already-maximal findings doesn't do anything strange to the feature vector or the prediction, not to test a boundary judgment call. Exercises has_secret_and_vulnerable_dependency.",
+      "findings": [
+        {
+          "cwe_id": "CWE-798",
+          "file_path": "src/main/resources/application.properties",
+          "line": 2,
+          "identifier": "spring.datasource.password",
+          "message": "Hardcoded credential-like value assigned to 'spring.datasource.password'",
+          "redacted_value": "h*****2"
+        },
+        {
+          "cwe_id": "CWE-1035",
+          "file_path": "pom.xml",
+          "line": 9,
+          "identifier": "org.apache.logging.log4j:log4j-core",
+          "message": "org.apache.logging.log4j:log4j-core:2.14.1 matches CVE-2021-44228 (Log4Shell: unauthenticated remote code execution via JNDI lookup in log messages) - fix: upgrade to 2.15.0 or later",
+          "redacted_value": null
+        }
+      ]
+    },
+    {
+      "project_id": "open-intake-service",
+      "source_path": "data/sample_apps/layer4_training/open-intake-service",
+      "label": "high",
+      "label_rationale": "A single endpoint that is both unauthenticated and unvalidated at once (CWE-284 + CWE-20, same file, same method). Labelled before scanning: deliberately kept at high, not critical - there is no actual credential exposure and no RCE-class dependency anywhere in this project, so it does not belong at the same level as the secret-leak projects even though two findings are present. This is the boundary case that separates 'two findings' from 'critical': combining an access-control gap with an input-validation gap on the same request path is worse than either alone, but not as bad as a leaked credential. Exercises same_file_access_control_and_input_validation and has_access_control_and_input_validation.",
+      "findings": [
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/example/openintake/IntakeController.java",
+          "line": 12,
+          "identifier": "submit",
+          "message": "Endpoint method 'submit' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        },
+        {
+          "cwe_id": "CWE-20",
+          "file_path": "src/main/java/com/example/openintake/IntakeController.java",
+          "line": 12,
+          "identifier": "request",
+          "message": "Parameter 'request' (@RequestBody) has no @Valid/@Validated annotation - Bean Validation constraints on IntakeRequest won't be enforced automatically",
+          "redacted_value": null
+        }
+      ]
+    },
+    {
+      "project_id": "duplicate-validation-gaps-service",
+      "source_path": "data/sample_apps/layer4_training/duplicate-validation-gaps-service",
+      "label": "high",
+      "label_rationale": "Two separate endpoints (create and update) both missing @Valid on the same DTO type, with authorization otherwise correctly applied at the class level - i.e. CWE-20 twice, nothing else. Labelled before scanning, and deliberately: a rule that only looks at 'the single highest-severity finding present' would score this project identically to unvalidated-orders-service (one CWE-20 finding, medium) because CWE-20's own base score never changes. This project is labelled high instead, on the judgment that the *same* validation gap recurring across multiple endpoints signals a systemic pattern in how this codebase was generated, not an isolated slip - and a systemic weakness is worse than a one-off. This is the intended divergence case against a naive max-severity baseline: exists specifically so Chapter 5 can show whether Layer 4 (which has a finding_count/medium_count feature that can see the repetition) predicts this correctly where a single-max-score baseline structurally cannot.",
+      "findings": [
+        {
+          "cwe_id": "CWE-20",
+          "file_path": "src/main/java/com/example/duplicatevalidationgaps/WidgetController.java",
+          "line": 15,
+          "identifier": "request",
+          "message": "Parameter 'request' (@RequestBody) has no @Valid/@Validated annotation - Bean Validation constraints on WidgetRequest won't be enforced automatically",
+          "redacted_value": null
+        },
+        {
+          "cwe_id": "CWE-20",
+          "file_path": "src/main/java/com/example/duplicatevalidationgaps/WidgetController.java",
+          "line": 20,
+          "identifier": "request",
+          "message": "Parameter 'request' (@RequestBody) has no @Valid/@Validated annotation - Bean Validation constraints on WidgetRequest won't be enforced automatically",
+          "redacted_value": null
+        }
+      ]
+    },
+    {
+      "project_id": "vibe-coded-disaster-service",
+      "source_path": "data/sample_apps/layer4_training/vibe-coded-disaster-service",
+      "label": "critical",
+      "label_rationale": "A hardcoded payment-provider secret key (CWE-798), an unauthenticated and unvalidated checkout endpoint (CWE-284 + CWE-20, same file/line), and a broken == password comparison elsewhere in the project (CWE-287) - four distinct CWEs in one small service. Labelled before scanning as the dataset's 'everything is broken at once' case, representative of the thesis's actual target (an AI-generated microservice with no single design owner catching any of these). Included to give Layer 5's SHAP explanation a realistic, feature-rich example to attribute across, not to test a specific pairwise feature in isolation.",
+      "findings": [
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/example/vibecodeddisaster/CheckoutController.java",
+          "line": 12,
+          "identifier": "pay",
+          "message": "Endpoint method 'pay' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        },
+        {
+          "cwe_id": "CWE-20",
+          "file_path": "src/main/java/com/example/vibecodeddisaster/CheckoutController.java",
+          "line": 12,
+          "identifier": "request",
+          "message": "Parameter 'request' (@RequestBody) has no @Valid/@Validated annotation - Bean Validation constraints on PaymentRequest won't be enforced automatically",
+          "redacted_value": null
+        },
+        {
+          "cwe_id": "CWE-287",
+          "file_path": "src/main/java/com/example/vibecodeddisaster/LoginService.java",
+          "line": 5,
+          "identifier": "password",
+          "message": "'password' compared with '==' instead of .equals() - Java's == compares object reference identity, not value, so this comparison does not reliably verify the credential",
+          "redacted_value": null
+        },
+        {
+          "cwe_id": "CWE-798",
+          "file_path": "src/main/resources/application.properties",
+          "line": 2,
+          "identifier": "stripe.secret_key",
+          "message": "Hardcoded credential-like value assigned to 'stripe.secret_key'",
+          "redacted_value": "s***************9"
+        }
+      ]
     }
   ]
 }
