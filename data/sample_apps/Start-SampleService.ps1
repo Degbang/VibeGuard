@@ -22,7 +22,17 @@ param(
         "ai-login-sessions-service",
         "ai-two-factor-service",
         "ai-staff-timesheet-service",
-        "ai-card-storage-service"
+        "ai-card-storage-service",
+        "ai-payment-webhooks-service",
+        "ai-invoice-service",
+        "ai-email-verification-service",
+        "ai-account-linking-service",
+        "ai-feature-flags-service",
+        "ai-system-health-service",
+        "ai-bulk-user-import-service",
+        "ai-api-key-service",
+        "ai-oauth-refresh-service",
+        "ai-account-lockout-service"
     )]
     [string]$Service,
 

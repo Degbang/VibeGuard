@@ -1,0 +1,1 @@
+package com.vibeguard.samples.linking; import org.springframework.boot.SpringApplication; import org.springframework.boot.autoconfigure.SpringBootApplication; /** Starts the account-linking service. */ @SpringBootApplication public class LinkingApplication { public static void main(String[] args){SpringApplication.run(LinkingApplication.class,args);} }

@@ -1,0 +1,1 @@
+package com.vibeguard.samples.invoices; import org.springframework.boot.SpringApplication; import org.springframework.boot.autoconfigure.SpringBootApplication; /** Starts the invoice service. */ @SpringBootApplication public class InvoicesApplication { public static void main(String[] args){SpringApplication.run(InvoicesApplication.class,args);} }

@@ -1,0 +1,1 @@
+package com.vibeguard.samples.emailchange; import org.springframework.boot.SpringApplication; import org.springframework.boot.autoconfigure.SpringBootApplication; /** Starts the email-change service. */ @SpringBootApplication public class EmailChangeApplication { public static void main(String[] args){SpringApplication.run(EmailChangeApplication.class,args);} }

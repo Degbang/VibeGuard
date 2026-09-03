@@ -1,0 +1,1 @@
+package com.vibeguard.samples.lockouts; import org.springframework.boot.SpringApplication; import org.springframework.boot.autoconfigure.SpringBootApplication; /** Starts the account-lockout service. */ @SpringBootApplication public class LockoutApplication { public static void main(String[] args){SpringApplication.run(LockoutApplication.class,args);} }

@@ -112,7 +112,7 @@ def test_thesis_orchestrator_writes_scan_and_evaluation_artifacts(
     assert thesis_summary["evaluation"]["manifest_file_relative"] == (
         "evaluation/bundle-20260723-120100/bundle_manifest.json"
     )
-    assert thesis_summary["evaluation"]["leave_one_out_accuracy"] == pytest.approx(17 / 32)
+    assert thesis_summary["evaluation"]["leave_one_out_accuracy"] == pytest.approx(25 / 42)
     assert thesis_summary_schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
     assert thesis_summary_schema["properties"]["schema_version"]["const"] == 2
     assert thesis_summary_schema["properties"]["export_mode"]["const"] == "combined_thesis_summary"

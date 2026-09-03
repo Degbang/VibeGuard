@@ -4728,3 +4728,149 @@ hand-rolled authentication *quality* would likely matter more than
 further growing example count alone, per the remaining-limitations note
 above. Chapter 3 should note the dataset stands at 32 of the stated 50
 sample apps.
+
+---
+
+## [2026-09-03] - Third AI-generated batch (10 more, new use cases); CWE-798's algorithm-name fix generalized on its second real occurrence; Layer 4's edge over baseline confirmed on a genuinely held-out batch, not just re-observed on the batch that motivated it
+
+**What the plan said:** Asked directly whether the next batch toward
+the thesis's 50-app target should revisit the sensitive-domain bucket
+again or move to new territory, the student chose to stay in that
+bucket - specifically to test whether the leave-one-out edge over the
+baseline found in the previous entry was real or an artifact of that
+one batch's composition. 10 more prompts were written deliberately as
+new use cases within payment/account/admin/auth (webhooks, invoicing,
+email verification, account linking, feature flags, system health,
+bulk import, API key issuance, OAuth refresh, account lockout), not
+repeats of batch 2's shapes.
+
+**What we actually did / found:**
+
+1. **CWE-798's algorithm-name false positive generalized, on its second
+   real occurrence, per this project's own established practice.**
+   `ai-oauth-refresh-service` produced `new Token(accessToken,
+   refreshToken, "Bearer", 3600)` flagged as a critical hardcoded
+   secret - the exact same structural bug as the `SecretKeySpec`/
+   `"HmacSHA256"` false positive fixed after batch 1, this time with
+   `"Token"` (itself a credential keyword) as the constructor name and
+   `"Bearer"` (a standard OAuth `token_type` value, RFC 6749) as the
+   literal the reversed-argument scan picked up instead of the actual
+   token values. Rather than add a second narrow allowlist,
+   `_JCA_ALGORITHM_NAMES` was renamed and broadened to
+   `_KNOWN_NON_SECRET_DESCRIPTOR_LITERALS`, now covering both JCA
+   algorithm names and OAuth/HTTP auth-scheme names (`Bearer`, `Basic`,
+   `Digest`, `MAC`) under one documented pattern: short, publicly-
+   standard identifiers defined by a spec, never real secret material,
+   regardless of which credential-shaped constructor they appear
+   alongside. Verified against the real file that surfaced it (false
+   positive gone, both genuine CWE-284 findings unaffected) and against
+   a new regression test proving the generalization, not just the one
+   new case.
+
+2. **Every one of the 10 new projects again implements real, hand-
+   rolled access control** (a header/API-key check against an
+   externalized value), continuing the pattern from batch 2 on entirely
+   new use cases - now 19 of 20 real protection mechanisms observed
+   across three AI-generated batches are this shape, 1 is Spring
+   Security. One project, `ai-payment-webhooks-service`, is the first
+   asymmetric case in the dataset: its write endpoint verifies an
+   HMAC-SHA256 signature over the payload (the correct, standard way to
+   secure a webhook receiver, arguably better than a shared bearer key
+   since it is tied to payload integrity), but its read endpoint has no
+   gate at all and returns every stored raw webhook body - plausibly
+   real payment/customer detail - to any caller. Labelled high, not
+   medium: a well-designed write path does not offset a completely open
+   read path leaking the actual event data. `ai-email-verification-
+   service` is a second, more nuanced case than batch 2's
+   `ai-password-reset-service`: reachable pre-auth by design (correct),
+   but its 6-digit numeric verification code (900,000 possible values)
+   has no rate-limiting anywhere, making it brute-forceable in a way
+   the earlier 32-byte-token password-reset flow is not - labelled
+   medium specifically for that reason, not just because a similar
+   shape exists elsewhere.
+
+3. **Added all 10, retrained, re-evaluated: 42 projects total (8 -> 15
+   -> 22 -> 32 -> 42).** Leave-one-out accuracy is **0.595 (25/42)**;
+   the fixed baseline is **0.381 (16/42)** - a wider margin than the
+   previous entry's 0.531-vs-0.469. Broken down by batch, computed
+   directly rather than assumed:
+   - Original 22 (synthetic + first AI batch): baseline 15/22, LOO
+     14/22 - Layer 4 is roughly at parity here, very slightly behind.
+   - Batch 2 (10 projects): baseline 0/10, LOO 5/10 (up from 3/10 in
+     the previous entry - more supporting examples of the same pattern
+     improved LOO's prediction of these previously-seen-shape
+     projects).
+   - **Batch 3 (10 new projects, indices 32-41): baseline 1/10, LOO
+     6/10.** This is the entry's central result: batch 3 was not used
+     to design or motivate `has_sensitive_domain_signal` the way batch
+     2 was, and the edge held up anyway on genuinely new use cases. The
+     model's advantage is not an artifact of the specific batch that
+     produced it.
+
+**Regression tests updated:** `tests/test_layer4_ml.py` -
+`test_real_layer4_dataset_loads_and_leave_one_out_evaluates` updated to
+the real 42-project confusion matrix;
+`test_real_layer4_dataset_leave_one_out_now_beats_baseline_with_a_caveat`
+replaced with
+`test_real_layer4_dataset_leave_one_out_beats_baseline_on_held_out_batch`,
+which asserts the per-batch correct-count breakdown directly (15/22,
+0->5/10, 1->6/10), not just the aggregate figures, so the held-out-
+generalization claim is enforced by the test suite, not just stated in
+this log; `test_real_layer4_dataset_baseline_predictions_smoke` updated
+to 42. `tests/test_cwe_798.py` gained
+`test_detect_in_java_does_not_flag_oauth_bearer_token_type`, proving
+the generalized fix on the new case. `tests/test_evaluation.py` and
+`tests/test_thesis_orchestrator.py` updated everywhere they had
+32-project/0.531/0.469 values hardcoded against the real committed
+dataset/contract.
+
+**Tests/adversarial checks run:**
+- Full `pytest -q`: `280 passed` (was 279), clean exit.
+- `mypy .` / `ruff check .` / `black --check .` / `git diff --check`:
+  all clean.
+- Every finding for all 10 new projects verified against the actual
+  generated source by hand before labelling, including reading each
+  hand-rolled gate function directly to confirm it actually restricts
+  the endpoint (not assumed from a docstring or comment).
+- `ai-oauth-refresh-service` re-scanned post-fix: the "Bearer" false
+  positive is gone, both genuine CWE-284 findings unaffected.
+- `evaluation.evaluate` re-run against the regenerated 42-project
+  contract; the 0.595/0.381 figures and the per-batch 15/22, 5/10, 6/10
+  splits were read directly from computed output.
+
+**Remaining limitations:** 42 of the thesis's stated 50 sample apps are
+now in place. `_KNOWN_NON_SECRET_DESCRIPTOR_LITERALS` is still a
+curated, non-exhaustive list - a third structurally-identical false
+positive in a different vocabulary (neither JCA nor OAuth/HTTP) would
+still need its own addition, though the pattern for recognizing and
+fixing one is now established. The dataset's label distribution has
+become heavily medium-weighted in this batch (7 of 10) - an honest
+reflection of what was actually found (most of these real, hand-rolled
+protections cluster around similar real-world severity), but worth
+naming as a distribution skew for the next batch to correct if broader
+label diversity is wanted again.
+
+**Why:** Held-out validation - deliberately not reusing batch 2's
+shapes for batch 3 - was the point of this batch, not an afterthought:
+a result that only holds on the data that produced it is a much weaker
+claim than one that holds on data that did not. The CWE-798 fix was
+generalized rather than patched narrowly a second time because this
+project's own established practice (extract/generalize on the second
+real occurrence, not the first) applies exactly as well to a detection-
+rule false positive as it does to a shared utility module.
+
+**Effect on thesis chapters:** Chapter 5 gets its strongest Layer 4
+result yet, and the per-batch breakdown is the evidence that makes it
+credible rather than a single aggregate number: report all three rows
+(original mix roughly at parity, batch 2 improved with more support,
+batch 3 held out and still ahead), not just the 0.595-vs-0.381 headline.
+Chapter 5 should also report the `ai-payment-webhooks-service` finding
+as a concrete illustration that a per-project risk label is a
+simplification - this project's two findings have genuinely different
+real severity, which the current one-label-per-project schema cannot
+represent, worth naming explicitly as a modelling-granularity
+limitation rather than leaving implicit. Chapter 4 should describe
+`_KNOWN_NON_SECRET_DESCRIPTOR_LITERALS`'s generalization as an example
+of this project's iterative, evidence-driven hardening process applied
+to itself, not just to detection rules discovered once. Chapter 3
+should note the dataset stands at 42 of 50, with 8 remaining.

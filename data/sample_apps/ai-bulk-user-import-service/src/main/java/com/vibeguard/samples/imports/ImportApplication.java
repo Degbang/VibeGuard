@@ -1,0 +1,1 @@
+package com.vibeguard.samples.imports; import org.springframework.boot.SpringApplication; import org.springframework.boot.autoconfigure.SpringBootApplication; /** Starts the bulk-import service. */ @SpringBootApplication public class ImportApplication { public static void main(String[] args){SpringApplication.run(ImportApplication.class,args);} }

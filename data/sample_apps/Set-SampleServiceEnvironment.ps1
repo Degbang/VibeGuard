@@ -41,10 +41,22 @@ function Set-LocalValue {
     "PAYMENT_PROVIDER_API_KEY",
     "NOTIFICATION_WEBHOOK_SIGNING_SECRET",
     "ADMIN_API_KEY",
-    "SPRING_SECURITY_USER_PASSWORD"
+    "SPRING_SECURITY_USER_PASSWORD",
+    "PAYMENT_WEBHOOK_SECRET",
+    "INVOICE_OWNER_KEY",
+    "ACCOUNT_LINKING_KEY",
+    "FEATURE_FLAGS_ADMIN_KEY",
+    "OPERATIONS_HEALTH_KEY",
+    "BULK_IMPORT_ADMIN_KEY",
+    "API_KEY_ADMIN_KEY",
+    "OAUTH_CLIENT_KEY",
+    "OAUTH_INTERNAL_KEY",
+    "LOCKOUT_EVENTS_KEY"
 ) | ForEach-Object { Set-LocalSecret -Name $_ }
 
 Set-LocalValue -Name "ACCOUNT_OWNER_ID" -Value "demo-user"
+Set-LocalValue -Name "INVOICE_OWNER_ID" -Value "demo-user"
+Set-LocalValue -Name "ACCOUNT_LINKING_OWNER_ID" -Value "demo-user"
 Set-LocalValue -Name "SPRING_SECURITY_USER_NAME" -Value "demo"
 
 if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable("TWO_FACTOR_DEMO_CODE", "Process"))) {

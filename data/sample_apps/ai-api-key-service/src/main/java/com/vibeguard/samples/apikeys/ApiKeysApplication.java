@@ -1,0 +1,1 @@
+package com.vibeguard.samples.apikeys; import org.springframework.boot.SpringApplication; import org.springframework.boot.autoconfigure.SpringBootApplication; /** Starts the API-key service. */ @SpringBootApplication public class ApiKeysApplication { public static void main(String[] args){SpringApplication.run(ApiKeysApplication.class,args);} }

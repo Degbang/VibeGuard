@@ -725,6 +725,238 @@
           "redacted_value": null
         }
       ]
+    },
+    {
+      "project_id": "ai-payment-webhooks-service",
+      "source_path": "data/sample_apps/ai-payment-webhooks-service",
+      "label": "high",
+      "label_rationale": "Codex-generated, post-hoc label, batch 3 (no explicit security mention). Asymmetric, unlike every other project in this dataset: receive() is genuinely well protected - it verifies an HMAC-SHA256 signature over the raw webhook body against an externalized secret before accepting the event, the correct, standard way to secure a webhook receiver (arguably better than a shared bearer key, since it is tied to payload integrity rather than a header anyone with the key can replay). But list() has no gate of any kind and returns every stored raw webhook event body to any caller - and a payment provider's webhook payloads routinely carry real transaction/customer detail. Labelled high, not medium: the write path being genuinely well designed does not offset a completely open read path that leaks the actual payment event data with zero effort. This also happens to be the one project this batch where the two findings' real severity clearly differ from each other, which a per-project (not per-finding) label cannot represent - worth noting as a distinct, later limitation of the labelling granularity itself.",
+      "findings": [
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/webhooks/PaymentWebhookController.java",
+          "line": 1,
+          "identifier": "receive",
+          "message": "Endpoint method 'receive' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        },
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/webhooks/PaymentWebhookController.java",
+          "line": 1,
+          "identifier": "list",
+          "message": "Endpoint method 'list' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        }
+      ]
+    },
+    {
+      "project_id": "ai-invoice-service",
+      "source_path": "data/sample_apps/ai-invoice-service",
+      "label": "medium",
+      "label_rationale": "Codex-generated, post-hoc label, batch 3 (prompted: 'make sure a customer can only access their own invoices'). Both endpoints check a caller key AND a configured owner id before proceeding - real, hand-rolled, invisible to CWE-284 - but the same partial-fulfilment pattern as ai-account-deletion-service (batch 2): INVOICE_OWNER_ID is a single global configuration value, not a per-customer identity lookup, so this does not actually deliver the multi-customer ownership check the prompt asked for. Labelled medium for the same reasoning as that earlier case: a real, meaningful improvement over no protection at all, but not a correct general solution either.",
+      "findings": [
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/invoices/InvoiceController.java",
+          "line": 1,
+          "identifier": "create",
+          "message": "Endpoint method 'create' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        },
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/invoices/InvoiceController.java",
+          "line": 1,
+          "identifier": "get",
+          "message": "Endpoint method 'get' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        }
+      ]
+    },
+    {
+      "project_id": "ai-email-verification-service",
+      "source_path": "data/sample_apps/ai-email-verification-service",
+      "label": "medium",
+      "label_rationale": "Codex-generated, post-hoc label, batch 3 (no explicit security mention). Neither endpoint has a login-based gate, correctly by design - an email-change flow is initiated by a user proving control of the new address, not by an already-authenticated session in this simplified model - the same class of case as ai-password-reset-service (batch 2). But this one has a real weakness that project did not: the verification code is a 6-digit number (900,000 possible values) rather than a 32-byte random token, and there is no rate-limiting anywhere on confirm() - so the code is brute-forceable by an automated script in a practically short time, even though it is correctly hashed before storage and correctly time-limited. Labelled medium, not low: 'reachable without login' is the right design here, but the verification code's low entropy combined with no throttling is a real, exploitable weakness this dataset has not seen before, distinct from simply repeating the password-reset case.",
+      "findings": [
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/emailchange/EmailChangeController.java",
+          "line": 1,
+          "identifier": "request",
+          "message": "Endpoint method 'request' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        },
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/emailchange/EmailChangeController.java",
+          "line": 1,
+          "identifier": "confirm",
+          "message": "Endpoint method 'confirm' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        }
+      ]
+    },
+    {
+      "project_id": "ai-account-linking-service",
+      "source_path": "data/sample_apps/ai-account-linking-service",
+      "label": "medium",
+      "label_rationale": "Codex-generated, post-hoc label, batch 3 (prompted: 'this is a sensitive account operation, so protect it appropriately'). The single endpoint checks a caller key AND a configured owner id - the same single-global-owner pattern as ai-invoice-service/ai-account-deletion-service, real protection that does not fully deliver genuine per-user ownership verification. Labelled medium for the same reasoning as those two.",
+      "findings": [
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/linking/AccountLinkController.java",
+          "line": 1,
+          "identifier": "link",
+          "message": "Endpoint method 'link' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        }
+      ]
+    },
+    {
+      "project_id": "ai-feature-flags-service",
+      "source_path": "data/sample_apps/ai-feature-flags-service",
+      "label": "medium",
+      "label_rationale": "Codex-generated, post-hoc label, batch 3 (no explicit security mention - protection added unprompted). All three endpoints check X-Feature-Flags-Key against an externalized admin key - real, hand-rolled, invisible to CWE-284. Labelled medium: a compromised gate here lets an attacker create/toggle/enumerate feature flags, which can have real operational and security consequences (flags commonly gate rollout of security-relevant behaviour) but is one step removed from directly exposing credentials or financial data.",
+      "findings": [
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/flags/FlagController.java",
+          "line": 1,
+          "identifier": "create",
+          "message": "Endpoint method 'create' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        },
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/flags/FlagController.java",
+          "line": 1,
+          "identifier": "toggle",
+          "message": "Endpoint method 'toggle' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        },
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/flags/FlagController.java",
+          "line": 1,
+          "identifier": "list",
+          "message": "Endpoint method 'list' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        }
+      ]
+    },
+    {
+      "project_id": "ai-system-health-service",
+      "source_path": "data/sample_apps/ai-system-health-service",
+      "label": "low",
+      "label_rationale": "Codex-generated, post-hoc label, batch 3 (prompted: 'restrict access since it reveals internal system details'). The single endpoint checks X-Operations-Key against an externalized key - real, hand-rolled, invisible to CWE-284. Labelled low: real gate present, and the underlying data (processor count, memory usage, uptime) is low real-world impact even if exposed - useful for reconnaissance but not directly actionable on its own, the same reasoning as ai-staff-timesheet-service (batch 2).",
+      "findings": [
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/health/HealthController.java",
+          "line": 1,
+          "identifier": "status",
+          "message": "Endpoint method 'status' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        }
+      ]
+    },
+    {
+      "project_id": "ai-bulk-user-import-service",
+      "source_path": "data/sample_apps/ai-bulk-user-import-service",
+      "label": "medium",
+      "label_rationale": "Codex-generated, post-hoc label, batch 3 (no explicit security mention - protection added unprompted). The single endpoint checks X-Bulk-Import-Key against an externalized admin key - real, hand-rolled, invisible to CWE-284. Labelled medium: gated by a real mechanism, but the operation itself is high-blast-radius (bulk-creating up to 1000 accounts from a raw, minimally-validated CSV body per request) - a compromised or leaked key here does more damage per use than a single-record endpoint would.",
+      "findings": [
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/imports/ImportController.java",
+          "line": 1,
+          "identifier": "importUsers",
+          "message": "Endpoint method 'importUsers' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        }
+      ]
+    },
+    {
+      "project_id": "ai-api-key-service",
+      "source_path": "data/sample_apps/ai-api-key-service",
+      "label": "low",
+      "label_rationale": "Codex-generated, post-hoc label, batch 3 (prompted: 'since this mints new credentials, make sure it's properly secured'). Both endpoints check X-Api-Key-Admin-Key against an externalized admin key - real, hand-rolled, invisible to CWE-284 - but the implementation quality is notably good, the same standard as ai-two-factor-service (batch 2): the actual issued API key is a cryptographically random 32-byte value returned to the caller once, and the server stores only its SHA-256 hash, never the raw key - so a storage compromise alone cannot recover any issued key. Labelled low specifically to credit that design, consistent with how this dataset has credited above-average implementation care elsewhere.",
+      "findings": [
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/apikeys/ApiKeyController.java",
+          "line": 1,
+          "identifier": "issue",
+          "message": "Endpoint method 'issue' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        },
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/apikeys/ApiKeyController.java",
+          "line": 1,
+          "identifier": "revoke",
+          "message": "Endpoint method 'revoke' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        }
+      ]
+    },
+    {
+      "project_id": "ai-oauth-refresh-service",
+      "source_path": "data/sample_apps/ai-oauth-refresh-service",
+      "label": "medium",
+      "label_rationale": "Codex-generated, post-hoc label, batch 3 (no explicit security mention - protection added unprompted). Notably, this project's original scan also produced a genuine CWE-798 false positive - new Token(accessToken, refreshToken, \"Bearer\", 3600) flagged \"Bearer\" (a standard OAuth token_type value) as a hardcoded secret, the same structural bug as SecretKeySpec/\"HmacSHA256\" found in batch 1's ai-notifications-service - fixed in vibeguard/layer1_static/rules/cwe_798.py before this project was labelled; see IMPLEMENTATION_LOG.md. On access control: issue() and refresh() use two separate externalized keys (an internal-only issuance key and a client-facing refresh key) rather than one shared secret for everything - a modest but real design improvement over most of this batch's siblings, showing some thought about trust-boundary separation. Labelled medium: real, reasonably-separated protection on a security-critical token-issuing surface, still sharing the same shared-static-key weakness class (plain .equals(), no rotation) as the rest of this batch.",
+      "findings": [
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/oauth/TokenController.java",
+          "line": 1,
+          "identifier": "issue",
+          "message": "Endpoint method 'issue' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        },
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/oauth/TokenController.java",
+          "line": 1,
+          "identifier": "refresh",
+          "message": "Endpoint method 'refresh' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        }
+      ]
+    },
+    {
+      "project_id": "ai-account-lockout-service",
+      "source_path": "data/sample_apps/ai-account-lockout-service",
+      "label": "medium",
+      "label_rationale": "Codex-generated, post-hoc label, batch 3 (no explicit security mention - protection added unprompted). All three endpoints check X-Lockout-Events-Key against an externalized key - real, hand-rolled, invisible to CWE-284. Labelled medium: this service exists specifically to defend against brute-force login attempts, so a compromised gate here (letting an attacker freely reset() lockout counters) would directly undermine the very control it implements - a meaningfully self-referential risk, though bounded to this one security mechanism rather than exposing user data directly.",
+      "findings": [
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/lockouts/LockoutController.java",
+          "line": 1,
+          "identifier": "failure",
+          "message": "Endpoint method 'failure' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        },
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/lockouts/LockoutController.java",
+          "line": 1,
+          "identifier": "status",
+          "message": "Endpoint method 'status' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        },
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/lockouts/LockoutController.java",
+          "line": 1,
+          "identifier": "reset",
+          "message": "Endpoint method 'reset' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        }
+      ]
     }
   ]
 }

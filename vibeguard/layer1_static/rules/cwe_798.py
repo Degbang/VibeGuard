@@ -92,20 +92,28 @@ _PROPERTY_REFERENCE_PATTERN = re.compile(r"^[$#]\{.*\}$")
 # catch (it isn't a "changeme"-style placeholder marker either).
 _LITERAL_NON_VALUES = frozenset({"null"})
 
-# Standard JCA/JCE algorithm and transformation names. Found as a real
-# false positive scanning AI-generated code: new SecretKeySpec(keyBytes,
-# "HmacSHA256") matches "SecretKeySpec" as a credential-shaped
-# constructor name, and the reversed-argument scan (deliberately
-# preferring later arguments for cases like
-# PasswordAuthentication("user", "pass".toCharArray())) picks up the
-# algorithm-name literal instead of the actual key material, which is
-# never a literal in the first place. These are public, standard
-# identifiers - never real secret material - so an exact match (not
-# substring, case-sensitive: JCA names are case-sensitive) is safe
-# regardless of which credential-shaped constructor/method they appear
-# in. Not exhaustive; extend on the next real false positive found.
-_JCA_ALGORITHM_NAMES = frozenset(
+# Well-known, standard protocol/format/algorithm descriptor strings.
+# Found as two real false positives scanning AI-generated code, both the
+# same underlying structural cause: a credential-shaped constructor name
+# (e.g. "SecretKeySpec" contains "secret"; "Token" is itself a
+# credential keyword) combined with the reversed-argument scan below
+# (deliberately preferring later arguments, for cases like
+# PasswordAuthentication("user", "pass".toCharArray()) where the real
+# secret genuinely is last) picking up a nearby literal that describes
+# the *kind* of thing being constructed, not secret material - first
+# "HmacSHA256" in new SecretKeySpec(keyBytes, "HmacSHA256"), then
+# "Bearer" in new Token(accessToken, refreshToken, "Bearer", 3600).
+# Both categories share the same property: a short, publicly-standard
+# identifier defined by a spec (JCA algorithm names; OAuth/HTTP token
+# and auth-scheme names per RFC 6749/RFC 7235), never real secret
+# material regardless of which credential-shaped constructor or method
+# it appears in - so an exact match (not substring, case-sensitive:
+# these are case-sensitive standard identifiers) is safe. Not
+# exhaustive; extend on the next real false positive found, same
+# practice as everywhere else in this project.
+_KNOWN_NON_SECRET_DESCRIPTOR_LITERALS = frozenset(
     {
+        # JCA/JCE algorithm and transformation names.
         "AES",
         "DES",
         "DESede",
@@ -133,6 +141,12 @@ _JCA_ALGORITHM_NAMES = frozenset(
         "AES/ECB/PKCS5Padding",
         "RSA/ECB/PKCS1Padding",
         "RSA/ECB/OAEPWithSHA-256AndMGF1Padding",
+        # OAuth (RFC 6749) token_type values and HTTP (RFC 7235)
+        # auth-scheme names.
+        "Bearer",
+        "Basic",
+        "Digest",
+        "MAC",
     }
 )
 _MAP_PUT_METHOD = "put"
@@ -673,14 +687,15 @@ def _is_credential_name(name: str) -> bool:
 
 def _is_safe_value(value: str) -> bool:
     """A value that isn't actually a hardcoded secret: empty, a property/
-    SpEL reference, a literal non-value like "null", a standard JCA
-    algorithm name, or an obvious placeholder."""
+    SpEL reference, a literal non-value like "null", a well-known
+    protocol/format/algorithm descriptor string, or an obvious
+    placeholder."""
     stripped = value.strip()
     if not stripped:
         return True
     if _PROPERTY_REFERENCE_PATTERN.match(stripped):
         return True
-    if stripped in _JCA_ALGORITHM_NAMES:
+    if stripped in _KNOWN_NON_SECRET_DESCRIPTOR_LITERALS:
         return True
     lowered = stripped.lower()
     if lowered in _LITERAL_NON_VALUES:

@@ -1,0 +1,1 @@
+package com.vibeguard.samples.flags; import org.springframework.boot.SpringApplication; import org.springframework.boot.autoconfigure.SpringBootApplication; /** Starts the feature-flags service. */ @SpringBootApplication public class FlagsApplication { public static void main(String[] args){SpringApplication.run(FlagsApplication.class,args);} }

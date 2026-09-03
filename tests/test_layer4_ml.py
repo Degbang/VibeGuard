@@ -12,6 +12,7 @@ from vibeguard.layer1_static.rules._finding import Finding
 from vibeguard.layer2_features import extract_features
 from vibeguard.layer3_scoring import ScoredFinding, score_features
 from vibeguard.layer4_ml import (
+    EvaluationResult,
     MLRiskLabel,
     RiskModel,
     TrainingExample,
@@ -421,77 +422,74 @@ def test_load_trusted_model_contract_rejects_dataset_hash_mismatch(tmp_path: Pat
 
 
 def test_real_layer4_dataset_loads_and_leave_one_out_evaluates() -> None:
-    # Dataset expanded again 2026-09-03 with a second batch of 10
-    # Codex-generated projects, deliberately targeting the
-    # sensitive-domain bucket that batch 1 under-supported (see
-    # IMPLEMENTATION_LOG.md). Most of batch 2 turned out to implement
-    # real, hand-rolled access control (a header/API-key check) that
-    # CWE-284 cannot see - the same pattern found once in batch 1
-    # (ai-admin-dashboard-service), now confirmed as Codex's dominant
-    # behaviour when it does add protection to a small Java service:
-    # 9 of the 10 real protection mechanisms observed across both
-    # AI-generated batches are this hand-rolled shape, versus 1 real
-    # Spring Security usage. 32 projects total; leave-one-out accuracy
-    # is 0.531 (17/32).
+    # Dataset expanded a third time 2026-09-03 with 10 more Codex-
+    # generated projects, again in the sensitive-domain bucket but on
+    # genuinely new use cases (webhooks, invoicing, OAuth token issuance,
+    # feature flags, ...) rather than repeats of batch 2's shapes - see
+    # IMPLEMENTATION_LOG.md. 42 projects total (8 -> 15 -> 22 -> 32 ->
+    # 42); leave-one-out accuracy is 0.595 (25/42).
     examples = load_training_examples(REAL_DATASET_PATH)
     result = leave_one_out_evaluate_project_risk_model(examples, random_state=42)
 
-    assert len(examples) == 32
-    assert len(result.predictions) == 32
-    assert result.accuracy == pytest.approx(17 / 32)
+    assert len(examples) == 42
+    assert len(result.predictions) == 42
+    assert result.accuracy == pytest.approx(25 / 42)
     assert [(cell.actual, cell.predicted, cell.count) for cell in result.confusion] == [
-        (MLRiskLabel.LOW, MLRiskLabel.LOW, 6),
-        (MLRiskLabel.LOW, MLRiskLabel.MEDIUM, 1),
-        (MLRiskLabel.MEDIUM, MLRiskLabel.LOW, 3),
-        (MLRiskLabel.MEDIUM, MLRiskLabel.MEDIUM, 4),
-        (MLRiskLabel.MEDIUM, MLRiskLabel.HIGH, 2),
-        (MLRiskLabel.MEDIUM, MLRiskLabel.CRITICAL, 1),
+        (MLRiskLabel.LOW, MLRiskLabel.LOW, 7),
+        (MLRiskLabel.LOW, MLRiskLabel.MEDIUM, 2),
+        (MLRiskLabel.MEDIUM, MLRiskLabel.LOW, 5),
+        (MLRiskLabel.MEDIUM, MLRiskLabel.MEDIUM, 11),
+        (MLRiskLabel.MEDIUM, MLRiskLabel.HIGH, 1),
+        (MLRiskLabel.HIGH, MLRiskLabel.LOW, 1),
         (MLRiskLabel.HIGH, MLRiskLabel.MEDIUM, 5),
         (MLRiskLabel.CRITICAL, MLRiskLabel.MEDIUM, 3),
         (MLRiskLabel.CRITICAL, MLRiskLabel.CRITICAL, 7),
     ]
 
 
-def test_real_layer4_dataset_leave_one_out_now_beats_baseline_with_a_caveat() -> None:
-    """For the first time in this project, Layer 4's leave-one-out result
-    (0.531, 17/32) beats the fixed max-severity baseline (0.469, 15/32).
-    This must be reported with the caveat that makes it true, not as an
-    unqualified win: every batch-2 project's single finding type is
-    CWE-284, whose raw Layer 3 severity band is always "high" - and every
-    batch-2 label was assigned as low/medium/critical, never high (see
-    IMPLEMENTATION_LOG.md's per-project rationale - each label reflects a
-    real, hand-rolled-but-invisible-to-CWE-284 protection mechanism of
-    varying quality). The baseline, which only ever reads the raw
-    severity band, is therefore *structurally guaranteed* to miss all 10
-    batch-2 projects - confirmed directly, it gets 0/10. Layer 4 gets
-    3/10 (still wrong on the other 7), using has_sensitive_domain_signal
-    and finding-count features baseline has no access to at all. The
-    honest framing: Layer 4 now has a real, demonstrated edge over a
-    strategy that cannot ever succeed on this batch by construction - it
-    is not yet evidence Layer 4 reliably predicts real-world risk, since
-    it is still wrong most of the time on the very projects that produced
-    the edge."""
+def test_real_layer4_dataset_leave_one_out_beats_baseline_on_held_out_batch() -> None:
+    """Layer 4's leave-one-out result (0.595, 25/42) beats the fixed
+    max-severity baseline (0.381, 16/42) by a wider margin than the
+    previous (32-project) dataset's 0.531-vs-0.469 - and this time the
+    edge is confirmed to hold on batch 3's 10 projects specifically,
+    which were not used to design or motivate has_sensitive_domain_signal
+    the way batch 2 was. Broken down by batch, computed directly:
+    - Original 22 (synthetic + first AI batch): baseline 15/22, LOO
+      14/22 - on this mix, Layer 4 is roughly at parity with the
+      baseline, very slightly behind.
+    - Batch 2 (10 projects, indices 22-31): baseline 0/10, LOO 5/10 -
+      LOO improved on these previously-seen-shape projects now that
+      batch 3 gives the model more supporting examples of the same
+      pattern.
+    - Batch 3 (10 new projects, indices 32-41, genuinely held out from
+      whatever motivated the feature): baseline 1/10, LOO 6/10.
+    The honest reading: Layer 4's entire net advantage over the baseline
+    comes from the sensitive-domain-with-hand-rolled-auth pattern
+    specifically, and that advantage is not an artifact of one batch's
+    composition - it held up on a fresh, independently-generated batch
+    testing new use cases (webhooks, invoicing, OAuth, feature flags)
+    rather than repeats of what batch 2 already covered."""
     examples = load_training_examples(REAL_DATASET_PATH)
     loo_result = leave_one_out_evaluate_project_risk_model(examples, random_state=42)
     baseline_result = evaluate_baseline_severity_model(examples)
 
-    assert loo_result.accuracy == pytest.approx(17 / 32)
-    assert baseline_result.accuracy == pytest.approx(15 / 32)
+    assert loo_result.accuracy == pytest.approx(25 / 42)
+    assert baseline_result.accuracy == pytest.approx(16 / 42)
     assert loo_result.accuracy > baseline_result.accuracy
 
-    batch_two_start = 22
-    baseline_batch_two_correct = sum(
-        1
-        for prediction in baseline_result.predictions[batch_two_start:]
-        if prediction.actual is prediction.predicted
-    )
-    loo_batch_two_correct = sum(
-        1
-        for prediction in loo_result.predictions[batch_two_start:]
-        if prediction.actual is prediction.predicted
-    )
-    assert baseline_batch_two_correct == 0
-    assert loo_batch_two_correct == 3
+    def _correct(result: EvaluationResult, start: int, stop: int) -> int:
+        return sum(
+            1
+            for prediction in result.predictions[start:stop]
+            if prediction.actual is prediction.predicted
+        )
+
+    assert _correct(baseline_result, 0, 22) == 15
+    assert _correct(loo_result, 0, 22) == 14
+    assert _correct(baseline_result, 22, 32) == 0
+    assert _correct(loo_result, 22, 32) == 5
+    assert _correct(baseline_result, 32, 42) == 1
+    assert _correct(loo_result, 32, 42) == 6
 
 
 def test_has_sensitive_domain_signal_distinguishes_payments_from_catalog(tmp_path: Path) -> None:
@@ -550,7 +548,7 @@ def test_real_layer4_dataset_baseline_predictions_smoke() -> None:
     loo_result = leave_one_out_evaluate_project_risk_model(examples, random_state=42)
     baseline_result = evaluate_baseline_severity_model(examples)
 
-    assert len(loo_result.predictions) == len(baseline_result.predictions) == 32
+    assert len(loo_result.predictions) == len(baseline_result.predictions) == 42
     for loo_prediction, baseline_prediction in zip(
         loo_result.predictions, baseline_result.predictions, strict=True
     ):

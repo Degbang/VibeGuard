@@ -1,0 +1,1 @@
+package com.vibeguard.samples.webhooks; import org.springframework.boot.SpringApplication; import org.springframework.boot.autoconfigure.SpringBootApplication; /** Starts the payment-webhook service. */ @SpringBootApplication public class WebhooksApplication { public static void main(String[] args){SpringApplication.run(WebhooksApplication.class,args);} }

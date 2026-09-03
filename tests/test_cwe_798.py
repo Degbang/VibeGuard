@@ -644,3 +644,32 @@ def test_detect_in_java_still_flags_real_secret_before_a_safe_algorithm_name(
     findings = detect_in_java(result)
     assert len(findings) == 1
     assert findings[0].identifier == "SecretHolder"
+
+
+def test_detect_in_java_does_not_flag_oauth_bearer_token_type(tmp_path: Path) -> None:
+    """new Token(accessToken, refreshToken, "Bearer", 3600) must not flag "Bearer".
+
+    Found scanning real AI-generated code, the second real instance of
+    the same structural false positive as SecretKeySpec/"HmacSHA256"
+    above: "Token" is itself a credential keyword, so any constructor
+    named Token is treated as credential-shaped, and the reversed-
+    argument scan picked up the OAuth token_type literal "Bearer"
+    instead of the actual (non-literal) token values. This is the
+    "second real occurrence" this project's own extraction practice
+    treats as the signal to generalize a fix rather than add a second
+    narrow allowlist - see _KNOWN_NON_SECRET_DESCRIPTOR_LITERALS.
+    """
+    java_file = tmp_path / "TokenController.java"
+    java_file.write_text(
+        "public class TokenController {\n"
+        "    record Token(\n"
+        "        String accessToken, String refreshToken, String tokenType, int expiresIn) {}\n"
+        "    Token issue(String access, String refresh) {\n"
+        '        return new Token(access, refresh, "Bearer", 3600);\n'
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    assert detect_in_java(result) == ()

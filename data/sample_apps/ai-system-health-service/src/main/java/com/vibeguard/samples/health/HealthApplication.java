@@ -1,0 +1,1 @@
+package com.vibeguard.samples.health; import org.springframework.boot.SpringApplication; import org.springframework.boot.autoconfigure.SpringBootApplication; /** Starts the internal health service. */ @SpringBootApplication public class HealthApplication { public static void main(String[] args){SpringApplication.run(HealthApplication.class,args);} }
