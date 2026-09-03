@@ -590,3 +590,57 @@ def test_detect_in_java_decodes_text_block_secret_on_tree_sitter_fallback(
     assert findings[0].redacted_value is not None
     assert "hunter2" not in findings[0].redacted_value
     assert "\n" not in findings[0].redacted_value
+
+
+def test_detect_in_java_does_not_flag_secret_key_spec_algorithm_name(tmp_path: Path) -> None:
+    """new SecretKeySpec(keyBytes, "HmacSHA256") must not flag the algorithm name.
+
+    Found scanning real AI-generated code: the credential-shaped
+    constructor name ("SecretKeySpec" contains "secret") combined with
+    the reversed-argument scan (deliberately preferring later arguments
+    for cases like PasswordAuthentication("user", "pass".toCharArray()))
+    picked up the algorithm-name literal instead - a false positive on
+    an idiomatic, standard JCA constructor call. The actual key material
+    (a non-literal expression here) correctly still isn't flagged either,
+    since this rule never evaluates non-literal values.
+    """
+    java_file = tmp_path / "Signer.java"
+    java_file.write_text(
+        "import javax.crypto.spec.SecretKeySpec;\n"
+        "public class Signer {\n"
+        "    void sign(String signingSecret) {\n"
+        '        new SecretKeySpec(signingSecret.getBytes(), "HmacSHA256");\n'
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    assert detect_in_java(result) == ()
+
+
+def test_detect_in_java_still_flags_real_secret_before_a_safe_algorithm_name(
+    tmp_path: Path,
+) -> None:
+    """The algorithm-name exclusion must not blind the scan to an earlier real literal.
+
+    Proves _check_class_creator's reversed-argument scan still falls
+    through past a now-excluded safe literal (the last argument) and
+    catches a genuine hardcoded secret in an earlier argument position,
+    rather than the fix accidentally suppressing the whole constructor
+    call.
+    """
+    java_file = tmp_path / "SecretHolder.java"
+    java_file.write_text(
+        "public class SecretHolder {\n"
+        "    void configure() {\n"
+        '        new SecretHolder("hunter2", "AES");\n'
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    findings = detect_in_java(result)
+    assert len(findings) == 1
+    assert findings[0].identifier == "SecretHolder"

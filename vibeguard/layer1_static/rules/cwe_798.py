@@ -91,6 +91,50 @@ _PROPERTY_REFERENCE_PATTERN = re.compile(r"^[$#]\{.*\}$")
 # deliberate non-value that a substring/placeholder check wouldn't
 # catch (it isn't a "changeme"-style placeholder marker either).
 _LITERAL_NON_VALUES = frozenset({"null"})
+
+# Standard JCA/JCE algorithm and transformation names. Found as a real
+# false positive scanning AI-generated code: new SecretKeySpec(keyBytes,
+# "HmacSHA256") matches "SecretKeySpec" as a credential-shaped
+# constructor name, and the reversed-argument scan (deliberately
+# preferring later arguments for cases like
+# PasswordAuthentication("user", "pass".toCharArray())) picks up the
+# algorithm-name literal instead of the actual key material, which is
+# never a literal in the first place. These are public, standard
+# identifiers - never real secret material - so an exact match (not
+# substring, case-sensitive: JCA names are case-sensitive) is safe
+# regardless of which credential-shaped constructor/method they appear
+# in. Not exhaustive; extend on the next real false positive found.
+_JCA_ALGORITHM_NAMES = frozenset(
+    {
+        "AES",
+        "DES",
+        "DESede",
+        "RSA",
+        "Blowfish",
+        "RC2",
+        "RC4",
+        "HmacMD5",
+        "HmacSHA1",
+        "HmacSHA224",
+        "HmacSHA256",
+        "HmacSHA384",
+        "HmacSHA512",
+        "MD5",
+        "SHA-1",
+        "SHA-224",
+        "SHA-256",
+        "SHA-384",
+        "SHA-512",
+        "PBKDF2WithHmacSHA1",
+        "PBKDF2WithHmacSHA256",
+        "PBKDF2WithHmacSHA512",
+        "AES/CBC/PKCS5Padding",
+        "AES/GCM/NoPadding",
+        "AES/ECB/PKCS5Padding",
+        "RSA/ECB/PKCS1Padding",
+        "RSA/ECB/OAEPWithSHA-256AndMGF1Padding",
+    }
+)
 _MAP_PUT_METHOD = "put"
 _SYSTEM_SET_PROPERTY_METHOD = "setProperty"
 _SPRING_VALUE_ANNOTATION = "value"
@@ -629,12 +673,14 @@ def _is_credential_name(name: str) -> bool:
 
 def _is_safe_value(value: str) -> bool:
     """A value that isn't actually a hardcoded secret: empty, a property/
-    SpEL reference, a literal non-value like "null", or an obvious
-    placeholder."""
+    SpEL reference, a literal non-value like "null", a standard JCA
+    algorithm name, or an obvious placeholder."""
     stripped = value.strip()
     if not stripped:
         return True
     if _PROPERTY_REFERENCE_PATTERN.match(stripped):
+        return True
+    if stripped in _JCA_ALGORITHM_NAMES:
         return True
     lowered = stripped.lower()
     if lowered in _LITERAL_NON_VALUES:
