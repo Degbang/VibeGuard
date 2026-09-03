@@ -1,0 +1,1 @@
+package com.vibeguard.samples.twofactor; import org.springframework.boot.SpringApplication; import org.springframework.boot.autoconfigure.SpringBootApplication; /** Starts the two-factor service. */ @SpringBootApplication public class TwoFactorApplication { public static void main(String[] args){SpringApplication.run(TwoFactorApplication.class,args);} }

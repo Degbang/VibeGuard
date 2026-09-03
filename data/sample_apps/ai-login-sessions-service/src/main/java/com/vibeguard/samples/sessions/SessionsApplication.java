@@ -1,0 +1,1 @@
+package com.vibeguard.samples.sessions; import org.springframework.boot.SpringApplication; import org.springframework.boot.autoconfigure.SpringBootApplication; /** Starts the login-sessions service. */ @SpringBootApplication public class SessionsApplication { public static void main(String[] args){SpringApplication.run(SessionsApplication.class,args);} }

@@ -1,0 +1,1 @@
+package com.vibeguard.samples.timesheets; import org.springframework.boot.SpringApplication; import org.springframework.boot.autoconfigure.SpringBootApplication; /** Starts the staff-timesheet service. */ @SpringBootApplication public class TimesheetsApplication { public static void main(String[] args){SpringApplication.run(TimesheetsApplication.class,args);} }

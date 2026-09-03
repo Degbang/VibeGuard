@@ -25,13 +25,18 @@ my-test-app/
 # never be committed or redistributed as part of it.
 .qa-repos/
 
-data/sample_apps/*
-!data/sample_apps/.gitkeep
-# Layer 4's labelled training corpus is real project data the trusted
-# model contract depends on - it must be tracked, not just the
-# directory placeholder, or a fresh clone can't reproduce Layer 4/5.
-!data/sample_apps/layer4_training/
-data/sample_apps/layer4_training/*/target/
+# Everything under data/sample_apps/ is real project data (the synthetic
+# Layer 4 training corpus, and the growing set of Codex-generated
+# evaluation apps) that the trusted model contract and the evaluation
+# writeups depend on - it must be tracked, not just a directory
+# placeholder, or a fresh clone can't reproduce Layer 4/5 or the logged
+# results. Previously only layer4_training/ was explicitly un-ignored,
+# which silently dropped every AI-generated sample app added after that
+# (caught only when they failed to show up in `git status` before a
+# commit) - tracking everything here except build output is the fix,
+# not another directory to remember to add by name next time.
+!data/sample_apps/
+data/sample_apps/**/target/
 
 data/labeled/*
 !data/labeled/.gitkeep

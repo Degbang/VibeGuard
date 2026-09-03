@@ -421,55 +421,160 @@ def test_load_trusted_model_contract_rejects_dataset_hash_mismatch(tmp_path: Pat
 
 
 def test_real_layer4_dataset_loads_and_leave_one_out_evaluates() -> None:
-    # The dataset deliberately includes one project
-    # (duplicate-validation-gaps-service, index 13) whose "high" label
-    # depends on a pattern - the same CWE recurring across multiple
-    # endpoints elevating risk beyond any single finding's own severity -
-    # that appears exactly once in the labelled corpus. Leave-one-out
-    # cannot learn a pattern from zero training examples of it, so this
-    # project is expected to miss; that miss is itself the evidence this
-    # dataset is no longer degenerate (see IMPLEMENTATION_LOG.md).
+    # Dataset expanded again 2026-09-03 with a second batch of 10
+    # Codex-generated projects, deliberately targeting the
+    # sensitive-domain bucket that batch 1 under-supported (see
+    # IMPLEMENTATION_LOG.md). Most of batch 2 turned out to implement
+    # real, hand-rolled access control (a header/API-key check) that
+    # CWE-284 cannot see - the same pattern found once in batch 1
+    # (ai-admin-dashboard-service), now confirmed as Codex's dominant
+    # behaviour when it does add protection to a small Java service:
+    # 9 of the 10 real protection mechanisms observed across both
+    # AI-generated batches are this hand-rolled shape, versus 1 real
+    # Spring Security usage. 32 projects total; leave-one-out accuracy
+    # is 0.531 (17/32).
     examples = load_training_examples(REAL_DATASET_PATH)
     result = leave_one_out_evaluate_project_risk_model(examples, random_state=42)
 
-    assert len(examples) == 15
-    assert len(result.predictions) == 15
-    assert result.accuracy == pytest.approx(14 / 15)
-    assert result.predictions[13].actual is MLRiskLabel.HIGH
-    assert result.predictions[13].predicted is MLRiskLabel.MEDIUM
-    assert all(
-        prediction.actual is prediction.predicted
-        for index, prediction in enumerate(result.predictions)
-        if index != 13
-    )
+    assert len(examples) == 32
+    assert len(result.predictions) == 32
+    assert result.accuracy == pytest.approx(17 / 32)
     assert [(cell.actual, cell.predicted, cell.count) for cell in result.confusion] == [
-        (MLRiskLabel.LOW, MLRiskLabel.LOW, 2),
-        (MLRiskLabel.MEDIUM, MLRiskLabel.MEDIUM, 2),
-        (MLRiskLabel.HIGH, MLRiskLabel.MEDIUM, 1),
-        (MLRiskLabel.HIGH, MLRiskLabel.HIGH, 3),
+        (MLRiskLabel.LOW, MLRiskLabel.LOW, 6),
+        (MLRiskLabel.LOW, MLRiskLabel.MEDIUM, 1),
+        (MLRiskLabel.MEDIUM, MLRiskLabel.LOW, 3),
+        (MLRiskLabel.MEDIUM, MLRiskLabel.MEDIUM, 4),
+        (MLRiskLabel.MEDIUM, MLRiskLabel.HIGH, 2),
+        (MLRiskLabel.MEDIUM, MLRiskLabel.CRITICAL, 1),
+        (MLRiskLabel.HIGH, MLRiskLabel.MEDIUM, 5),
+        (MLRiskLabel.CRITICAL, MLRiskLabel.MEDIUM, 3),
         (MLRiskLabel.CRITICAL, MLRiskLabel.CRITICAL, 7),
     ]
 
 
-def test_real_layer4_dataset_baseline_matches_leave_one_out_exactly() -> None:
-    """The fixed max-severity baseline currently ties Layer 4's learned
-    leave-one-out result on this dataset, including making the identical
-    single error on the one under-represented "breadth" pattern (see the
-    test above). This is the honest current answer to "does project-level
-    ML add value beyond the deterministic rule-based scorer": not yet,
-    on the data available - not a bug, and not the result the training
-    apps were built to force either way."""
+def test_real_layer4_dataset_leave_one_out_now_beats_baseline_with_a_caveat() -> None:
+    """For the first time in this project, Layer 4's leave-one-out result
+    (0.531, 17/32) beats the fixed max-severity baseline (0.469, 15/32).
+    This must be reported with the caveat that makes it true, not as an
+    unqualified win: every batch-2 project's single finding type is
+    CWE-284, whose raw Layer 3 severity band is always "high" - and every
+    batch-2 label was assigned as low/medium/critical, never high (see
+    IMPLEMENTATION_LOG.md's per-project rationale - each label reflects a
+    real, hand-rolled-but-invisible-to-CWE-284 protection mechanism of
+    varying quality). The baseline, which only ever reads the raw
+    severity band, is therefore *structurally guaranteed* to miss all 10
+    batch-2 projects - confirmed directly, it gets 0/10. Layer 4 gets
+    3/10 (still wrong on the other 7), using has_sensitive_domain_signal
+    and finding-count features baseline has no access to at all. The
+    honest framing: Layer 4 now has a real, demonstrated edge over a
+    strategy that cannot ever succeed on this batch by construction - it
+    is not yet evidence Layer 4 reliably predicts real-world risk, since
+    it is still wrong most of the time on the very projects that produced
+    the edge."""
     examples = load_training_examples(REAL_DATASET_PATH)
     loo_result = leave_one_out_evaluate_project_risk_model(examples, random_state=42)
     baseline_result = evaluate_baseline_severity_model(examples)
 
-    assert baseline_result.accuracy == loo_result.accuracy
-    assert baseline_result.macro_f1 == pytest.approx(loo_result.macro_f1)
+    assert loo_result.accuracy == pytest.approx(17 / 32)
+    assert baseline_result.accuracy == pytest.approx(15 / 32)
+    assert loo_result.accuracy > baseline_result.accuracy
+
+    batch_two_start = 22
+    baseline_batch_two_correct = sum(
+        1
+        for prediction in baseline_result.predictions[batch_two_start:]
+        if prediction.actual is prediction.predicted
+    )
+    loo_batch_two_correct = sum(
+        1
+        for prediction in loo_result.predictions[batch_two_start:]
+        if prediction.actual is prediction.predicted
+    )
+    assert baseline_batch_two_correct == 0
+    assert loo_batch_two_correct == 3
+
+
+def test_has_sensitive_domain_signal_distinguishes_payments_from_catalog(tmp_path: Path) -> None:
+    """The fix: ai-payments-service and ai-product-catalog-service used to
+    share a byte-identical feature vector; they must not anymore."""
+    examples = load_training_examples(REAL_DATASET_PATH)
+    data = json.loads(REAL_DATASET_PATH.read_text(encoding="utf-8"))
+    by_id = {p["project_id"]: i for i, p in enumerate(data["projects"])}
+    payments = examples[by_id["ai-payments-service"]]
+    catalog = examples[by_id["ai-product-catalog-service"]]
+
+    payments_features = build_project_features(payments.findings)
+    catalog_features = build_project_features(catalog.findings)
+
+    assert payments_features.values != catalog_features.values
+    assert (
+        _value(payments_features.names, payments_features.values, "has_sensitive_domain_signal")
+        == 1.0
+    )
+    assert (
+        _value(catalog_features.names, catalog_features.values, "has_sensitive_domain_signal")
+        == 0.0
+    )
+    assert payments.label is MLRiskLabel.CRITICAL
+    assert catalog.label is MLRiskLabel.LOW
+
+
+def test_has_sensitive_domain_signal_does_not_leak_from_the_absolute_checkout_path(
+    tmp_path: Path,
+) -> None:
+    """Regression test for a real bug caught in review before it shipped:
+    the first implementation matched keywords against the full resolved
+    file path rather than just the file name. Since FindingFeature.file_path
+    is an absolute, resolved path, and this machine's home directory is
+    /Users/<name>/..., that version made every single project match
+    "user" via "/Users/" regardless of its actual code - the same class of
+    portability bug that got path_depth removed from Layer 2 on
+    2026-07-21. Constructs a path with "user" in a parent directory
+    segment but a finding filename that has nothing to do with any
+    sensitive domain, and asserts the signal stays off.
+    """
+    project_root = tmp_path / "userspace" / "checkout"
+    findings = (
+        _scored_finding(project_root, "CWE-284", "ProductController.java", identifier="list"),
+    )
+
+    features = build_project_features(findings)
+
+    assert _value(features.names, features.values, "has_sensitive_domain_signal") == 0.0
+
+
+def test_real_layer4_dataset_baseline_predictions_smoke() -> None:
+    """Loose smoke check that the two evaluation modes are actually
+    computing over the same real examples, not silently diverging."""
+    examples = load_training_examples(REAL_DATASET_PATH)
+    loo_result = leave_one_out_evaluate_project_risk_model(examples, random_state=42)
+    baseline_result = evaluate_baseline_severity_model(examples)
+
+    assert len(loo_result.predictions) == len(baseline_result.predictions) == 32
     for loo_prediction, baseline_prediction in zip(
         loo_result.predictions, baseline_result.predictions, strict=True
     ):
         assert baseline_prediction.actual is loo_prediction.actual
-        assert baseline_prediction.predicted is loo_prediction.predicted
+        assert isinstance(loo_prediction.predicted, MLRiskLabel)
+        assert isinstance(baseline_prediction.predicted, MLRiskLabel)
+
+
+def test_has_sensitive_domain_signal_matches_common_domain_file_names(tmp_path: Path) -> None:
+    for filename in ("PaymentController.java", "AdminController.java", "UserController.java"):
+        findings = (_scored_finding(tmp_path, "CWE-284", filename, identifier="handle"),)
+        features = build_project_features(findings)
+        assert (
+            _value(features.names, features.values, "has_sensitive_domain_signal") == 1.0
+        ), filename
+
+
+def test_has_sensitive_domain_signal_false_for_generic_file_names(tmp_path: Path) -> None:
+    for filename in ("ProductController.java", "OrderController.java", "FileController.java"):
+        findings = (_scored_finding(tmp_path, "CWE-284", filename, identifier="list"),)
+        features = build_project_features(findings)
+        assert (
+            _value(features.names, features.values, "has_sensitive_domain_signal") == 0.0
+        ), filename
 
 
 def test_baseline_label_from_max_severity_uses_highest_scoring_finding(tmp_path: Path) -> None:

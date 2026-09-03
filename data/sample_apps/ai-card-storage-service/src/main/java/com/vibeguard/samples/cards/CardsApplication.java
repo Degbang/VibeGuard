@@ -1,0 +1,1 @@
+package com.vibeguard.samples.cards; import org.springframework.boot.SpringApplication; import org.springframework.boot.autoconfigure.SpringBootApplication; /** Starts the payment-method token vault. */ @SpringBootApplication public class CardsApplication { public static void main(String[] args){SpringApplication.run(CardsApplication.class,args);} }

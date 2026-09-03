@@ -18,6 +18,48 @@ from vibeguard.layer3_scoring import RiskSeverity, ScoredFinding
 _CWE_IDS = ("CWE-20", "CWE-284", "CWE-287", "CWE-798", "CWE-1035")
 _SOURCE_TYPES = ("java", "config", "pom")
 
+# Coarse, name-based signal that a finding sits in a business-sensitive
+# domain (payments, account/identity, admin) rather than general-purpose
+# code - the same "match on names, not semantics" heuristic style already
+# used throughout Layer 1's rules (e.g. CREDENTIAL_KEYWORDS), applied here
+# at Layer 4 because none of Layer 4's other features carry any signal
+# about *what* an endpoint is for. Found to matter concretely: scanning
+# real AI-generated projects produced two with an identical Layer 4
+# feature vector (2 CWE-284 findings, nothing else) but opposite labels -
+# an unauthenticated payment-charge endpoint (critical) and a genuinely
+# public product catalog (low) - because nothing in the feature vector
+# encoded that distinction. See IMPLEMENTATION_LOG.md 2026-09-03.
+# Matched against a finding's file path and identifier combined, case-
+# insensitively, substring match - same coarse-match philosophy and same
+# accepted imprecision as CREDENTIAL_KEYWORDS (e.g. "user" also matches
+# an unrelated "houser"), not a semantic understanding of the endpoint.
+_SENSITIVE_DOMAIN_KEYWORDS = frozenset(
+    {
+        "payment",
+        "billing",
+        "charge",
+        "checkout",
+        "invoice",
+        "transaction",
+        "wallet",
+        "refund",
+        "account",
+        "user",
+        "profile",
+        "auth",
+        "login",
+        "signup",
+        "register",
+        "credential",
+        "identity",
+        "admin",
+        "administrator",
+        "staff",
+        "internal",
+        "management",
+    }
+)
+
 
 class MLRiskLabel(str, Enum):
     """Risk labels predicted by Layer 4."""
@@ -110,6 +152,7 @@ def build_project_features(findings: Iterable[ScoredFinding]) -> ProjectFeatures
         _has_cwe_pair(items, "CWE-798", "CWE-1035"),
         _has_same_file_pair(items, "CWE-284", "CWE-20"),
         _has_same_file_pair(items, "CWE-798", "CWE-284"),
+        _has_sensitive_domain_signal(items),
     )
     return ProjectFeatures(names=names, values=values)
 
@@ -132,6 +175,7 @@ def _feature_names() -> tuple[str, ...]:
         "has_secret_and_vulnerable_dependency",
         "same_file_access_control_and_input_validation",
         "same_file_secret_and_access_control",
+        "has_sensitive_domain_signal",
     )
 
 
@@ -165,3 +209,22 @@ def _has_same_file_pair(findings: tuple[ScoredFinding, ...], first: str, second:
     for item in findings:
         by_file.setdefault(str(item.feature.file_path), set()).add(item.feature.cwe_id)
     return 1.0 if any(first in cwes and second in cwes for cwes in by_file.values()) else 0.0
+
+
+def _has_sensitive_domain_signal(findings: tuple[ScoredFinding, ...]) -> float:
+    """Whether any finding's file name or identifier names a sensitive domain.
+
+    Deliberately matches only the file's own *name* (e.g.
+    "PaymentController.java"), never the full path: FindingFeature.file_path
+    is a resolved absolute path, and matching against it leaks whatever
+    happens to be in the local checkout location - e.g. this exact bug was
+    caught in review, where "/Users/<name>/..." made every single project
+    on this machine match "user" regardless of its actual code, the same
+    portability failure mode that got path_depth removed from Layer 2 on
+    2026-07-21. Scoped to the file name specifically for the same reason.
+    """
+    for item in findings:
+        haystack = f"{item.feature.file_path.name} {item.feature.identifier}".lower()
+        if any(keyword in haystack for keyword in _SENSITIVE_DOMAIN_KEYWORDS):
+            return 1.0
+    return 0.0

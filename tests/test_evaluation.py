@@ -20,13 +20,28 @@ REAL_CONTRACT_PATH = REPO_ROOT / "data" / "labeled" / "layer4_random_forest_cont
 def test_build_evaluation_report_uses_real_contract_and_dataset() -> None:
     report = evaluate.build_evaluation_report(REAL_CONTRACT_PATH)
 
+    # Dataset expanded a second time 2026-09-03 with 10 more Codex-
+    # generated projects deliberately targeting the sensitive-domain
+    # bucket (payments/accounts/admin/auth), 32 projects total. Most of
+    # this second batch turned out to implement real, hand-rolled access
+    # control invisible to CWE-284's annotation-based detection - see
+    # IMPLEMENTATION_LOG.md. Leave-one-out accuracy (0.531) now exceeds
+    # the fixed baseline (0.469) for the first time in this project, but
+    # with an important caveat tested directly in
+    # tests/test_layer4_ml.py: the baseline is structurally guaranteed to
+    # miss every project in this second batch (their labels are never
+    # "high", the only band a lone CWE-284 finding's raw severity can
+    # produce), and Layer 4 itself is still wrong on 7 of those 10 - a
+    # real, demonstrated edge over a strategy that cannot succeed here,
+    # not yet evidence of reliable real-world prediction.
     assert report.contract_path == REAL_CONTRACT_PATH.resolve()
     assert report.dataset_path.name == "layer4_projects.json"
-    assert report.example_count == 15
-    assert report.in_sample.accuracy == pytest.approx(1.0)
-    assert report.in_sample.macro_f1 == pytest.approx(1.0)
-    assert report.leave_one_out.accuracy == pytest.approx(14 / 15)
-    assert report.baseline.accuracy == pytest.approx(report.leave_one_out.accuracy)
+    assert report.example_count == 32
+    assert report.in_sample.accuracy == pytest.approx(26 / 32)
+    assert report.in_sample.macro_f1 == pytest.approx(0.8115079365079365)
+    assert report.leave_one_out.accuracy == pytest.approx(17 / 32)
+    assert report.baseline.accuracy == pytest.approx(15 / 32)
+    assert report.leave_one_out.accuracy > report.baseline.accuracy
     assert len(report.leave_one_out.predictions) == report.example_count
     assert len(report.baseline.predictions) == report.example_count
 
@@ -41,7 +56,7 @@ def test_evaluation_main_renders_summary(capsys: pytest.CaptureFixture[str]) -> 
     assert "Baseline (max Layer 3 severity, not learned)" in output
     assert "Leave-One-Out Predictions" in output
     assert "Leave-One-Out Confusion Matrix" in output
-    assert "1.000" in output
+    assert "0.812" in output
 
 
 def test_build_json_report_returns_machine_readable_summary() -> None:
@@ -53,12 +68,12 @@ def test_build_json_report_returns_machine_readable_summary() -> None:
     baseline = cast(Mapping[str, object], payload["baseline"])
 
     assert payload["contract_path"] == str(REAL_CONTRACT_PATH.resolve())
-    assert payload["example_count"] == 15
-    assert in_sample["accuracy"] == pytest.approx(1.0)
+    assert payload["example_count"] == 32
+    assert in_sample["accuracy"] == pytest.approx(26 / 32)
     assert leave_one_out["macro_f1"] == pytest.approx(report.leave_one_out.macro_f1)
-    assert len(cast(list[object], leave_one_out["predictions"])) == 15
-    assert baseline["accuracy"] == pytest.approx(leave_one_out["accuracy"])
-    assert len(cast(list[object], baseline["predictions"])) == 15
+    assert len(cast(list[object], leave_one_out["predictions"])) == 32
+    assert baseline["accuracy"] == pytest.approx(15 / 32)
+    assert len(cast(list[object], baseline["predictions"])) == 32
 
 
 def test_evaluation_main_writes_json_export(tmp_path: Path) -> None:
@@ -71,7 +86,7 @@ def test_evaluation_main_writes_json_export(tmp_path: Path) -> None:
     assert exit_code == 0
     payload = json.loads(output_path.read_text(encoding="utf-8"))
     assert payload["dataset_path"].endswith("layer4_projects.json")
-    assert payload["in_sample"]["accuracy"] == pytest.approx(1.0)
+    assert payload["in_sample"]["accuracy"] == pytest.approx(26 / 32)
     assert payload["leave_one_out"]["confusion"]
     assert payload["baseline"]["confusion"]
 
@@ -94,7 +109,7 @@ def test_evaluation_main_writes_csv_exports(tmp_path: Path) -> None:
     with confusion_path.open(encoding="utf-8", newline="") as handle:
         confusion_rows = list(csv.DictReader(handle))
 
-    assert len(prediction_rows) == 15
+    assert len(prediction_rows) == 32
     assert prediction_rows[0].keys() == {"index", "actual", "predicted", "confidence"}
     assert confusion_rows
     assert confusion_rows[0].keys() == {"actual", "predicted", "count"}

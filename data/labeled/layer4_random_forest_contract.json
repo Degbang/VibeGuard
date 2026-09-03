@@ -1,6 +1,6 @@
 {
   "dataset_path": "layer4_projects.json",
-  "dataset_sha256": "abb32d196f8869e148964432732614f48885e22d5e4268b104b390a4486e6f51",
+  "dataset_sha256": "de3e5855cefb0fd4e975a73edd21a0f354709d1ae955634bcb6332a3d19f3b73",
   "feature_names": [
     "finding_count",
     "max_rule_score",
@@ -23,7 +23,8 @@
     "has_secret_and_authentication",
     "has_secret_and_vulnerable_dependency",
     "same_file_access_control_and_input_validation",
-    "same_file_secret_and_access_control"
+    "same_file_secret_and_access_control",
+    "has_sensitive_domain_signal"
   ],
   "label_names": [
     "critical",
@@ -34,5 +35,5 @@
   "model_kind": "random_forest_retrain_v1",
   "random_state": 42,
   "schema_version": 1,
-  "training_example_count": 15
+  "training_example_count": 32
 }

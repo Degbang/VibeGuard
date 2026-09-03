@@ -4167,3 +4167,564 @@ explicitly that real-repo scan results were deliberately kept separate
 from the Layer 4 labelled training set, and why - this is itself a
 methodology decision worth defending in a viva, not an incidental
 implementation detail.
+
+---
+
+## [2026-09-03] - First genuinely on-target evaluation: 7 Codex-generated Java microservices; a real CWE-798 false positive found and fixed; three independent confirmations of already-logged CWE-284/Layer 3 limitations
+
+**What the plan said:** Every prior evaluation sample was either a
+synthetic, hand-built fixture (the Layer 4 sample apps) or a real but
+human-written open-source repository (`.qa-repos`). Neither is actually
+what this thesis is about - AI-generated Java microservices. The student
+generated real projects with Codex (an external AI coding tool,
+unrelated to this Claude Code session) specifically to close that gap.
+
+**What we actually did / found:** Scanned 7 Codex-generated Spring Boot
+microservices with the full CLI - one built earlier
+(`runnable-ai-orders-service`) plus six built from deliberately
+realistic, non-leading prompts (a user-accounts service, a payments
+service, a file-upload service, a notifications service, an admin
+dashboard, and a public product catalog - the prompts asked for features,
+never for a specific vulnerability, so what was found reflects Codex's
+own unprompted behavior, not an engineered test) - then verified every
+finding against the actual generated source by hand, same standard as
+the `.qa-repos` pass.
+
+1. **A real, previously-undiscovered CWE-798 false positive, found and
+   fixed.** `ai-notifications-service` correctly externalizes its
+   webhook signing secret via `@Value(...)`, then does
+   `new SecretKeySpec(signingSecret.getBytes(), "HmacSHA256")` - entirely
+   idiomatic, correct Java. VibeGuard flagged it as a critical hardcoded
+   credential named `SecretKeySpec` anyway. Root cause:
+   `"SecretKeySpec"` matches the credential-shaped-constructor-name check
+   (it contains "secret"), and `_check_class_creator`'s
+   reversed-argument scan - a deliberate choice for cases like
+   `PasswordAuthentication("user", "pass".toCharArray())`, where the real
+   secret is the *last* argument - hits `"HmacSHA256"` (a standard,
+   public JCA algorithm name, not secret material) before ever reaching
+   the actual key expression, and stops there since it's a reportable
+   literal. `SecretKeySpec(byte[], String algorithm)` is a standard JDK
+   crypto constructor; this exact shape is common, idiomatic real Java,
+   not an edge case - this false positive would recur constantly in any
+   codebase doing HMAC/AES work this way.
+
+   Fixed by adding `_JCA_ALGORITHM_NAMES`, a small, curated, exact-match
+   (case-sensitive - JCA names are case-sensitive standard identifiers)
+   set of standard algorithm/transformation names to `_is_safe_value()`,
+   the same architectural pattern already used for `_LITERAL_NON_VALUES`
+   ("null"). Verified the fix does not blind the rule to a real secret
+   in an earlier argument position when a later one is now excluded
+   (`test_detect_in_java_still_flags_real_secret_before_a_safe_algorithm_name`)
+   and re-ran the actual file that surfaced the bug: the false positive
+   is gone, the one genuine CWE-284 finding on the same file is
+   unaffected. 2 new regression tests, full suite 274 passed (was 272),
+   `mypy`/`ruff`/`black --check`/`git diff --check` all clean.
+
+2. **A natural experiment on security omission, not engineered.** Across
+   the 6 non-leading prompts, only `ai-user-accounts-service` pulled in
+   any Spring Security dependency at all (`spring-security-crypto`, for
+   password hashing only - no `SecurityFilterChain`, no
+   `@PreAuthorize`), and none of the 6 added access control to their own
+   endpoints. This held even where the prompt strongly implied it
+   mattered: a payments-charge endpoint, and a user-account service where
+   `get`/`update` operate on any `{id}` with zero ownership check
+   (functionally an IDOR - any caller can view or modify any other
+   user's profile). `ai-user-accounts-service` did get password handling
+   right where it mattered: `BCryptPasswordEncoder.encode`/`.matches()`,
+   never `==` - CWE-798 and CWE-287 correctly found nothing there, a
+   useful confirmation the rules stay quiet on genuinely correct code,
+   not just noisy on broken code.
+
+3. **A third independent real-world confirmation of the already-logged
+   CWE-284 annotation-blindness limitation**, via a new mechanism not
+   seen before: `ai-admin-dashboard-service` hand-rolls its own
+   authorization - every sensitive method checks an `X-Admin-Key` header
+   against an environment-provided value via a private `authorized()`
+   helper, called explicitly at the top of each handler. A real access-
+   control decision was made; it is simply imperative code, not a
+   Spring/JAX-RS annotation, a `SecurityFilterChain`, or an implemented
+   interface - none of which this rule can recognize as a decision.
+   Between yesterday's SecurityFilterChain and codegen-interface findings
+   and this one, real Java code now demonstrably expresses "an
+   access-control decision was made" through at least three structurally
+   different mechanisms invisible to annotation-based detection.
+   Deliberately not chased as a fourth special case: the space of
+   possible hand-rolled authorization implementations is unbounded by
+   construction (it is just arbitrary code), unlike the previous two
+   fixes, which were each one bounded, nameable Spring API pattern.
+   Recorded as cumulative evidence for the same limitation, not treated
+   as three separate bugs each needing their own patch.
+
+4. **A third independent confirmation of Layer 3's per-CWE (not
+   per-endpoint) severity-calibration limitation.** `ai-product-catalog-
+   service` was prompted explicitly with "no auth needed since it's
+   public data," and Codex built exactly that - a genuinely public,
+   read-only, non-sensitive endpoint. CWE-284 still fires (correctly, by
+   its own stated definition: no access-control decision of any kind was
+   made) and Layer 3 still scores it 80/high, indistinguishable in the
+   report from a sensitive endpoint with the same gap. This is the same
+   limitation observed on real `.qa-repos` findings yesterday
+   (`UIResource`, `EnvResource`), now confirmed a third time with an
+   explicit prompt instruction removing any doubt about intent.
+
+**Tests/adversarial checks run:**
+- `pytest tests/test_cwe_798.py -q`: `41 passed`.
+- Full `pytest -q`: `274 passed` (was 272), clean exit.
+- `mypy .` / `ruff check .` / `black --check .` / `git diff --check`:
+  all clean.
+- Live re-scan of `ai-notifications-service` post-fix: false positive
+  gone, genuine CWE-284 finding unaffected.
+- All 7 AI-generated apps' findings verified against actual source by
+  hand (not just the tool's own report) before being characterized here.
+
+**Remaining limitations:** `_JCA_ALGORITHM_NAMES` is a curated list, not
+exhaustive - extend on the next real false positive found, same
+"add on real need" practice as everywhere else in this project. The
+CWE-284 annotation-blindness and Layer 3 severity-calibration
+limitations remain open, now with three independent pieces of real-world
+evidence each rather than one; still not attempted, for the same reasons
+logged yesterday (unbounded pattern space for the former, a materially
+larger rubric-design change for the latter).
+
+**Why:** The SecretKeySpec bug was fixed because it was genuinely
+tractable - bounded, no external data, no runtime ambiguity, and common
+enough in real cryptographic code that leaving it would actively mislead
+a reader of this tool's output. The admin-dashboard case was
+deliberately *not* chased into a fix for the opposite reason: unlike a
+named API shape (SecurityFilterChain, an implemented interface),
+"arbitrary imperative authorization logic" has no bounded pattern to
+build a rule against - attempting one would mean guessing at an
+open-ended space of hand-written code shapes, the same category of
+overreach avoided twice yesterday.
+
+**Effect on thesis chapters:** Chapter 5 gains its first truly on-target
+evaluation sample set (7 AI-generated microservices, not synthetic
+fixtures or human-written repos) and should report the natural-experiment
+finding directly: absent an explicit security requirement in the prompt,
+5 of 6 generated services added no access control at all, including for
+a payments endpoint and a user-account service with a functional IDOR.
+Chapter 5 should also report the SecretKeySpec false positive as a
+concrete example of iterative, evidence-driven hardening - a real bug
+found on real (if AI-generated) code, not a hypothetical - and should
+cite the admin-dashboard and product-catalog findings as the third
+independent confirmation each of the two limitations already logged
+2026-09-02, strengthening rather than merely repeating that entry's
+claims. Chapter 3 (methodology) can now describe the AI-generated
+evaluation sample construction discipline explicitly: realistic,
+non-leading prompts, generated independently of this tool, findings
+verified against source by hand before being reported.
+
+---
+
+## [2026-09-03] - The 7 AI-generated projects added to the Layer 4 training set; result is a precisely diagnosed feature-set gap, not a clean win
+
+**What the plan said:** The previous entry's 7 Codex-generated projects
+were evaluation-only evidence, deliberately kept out of the Layer 4
+labelled dataset per the 2026-09-02 methodology decision (real-repo
+labels are the author's after-the-fact judgment, a weaker source of
+ground truth than the synthetic set's by-construction labels). Unlike
+`.qa-repos`, the student has real authority over these 7 - they were
+commissioned for this purpose - so, asked directly, the student decided
+to add them to the training set rather than keep them evaluation-only.
+
+**What we actually did:** Wrote a `label_rationale` for each of the 7
+from genuine security judgment of what the generated code actually
+does (an unauthenticated profile-edit endpoint on an accounts service is
+a functional account-takeover path; an unconditional, always-on
+SecurityFilterChain means a project with "high"-scored CWE-284 findings
+is actually well-protected; a hand-rolled header-checked admin
+endpoint has real, if weaker-than-idiomatic, access control) rather than
+copying Layer 3's raw score, same discipline as the synthetic set - with
+one honest difference stated in each rationale: these labels were
+necessarily written after the code already existed and had been scanned,
+since Codex's output could not be dictated in advance the way the
+synthetic apps' vulnerabilities were designed in advance. Added all 7 to
+`data/labeled/layer4_projects.json` (8 -> 15 -> 22 total), regenerated
+the trusted contract, re-ran leave-one-out and baseline evaluation.
+
+**The result, reported honestly rather than the good-looking number
+being sought:** Leave-one-out accuracy **dropped** from 0.933 (15
+projects) to 0.591 (13/22). More importantly, the fixed max-severity
+baseline now **measurably beats** Layer 4's learned model - 0.682 vs.
+0.591 - a reversal from the previous dataset, where the two tied
+exactly. In-sample accuracy (fitting and evaluating on the same full 22
+projects, the most favourable possible condition) is only 0.864, not
+1.0.
+
+**Root-caused, not just observed.** Directly computed and compared
+feature vectors: `ai-payments-service` (labelled critical - an
+unauthenticated payment-charge endpoint) and `ai-product-catalog-service`
+(labelled low - a genuinely public, read-only catalog, prompted
+explicitly as such) produce a **byte-identical** Layer 4 feature vector:
+`{finding_count: 2, max_rule_score: 80, mean_rule_score: 80,
+high_count: 2, cwe_284_count: 2, java_source_count: 2}`. `runnable-ai-
+orders-service` (low) shares the same vector too. No classifier, however
+well-tuned, can separate genuinely identical inputs carrying different
+labels - this is not a "need more data" problem or a modelling failure,
+it is a **feature-set gap**: none of Layer 4's current features
+(finding/severity counts, missing-line count, six specific CWE-pair
+combination flags) encode the real-world signal that actually
+distinguishes these projects - endpoint domain/business sensitivity
+(a payment mutation vs. a public catalog read). A human reviewer sees
+this instantly from the code; Layer 4 cannot see it at all, because it
+was never extracted into a number anywhere in the pipeline.
+
+This generalizes the exact same root cause already documented twice this
+week from a different angle: CWE-284's rule-level blindness to
+non-annotation authorization (SecurityFilterChain, codegen interfaces,
+hand-rolled header checks) and Layer 3's inability to distinguish
+"public by design" from "insecure by accident" both stem from static
+analysis only ever seeing *pattern*, not *context*. This entry shows
+that same gap propagates all the way up through Layer 4: the ML layer
+can only ever be as good as the features it is given, and those features
+currently carry no context signal at all.
+
+**Regression tests updated/added:**
+`tests/test_layer4_ml.py::test_real_layer4_dataset_loads_and_leave_one_out_evaluates`
+updated to the real 22-project result (was pinned to 15/0.933);
+`test_real_layer4_dataset_baseline_matches_leave_one_out_exactly` replaced
+with `test_real_layer4_dataset_baseline_now_beats_leave_one_out` (the old
+test's premise - baseline ties Layer 4 - is no longer true and rewriting
+it to assert the new, opposite relationship is the honest fix, not a
+weakening); new
+`test_ai_payments_and_catalog_projects_share_an_identical_feature_vector`
+locks in the concrete proof above as a permanent regression check, not
+just a one-off observation in this log. `tests/test_evaluation.py` and
+`tests/test_thesis_orchestrator.py` updated everywhere they had
+15-project/0.933/1.0 values hardcoded against the real committed
+dataset/contract.
+
+**Tests/adversarial checks run:**
+- Full `pytest -q`: `276 passed` (was 274), clean exit.
+- `mypy .` / `ruff check .` / `black --check .` / `git diff --check`:
+  all clean.
+- `evaluation.evaluate` re-run against the regenerated contract; console
+  output verified directly to contain the real 0.864/0.591/0.682 numbers
+  cited above, not assumed from the underlying test values alone.
+
+**Remaining limitations:** The concrete next step this finding points to
+- adding features that capture endpoint domain/business-sensitivity
+  signal (for example, path or naming-pattern heuristics distinguishing
+  payment/auth/admin-shaped endpoints from general CRUD, in the same
+  coarse, name-based spirit as every other heuristic in this project) -
+  was not attempted today. It is a real feature-engineering task, not a
+  quick fix, and doing it well would need its own scoped pass with its
+  own adversarial testing, not an addition bolted onto this entry under
+  time pressure.
+
+**Why:** The dataset was expanded because the student asked for it
+directly, understanding the tradeoff explained beforehand: unlike the
+`.qa-repos` projects, these 7 are within the student's real authority to
+label. The honest result - baseline now winning, not tying - was kept
+and explained rather than treated as a problem to hide or an accident to
+revert: reverting a real, harder, more representative dataset back to an
+easier one specifically because it produces a worse-looking number would
+be the same mistake already rejected on 2026-09-02 (never let a good
+number be the goal instead of an honest one), now at one layer of
+removal instead of repeated blindly.
+
+**Effect on thesis chapters:** Chapter 5 gets a materially stronger,
+more honest evaluation narrative: not "the ML model matches a simple
+baseline" (2026-09-02's finding) but "expanding to a more realistic,
+context-varied dataset caused the baseline to *outperform* the ML model,
+and the reason is precisely identified: a feature-set gap between what
+static analysis can extract and what real risk judgment requires."
+That is a defensible, interesting research finding in its own right, not
+a failure to bury - a viva panel is far more likely to respect "we found
+exactly why this doesn't work yet and what feature would fix it" than an
+unexamined tie. Chapter 3 (methodology) should describe the dataset's
+final composition explicitly: 15 synthetic, by-construction-labelled
+projects plus 7 real, Codex-generated, post-hoc-labelled projects, with
+the labelling-authority distinction between the two stated plainly.
+Chapter 6 (future work) gains a concrete, well-motivated, and now
+evidence-backed item: endpoint domain/context features for Layer 4,
+not a vague "improve the model" gesture.
+
+---
+
+## [2026-09-03] - Built the feature-set fix the previous entry deferred; caught and fixed a real bug in it before it shipped; small-data ceiling confirmed, not solved
+
+**What the plan said:** The immediately preceding entry diagnosed, but
+deliberately did not fix, the feature-set gap behind Layer 4's baseline
+now beating leave-one-out: no feature captured endpoint domain/business
+sensitivity. Asked directly whether to build it now, the student said
+yes.
+
+**What we actually did:**
+
+1. **Added `has_sensitive_domain_signal`** to
+   `vibeguard/layer4_ml/predictor.py`: a coarse, curated, substring-match
+   keyword list (payment/billing/charge/checkout/..., account/user/
+   profile/auth/login/..., admin/administrator/staff/internal/...)
+   checked against each finding's file name and identifier, same
+   "match names, not semantics" heuristic style already used everywhere
+   in this project (e.g. `CREDENTIAL_KEYWORDS`). Wired into
+   `build_project_features()`/`_feature_names()` as a 23rd feature.
+
+2. **Caught a real bug in the first version before it shipped.** The
+   initial implementation matched against `item.feature.file_path`
+   directly - a *resolved absolute path*
+   (`FindingFeature.file_path = finding.file_path.resolve()`, per Layer
+   2's contract). On this development machine, every single path begins
+   `/Users/alfreddomegil/...`, so `.lower()` on the full path made
+   `"user"` match on *every project scanned on this machine*, regardless
+   of its actual code - confirmed directly:
+   `ai-product-catalog-service` and `runnable-ai-orders-service` both
+   showed `has_sensitive_domain_signal = 1.0` despite neither having
+   anything to do with accounts. This is the identical failure mode that
+   got `path_depth` removed from Layer 2 on 2026-07-21 (a feature
+   computed from local absolute-path structure is not a property of the
+   project, it is a property of where it happens to be checked out) -
+   recurring here because the lesson from that entry wasn't re-derived
+   before writing this feature. Fixed by matching only
+   `item.feature.file_path.name` (the file's own name, e.g.
+   `"PaymentController.java"`) plus the identifier, never the full path.
+   Verified the fix directly: re-computed feature vectors for all 22
+   projects post-fix, confirmed only the 6 projects with a genuinely
+   domain-relevant file name (`PaymentController`, `UserController`,
+   `AdminController`, `AuthService`, `LoginService`, and the earlier
+   `insecure-admin-service`'s `AdminController`) show the signal, catalog
+   and orders correctly show 0.0.
+
+3. **Regenerated the trusted contract** (schema changed: 22 -> 23
+   features) and re-ran leave-one-out/baseline evaluation.
+
+**The result, reported honestly:** In-sample accuracy rose from 0.864 to
+**0.955** (21/22) - direct confirmation the fix resolved the training-set
+contradiction the previous entry proved (payments/catalog/orders are no
+longer feature-identical). **Leave-one-out accuracy did not move: still
+0.591 (13/22), and the baseline (0.682, 15/22) still wins.** Root cause,
+this time a small-data problem rather than a missing-feature problem:
+`has_sensitive_domain_signal` is supported by only 6 of the 22 labelled
+projects, split unevenly across labels (four critical, one high, one
+medium). Holding any one of those 6 out for leave-one-out testing leaves
+too few, too skewed examples for the model to learn a reliable rule from
+the signal - e.g. `ai-admin-dashboard-service` (medium, the dataset's
+only medium-labelled sensitive-domain project) is predicted `critical`
+when held out, because the other 5 sensitive-domain examples it must
+generalize from are overwhelmingly critical. This is now a precisely
+diagnosed, ordinary small-N generalization limit, not a design flaw in
+the feature and not the earlier identical-input contradiction.
+
+**Regression tests added/updated:** `tests/test_layer4_ml.py` -
+`test_real_layer4_dataset_loads_and_leave_one_out_evaluates` updated to
+the real post-fix confusion matrix;
+`test_real_layer4_dataset_baseline_matches_leave_one_out_exactly`
+replaced with `test_real_layer4_dataset_baseline_still_beats_leave_one_out`
+(new docstring explaining the small-data cause, not the old
+identical-vector cause); `test_ai_payments_and_catalog_projects_share_an_identical_feature_vector`
+(whose premise the fix falsified) replaced with
+`test_has_sensitive_domain_signal_distinguishes_payments_from_catalog`;
+new `test_has_sensitive_domain_signal_does_not_leak_from_the_absolute_checkout_path`
+locks in the specific bug found and fixed above as a permanent
+regression guard, constructing a path with `"user"` in a parent
+directory segment and a domain-irrelevant file name, asserting the
+signal stays off; new `test_has_sensitive_domain_signal_matches_common_domain_file_names`/
+`test_has_sensitive_domain_signal_false_for_generic_file_names` cover the
+positive/negative cases directly. `tests/test_evaluation.py` updated
+everywhere it had the pre-fix in-sample accuracy (0.864) hardcoded
+against the real committed dataset/contract.
+
+**Tests/adversarial checks run:**
+- `pytest tests/test_layer4_ml.py -q`: `26 passed`.
+- Full `pytest -q`: `279 passed` (was 276), clean exit.
+- `mypy .` / `ruff check .` / `black --check .` / `git diff --check`:
+  all clean.
+- Post-fix feature vectors for all 22 projects recomputed and read
+  directly (not assumed) to confirm the leak was gone and the intended 6
+  domain-relevant projects were the only ones flagged.
+
+**Remaining limitations:** The dataset does not yet have enough
+sensitive-domain examples, evenly enough distributed across risk labels,
+for leave-one-out to generalize the new signal reliably. The concrete,
+now-precise next lever is more labelled examples specifically in this
+under-represented bucket (more payment/account/admin-domain projects
+across more than one label each), not a different feature or a different
+model - a materially more specific future-work item than either of the
+two entries preceding this one produced.
+
+**Why:** Built because the student asked directly, understanding
+beforehand (per the previous entry) that this closes one specific,
+diagnosed gap and does not guarantee the aggregate leave-one-out number
+improves - which is exactly what happened, and was reported as such
+rather than the in-sample improvement being presented as if it were the
+generalization result. The absolute-path bug was caught by checking the
+actual computed values against the real dataset before regenerating the
+contract, not by trusting the implementation because it read correctly -
+the same "verify, don't assume" discipline applied throughout this
+project's history, catching a mistake this session itself introduced
+just as readily as one inherited from earlier work.
+
+**Effect on thesis chapters:** Chapter 5 now has a complete three-part
+Layer 4 narrative across three same-day entries: (1) the original
+dataset was degenerate, fixed with diverse synthetic labels; (2)
+expanding to real AI-generated projects surfaced a genuine feature-set
+gap, precisely identified; (3) fixing that gap improved in-sample fit
+substantially but left leave-one-out unchanged, for a different and
+now-also-precisely-identified reason (insufficient, unevenly-distributed
+support for the new signal). That progression - each step diagnosing
+exactly why the previous one didn't fully resolve the question - is
+itself evidence of a rigorous evaluation methodology, and is worth
+presenting as the narrative arc, not just the final numbers. Chapter 6
+(future work)'s item from the previous entry should be sharpened: not
+"add domain-context features" (done) but "collect more labelled
+examples in the sensitive-domain bucket, across more than one risk
+label each."
+
+---
+
+## [2026-09-03] - Second AI-generated batch (10 more, targeted); Layer 4 beats the baseline for the first time, with a caveat that must be stated plainly; the dominant real-world CWE-284 blind-spot pattern is now confirmed, not anecdotal
+
+**What the plan said:** The previous entry's concrete next lever was
+"more labelled examples in the sensitive-domain bucket, across more than
+one risk label each." The student's thesis proposal commits to
+evaluating against 50 sample apps; asked to continue toward that, 10
+more were generated, this time with prompts deliberately spread across
+payment/account/admin/auth sub-domains and deliberately mixed - some
+explicitly requesting protection, some not - specifically to get labels
+other than "critical" in the under-supported bucket, not just more
+volume.
+
+**What we actually did / found:**
+
+1. **The dominant real-world pattern from the previous entry is now
+   confirmed, not a one-off.** Every one of the 4 explicitly-protection-
+   requested apps (`ai-payment-refunds-service`, `ai-account-deletion-
+   service`, `ai-role-management-service`, `ai-two-factor-service`)
+   implements real, working access control - and none of them use
+   Spring Security. All four use the same hand-rolled shape as
+   `ai-admin-dashboard-service` from the previous batch: a caller-
+   supplied header compared against an externalized key
+   (`@Value(...)` + `.equals()`/`MessageDigest.isEqual`) before the
+   handler runs. More strikingly, 4 of the 6 *unprompted* apps
+   (`ai-audit-log-service`, `ai-login-sessions-service`, `ai-staff-
+   timesheet-service`, `ai-card-storage-service`) added the identical
+   pattern on their own, inferring restriction from domain framing
+   alone ("staff", "internal", "trusted upstream service") without
+   being asked. Across both AI-generated batches combined, 9 of the 10
+   real protection mechanisms observed are this hand-rolled shape;
+   exactly 1 (`runnable-ai-orders-service`) is real Spring Security.
+   This is no longer an interesting edge case - it is Codex's
+   observed *default* way of adding access control to a small Java
+   microservice, which makes CWE-284's blindness to it a materially
+   more consequential limitation than a single example could show.
+
+2. **One implementation partially, not fully, delivers what it was
+   asked for.** `ai-account-deletion-service` was prompted to ensure
+   "only the account owner can trigger this for their own account." It
+   does check a caller key and a target id - but against a single
+   global `ACCOUNT_OWNER_ID` configuration value, not a per-user
+   identity lookup, so it does not actually generalize to multiple
+   users each owning their own account the way the prompt implied.
+   Labelled accordingly (medium, not low): a real improvement over
+   `ai-user-accounts-service`'s identical-shaped, completely open
+   endpoints in batch 1, but not a full, correct solution either.
+
+3. **One implementation is measurably more careful than its nine
+   siblings.** `ai-two-factor-service` is the only one of all 17
+   AI-generated projects scanned across both batches to use
+   `MessageDigest.isEqual` (constant-time comparison) rather than plain
+   `.equals()` for its key/code checks - correctly avoiding a timing
+   side-channel none of the others bothered with. Labelled low, crediting
+   that directly, even though it shares the same CWE-284 blind spot as
+   every other hand-rolled implementation.
+
+4. **`ai-password-reset-service` is a second, structurally different
+   kind of true-positive-but-inconsequential case.** Unlike `ai-product-
+   catalog-service` (batch 1: correct because the data is genuinely
+   public), this one is correct because a password-reset flow must, by
+   definition, be reachable by someone who cannot currently log in - and
+   the actual security-relevant mechanics (32-byte `SecureRandom` token,
+   SHA-256-hashed before storage, 15-minute expiry, possession of the
+   token required to confirm) are implemented correctly. Labelled low.
+
+5. **All 10 added to the labelled training set** (22 -> 32 projects),
+   trusted contract regenerated, leave-one-out and baseline re-run.
+
+**The result, and the caveat that makes it honest:** Leave-one-out
+accuracy is **0.531** (17/32); the fixed baseline is **0.469** (15/32).
+**This is the first time in this project that Layer 4 outperforms the
+baseline** - but verified directly, not just asserted: the baseline gets
+**zero of the 10 new batch-2 projects correct**, because `baseline_label_from_max_severity`
+only ever reads a project's raw Layer 3 severity band, a lone CWE-284
+finding's band is always "high," and not one of the 10 new labels is
+"high" (they are low/medium/critical, assigned from the real,
+if-often-weak, hand-rolled protection each project actually has). The
+baseline was therefore structurally guaranteed to fail this entire batch
+before a single prediction was made. Layer 4 gets **3 of the 10** right
+- using `has_sensitive_domain_signal` and finding-count features the
+baseline has no access to at all - which is a real, demonstrated
+advantage over a strategy that cannot succeed here, but is *not* yet
+evidence that Layer 4 reliably predicts real-world risk: it is still
+wrong on the other 7. Both numbers are reported in `IMPLEMENTATION_LOG.md`
+and locked into
+`tests/test_layer4_ml.py::test_real_layer4_dataset_leave_one_out_now_beats_baseline_with_a_caveat`,
+which asserts the 0/10 and 3/10 splits directly, not just the aggregate
+accuracy figures, so the caveat cannot silently disappear from the test
+suite the way an unqualified "Layer 4 wins" assertion would let it.
+
+**Regression tests updated:**
+`tests/test_layer4_ml.py::test_real_layer4_dataset_loads_and_leave_one_out_evaluates`
+updated to the real 32-project confusion matrix;
+`test_real_layer4_dataset_baseline_still_beats_leave_one_out` replaced
+with `test_real_layer4_dataset_leave_one_out_now_beats_baseline_with_a_caveat`
+(the old test's premise - baseline wins - is now false, and the
+replacement encodes the caveat as an assertion, not just a comment);
+`test_real_layer4_dataset_baseline_predictions_smoke` updated to 32.
+`tests/test_evaluation.py` and `tests/test_thesis_orchestrator.py`
+updated everywhere they had 22-project/0.591/0.682 values hardcoded
+against the real committed dataset/contract.
+
+**Tests/adversarial checks run:**
+- Full `pytest -q`: `279 passed`, clean exit.
+- `mypy .` / `ruff check .` / `black --check .` / `git diff --check`:
+  all clean.
+- Every finding for all 10 new projects verified against the actual
+  generated source by hand before being labelled (same discipline as
+  every AI-generated project so far) - in particular, each hand-rolled
+  `allowed()`/`owner()` check was read directly to confirm it actually
+  gates the endpoint, not assumed from the docstring alone.
+- `evaluation.evaluate` re-run against the regenerated 32-project
+  contract; the 0.531/0.469 figures and the 0/10 vs. 3/10 batch-2 split
+  were read directly from computed output, not assumed from the test
+  values.
+
+**Remaining limitations:** 32 of the thesis's stated 50 sample apps are
+now in place; reaching 50 needs at least one more batch. The
+`has_sensitive_domain_signal` feature still only distinguishes *that* a
+finding touches a sensitive domain, not *how well-protected* it actually
+is (the hand-rolled-auth quality spectrum this batch surfaced - from
+`ai-billing-service`'s nothing at all, to `ai-role-management-service`'s
+weak shared key, to `ai-two-factor-service`'s constant-time comparison -
+is entirely invisible to Layer 4's current feature set, even though it
+is exactly the signal that separated most of this batch's labels). That
+is a second, more specific future-work item than "more sensitive-domain
+examples" alone.
+
+**Why:** Reported the 0/10-vs-3/10 split alongside the headline accuracy
+numbers, rather than letting "Layer 4 beats baseline" stand as an
+unqualified claim, for the same reason the previous three Layer 4
+entries this week did the same thing: a good-looking number that would
+not survive a direct follow-up question in a viva is worse than a
+correctly-qualified one. The batch itself was deliberately constructed
+to probe exactly the case the baseline cannot handle, which is why the
+result reads as a clean win in aggregate - stating that construction
+choice explicitly is part of reporting the result honestly, not
+undermining it.
+
+**Effect on thesis chapters:** Chapter 5 gets its first genuine, if
+qualified, evidence that project-level ML can add value beyond the
+deterministic rule-based scorer - reported with the exact mechanism
+(access to signals the baseline cannot see) and the exact limit (still
+wrong most of the time on the very projects producing the edge) stated
+together, not separately. Chapter 5 should also report the 9-of-10
+hand-rolled-vs-Spring-Security finding as a substantive, now
+statistically-supported (not anecdotal) result about how this
+generation of AI coding tools implements access control by default,
+independent of whether VibeGuard can detect it - a finding about the
+target population the thesis studies, not just about the tool. Chapter 6
+(future work) should add: a feature (or separate signal) distinguishing
+hand-rolled authentication *quality* would likely matter more than
+further growing example count alone, per the remaining-limitations note
+above. Chapter 3 should note the dataset stands at 32 of the stated 50
+sample apps.
