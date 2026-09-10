@@ -26,9 +26,18 @@ def test_thesis_run_writes_bundle_and_prints_path(
         "evaluation.evaluate._bundle_directory_name", lambda: "bundle-20260722-123000"
     )
 
-    exit_code = thesis_run.main(
-        ["--model-contract", str(REAL_CONTRACT_PATH), "--output-dir", str(output_dir)]
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "thesis_run.py",
+            "--model-contract",
+            str(REAL_CONTRACT_PATH),
+            "--output-dir",
+            str(output_dir),
+        ],
     )
+    exit_code = thesis_run.main()
 
     assert exit_code == 0
     bundle_dir = output_dir / "bundle-20260722-123000"

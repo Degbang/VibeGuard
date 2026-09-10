@@ -45,3 +45,4 @@ data/labeled/*
 # reasoning as above, they must be tracked.
 !data/labeled/layer4_projects.json
 !data/labeled/layer4_random_forest_contract.json
+!data/labeled/human_baseline_survey.csv

@@ -957,6 +957,230 @@
           "redacted_value": null
         }
       ]
+    },
+    {
+      "project_id": "ai-employee-profile-service",
+      "source_path": "data/sample_apps/ai-employee-profile-service",
+      "label": "high",
+      "label_rationale": "Codex-generated, post-hoc label, batch 4 (deliberate held-out design: sensitive-vocabulary domain, testing whether it would be well-protected the way batch 1-3's sensitive apps mostly were). No hand-rolled protection was added this time - get(id)/update(id) accept an arbitrary path 'id' with zero authentication or ownership check, so any caller can read AND overwrite any employee's PII (name, phone, emergency contact, department). Labelled high: unauthenticated read+write IDOR on real PII, not just a read-only leak.",
+      "findings": [
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/employees/EmployeeController.java",
+          "line": 1,
+          "identifier": "get",
+          "message": "Endpoint method 'get' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        },
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/employees/EmployeeController.java",
+          "line": 1,
+          "identifier": "update",
+          "message": "Endpoint method 'update' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        }
+      ]
+    },
+    {
+      "project_id": "ai-user-consent-service",
+      "source_path": "data/sample_apps/ai-user-consent-service",
+      "label": "high",
+      "label_rationale": "Codex-generated, post-hoc label, batch 4 (held-out design, same rationale as ai-employee-profile-service). update(userId)/list(userId) accept an arbitrary path userId with zero authentication - any caller can both read another user's GDPR-style consent history AND forge new consent records on their behalf. Labelled high: this is a compliance/audit record-keeping service whose entire purpose is undermined by unauthenticated forgery, on top of the privacy leak.",
+      "findings": [
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/consent/ConsentController.java",
+          "line": 1,
+          "identifier": "update",
+          "message": "Endpoint method 'update' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        },
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/consent/ConsentController.java",
+          "line": 1,
+          "identifier": "list",
+          "message": "Endpoint method 'list' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        }
+      ]
+    },
+    {
+      "project_id": "ai-account-recovery-service",
+      "source_path": "data/sample_apps/ai-account-recovery-service",
+      "label": "critical",
+      "label_rationale": "Codex-generated, post-hoc label, batch 4 (held-out design). request(email) returns the recovery token directly in the HTTP response body to the caller, rather than delivering it out-of-band to the account owner (e.g. email); complete(token, newCredential) then has no authentication either. Net effect: any caller who submits a known or guessed email address immediately receives a working recovery token in the response and can set a new credential in the same request chain - a complete unauthenticated account-takeover primitive, not just a missing-annotation gap. Labelled critical, same tier as this project's other full-authentication-bypass findings. Originally, only Layer 1's CWE-284 rule caught this (both endpoints missing an authorization annotation), which under-described the real defect and led Layer 4 to predict 'low' on this project (see IMPLEMENTATION_LOG.md 2026-09-04). A new CWE-287 check was added afterward (cwe_287.py: an endpoint that generates or looks up a credential-shaped value and returns it directly with no preceding guard) that flags exactly this pattern - request()'s unconditional return of 'token' is now a third finding on this project, giving Layer 4 real signal instead of requiring a blunt severity floor (an alternative that was tried and reverted: it collapsed Layer 4's accuracy from 58% to 40% by flooring nearly every project with any CWE-284 finding up to \"high\" - see IMPLEMENTATION_LOG.md).",
+      "findings": [
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/recovery/RecoveryController.java",
+          "line": 1,
+          "identifier": "request",
+          "message": "Endpoint method 'request' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        },
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/recovery/RecoveryController.java",
+          "line": 1,
+          "identifier": "complete",
+          "message": "Endpoint method 'complete' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        },
+        {
+          "cwe_id": "CWE-287",
+          "file_path": "src/main/java/com/vibeguard/samples/recovery/RecoveryController.java",
+          "line": 1,
+          "identifier": "token",
+          "message": "Endpoint method 'request' returns 'token', a credential-shaped value, directly in its response with no preceding guard (no if-check and no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method) - if this is a self-service recovery/reset/verification flow, the value should be delivered out-of-band (e.g. email/SMS) rather than handed back to whoever made the request",
+          "redacted_value": null
+        }
+      ]
+    },
+    {
+      "project_id": "ai-admin-report-export-service",
+      "source_path": "data/sample_apps/ai-admin-report-export-service",
+      "label": "high",
+      "label_rationale": "Codex-generated, post-hoc label, batch 4 (held-out design). Prompt explicitly asked for an 'admin-only' report export tool; the generated create()/download() endpoints have zero authentication or authorization of any kind, contradicting the stated requirement outright. Any caller can trigger report generation and download exported business metrics (signups, revenue). Labelled high: unauthenticated disclosure of business-sensitive data, and a concrete example of AI-generated code silently dropping an explicitly stated security requirement - exactly the failure mode this thesis targets.",
+      "findings": [
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/reports/ReportController.java",
+          "line": 1,
+          "identifier": "create",
+          "message": "Endpoint method 'create' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        },
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/reports/ReportController.java",
+          "line": 1,
+          "identifier": "download",
+          "message": "Endpoint method 'download' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        }
+      ]
+    },
+    {
+      "project_id": "ai-product-reviews-service",
+      "source_path": "data/sample_apps/ai-product-reviews-service",
+      "label": "medium",
+      "label_rationale": "Codex-generated, post-hoc label, batch 4 (deliberate held-out design: boring-vocabulary domain, testing whether real risk would be missed by the sensitive-domain feature). submit()/list() being open is correct (public product reviews by design); remove() has no protection at all, so any caller - not just a moderator - can delete any review. Labelled medium: real, unauthenticated content-integrity/vandalism issue, but no PII or financial exposure, bounded to review data.",
+      "findings": [
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/reviews/ReviewController.java",
+          "line": 1,
+          "identifier": "submit",
+          "message": "Endpoint method 'submit' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        },
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/reviews/ReviewController.java",
+          "line": 1,
+          "identifier": "list",
+          "message": "Endpoint method 'list' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        },
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/reviews/ReviewController.java",
+          "line": 1,
+          "identifier": "remove",
+          "message": "Endpoint method 'remove' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        }
+      ]
+    },
+    {
+      "project_id": "ai-shipping-labels-service",
+      "source_path": "data/sample_apps/ai-shipping-labels-service",
+      "label": "medium",
+      "label_rationale": "Codex-generated, post-hoc label, batch 4 (held-out design, same rationale as ai-product-reviews-service). create()/get()/voidLabel() have no authentication at all - any caller can create, view, or void shipping labels for any order. Labelled medium: real unauthenticated write access with operational-disruption potential (voiding legitimate labels), softened only by the tracking id being an unguessable UUID rather than a directly leaked PII exposure.",
+      "findings": [
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/shipping/LabelController.java",
+          "line": 1,
+          "identifier": "create",
+          "message": "Endpoint method 'create' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        },
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/shipping/LabelController.java",
+          "line": 1,
+          "identifier": "get",
+          "message": "Endpoint method 'get' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        },
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/shipping/LabelController.java",
+          "line": 1,
+          "identifier": "voidLabel",
+          "message": "Endpoint method 'voidLabel' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        }
+      ]
+    },
+    {
+      "project_id": "ai-newsletter-service",
+      "source_path": "data/sample_apps/ai-newsletter-service",
+      "label": "high",
+      "label_rationale": "Codex-generated, post-hoc label, batch 4 (held-out design, boring-vocabulary domain). subscribe()/unsubscribe() being open is normal self-service; campaign() - which triggers sending an email campaign to the entire subscriber list - has zero authentication, so any caller on the internet can trigger a mass send. Labelled high: this is an open abuse primitive against the service's own mail-sending infrastructure (spam/phishing relay potential, reputational and deliverability damage, real cost), a more active harm vector than a passive data leak despite the 'boring' vocabulary.",
+      "findings": [
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/newsletter/NewsletterController.java",
+          "line": 1,
+          "identifier": "subscribe",
+          "message": "Endpoint method 'subscribe' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        },
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/newsletter/NewsletterController.java",
+          "line": 1,
+          "identifier": "unsubscribe",
+          "message": "Endpoint method 'unsubscribe' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        },
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/newsletter/NewsletterController.java",
+          "line": 1,
+          "identifier": "campaign",
+          "message": "Endpoint method 'campaign' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        }
+      ]
+    },
+    {
+      "project_id": "ai-inventory-adjustment-service",
+      "source_path": "data/sample_apps/ai-inventory-adjustment-service",
+      "label": "medium",
+      "label_rationale": "Codex-generated, post-hoc label, batch 4 (held-out design, boring-vocabulary domain). adjust(sku)/list(sku) have no authentication at all - any caller can submit fabricated stock adjustments (unbounded delta, freeform reason) for any SKU or read the adjustment history. Labelled medium: real internal-controls / fraud-enablement risk (falsified stock records could mask theft or inventory fraud), but the exposure is operational data, not PII or direct financial transfer.",
+      "findings": [
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/inventory/AdjustmentController.java",
+          "line": 1,
+          "identifier": "adjust",
+          "message": "Endpoint method 'adjust' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        },
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/inventory/AdjustmentController.java",
+          "line": 1,
+          "identifier": "list",
+          "message": "Endpoint method 'list' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        }
+      ]
     }
   ]
 }

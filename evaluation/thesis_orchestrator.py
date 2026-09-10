@@ -63,7 +63,9 @@ class ScanExecution:
 def main(argv: list[str] | None = None) -> int:
     """Run the scan CLI and evaluation bundle wrapper as one thesis artifact pass."""
     args = _parse_args(argv)
-    invocation = _module_invocation("evaluation.thesis_orchestrator", argv or [])
+    invocation = _module_invocation(
+        "evaluation.thesis_orchestrator", sys.argv[1:] if argv is None else argv
+    )
     try:
         resolved_scan_path = args.scan_path.resolve()
         if not resolved_scan_path.exists():
@@ -659,7 +661,7 @@ def _execute_scan(
     try:
         model = load_trusted_model_contract(model_contract.resolve())
         final_report = build_project_risk_report(scan_path, model, scored_findings)
-    except ValueError as exc:
+    except Exception as exc:
         return ScanExecution(
             scan_path=scan_path,
             result=result,
@@ -807,6 +809,7 @@ def _project_risk_report_payload(report: ProjectRiskReport) -> dict[str, object]
 
 def _create_run_dir(output_dir: Path) -> Path:
     try:
+        output_dir = output_dir.resolve()
         output_dir.mkdir(parents=True, exist_ok=True)
         run_dir = output_dir / _run_directory_name()
         run_dir.mkdir()

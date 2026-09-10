@@ -1,0 +1,1 @@
+package com.vibeguard.samples.newsletter; import org.springframework.boot.*; import org.springframework.boot.autoconfigure.*; @SpringBootApplication public class NewsletterApplication {public static void main(String[] args){SpringApplication.run(NewsletterApplication.class,args);}}

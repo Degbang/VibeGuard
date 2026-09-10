@@ -86,7 +86,7 @@ def render_console_report(
 def main(argv: list[str] | None = None) -> int:
     """Run the evaluation harness from the command line."""
     args = _parse_args(argv)
-    invocation = _module_invocation("evaluation.evaluate", argv or [])
+    invocation = _module_invocation("evaluation.evaluate", sys.argv[1:] if argv is None else argv)
     try:
         report = build_evaluation_report(args.model_contract)
         if args.json_out is not None:

@@ -15,29 +15,37 @@ REAL_CONTRACT_PATH = REPO_ROOT / "data" / "labeled" / "layer4_random_forest_cont
 FIXTURES_DIR = REPO_ROOT / "tests" / "fixtures"
 
 
+@pytest.mark.parametrize("output_kind", ["absolute", "relative", "symlink"])
 def test_thesis_orchestrator_writes_scan_and_evaluation_artifacts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    output_kind: str,
 ) -> None:
     output_dir = tmp_path / "artifacts"
+    if output_kind == "relative":
+        monkeypatch.chdir(tmp_path)
+        output_dir = Path("artifacts")
+    elif output_kind == "symlink":
+        output_dir = tmp_path / "linked artifacts"
+        output_dir.symlink_to(tmp_path, target_is_directory=True)
     monkeypatch.setattr(thesis_orchestrator, "_run_directory_name", lambda: "run-20260723-120000")
     monkeypatch.setattr(
         "evaluation.evaluate._bundle_directory_name", lambda: "bundle-20260723-120100"
     )
 
-    exit_code = thesis_orchestrator.main(
-        [
-            str(FIXTURES_DIR / "CleanService.java"),
-            "--model-contract",
-            str(REAL_CONTRACT_PATH),
-            "--output-dir",
-            str(output_dir),
-        ]
-    )
+    invocation_args = [
+        str(FIXTURES_DIR / "CleanService.java"),
+        "--model-contract",
+        str(REAL_CONTRACT_PATH),
+        "--output-dir",
+        str(output_dir),
+    ]
+    monkeypatch.setattr(sys, "argv", ["thesis_orchestrator.py", *invocation_args])
+    exit_code = thesis_orchestrator.main()
 
     assert exit_code == 0
-    run_dir = output_dir / "run-20260723-120000"
+    run_dir = output_dir.resolve() / "run-20260723-120000"
     bundle_dir = run_dir / "evaluation" / "bundle-20260723-120100"
     manifest = json.loads((run_dir / "run_manifest.json").read_text(encoding="utf-8"))
     manifest_schema = json.loads((run_dir / "run_manifest.schema.json").read_text(encoding="utf-8"))
@@ -112,7 +120,7 @@ def test_thesis_orchestrator_writes_scan_and_evaluation_artifacts(
     assert thesis_summary["evaluation"]["manifest_file_relative"] == (
         "evaluation/bundle-20260723-120100/bundle_manifest.json"
     )
-    assert thesis_summary["evaluation"]["leave_one_out_accuracy"] == pytest.approx(25 / 42)
+    assert thesis_summary["evaluation"]["leave_one_out_accuracy"] == pytest.approx(29 / 50)
     assert thesis_summary_schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
     assert thesis_summary_schema["properties"]["schema_version"]["const"] == 2
     assert thesis_summary_schema["properties"]["export_mode"]["const"] == "combined_thesis_summary"
@@ -222,3 +230,32 @@ def test_thesis_orchestrator_fails_closed_for_invalid_output(
 
     assert exit_code == 1
     assert "Thesis orchestration failed:" in capsys.readouterr().err
+
+
+def test_combined_scan_captures_shap_runtime_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed explanation must still leave traceable scan evidence."""
+
+    def fail_explainer(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("injected SHAP failure")
+
+    monkeypatch.setattr("shap.TreeExplainer", fail_explainer)
+    artifact_dir = tmp_path / "scan"
+    artifacts = thesis_orchestrator._run_scan(
+        FIXTURES_DIR / "HardcodedSecretService.java",
+        artifact_dir,
+        model_contract=REAL_CONTRACT_PATH,
+        max_bytes=2_000_000,
+        timeout=5.0,
+    )
+
+    report = json.loads(artifacts.report_path.read_text(encoding="utf-8"))
+    assert artifacts.exit_code == 1
+    assert report["error_message"] == "ML/reporting failed: injected SHAP failure"
+    assert report["project_risk_report"] is None
+    assert report["finding_count"] > 0
+    assert report["scored_finding_count"] > 0
+    stderr = (artifact_dir / "scan_stderr.txt").read_text(encoding="utf-8")
+    assert "injected SHAP failure" in stderr
+    assert "Traceback" not in stderr

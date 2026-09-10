@@ -356,6 +356,78 @@ def test_has_centralized_authorization_rule_tree_sitter_fallback(tmp_path: Path)
     assert has_centralized_authorization_rule(result) is True
 
 
+def test_has_centralized_authorization_rule_detects_legacy_configure_override(
+    tmp_path: Path,
+) -> None:
+    """The real gap found scanning gothinkster/spring-boot-realworld-example-app
+    (IMPLEMENTATION_LOG.md 2026-09-04): WebSecurityConfigurerAdapter's
+    void-returning `configure(HttpSecurity)` override, not a
+    SecurityFilterChain bean - the deprecated (removed in Spring Security
+    6) but still extremely common pre-5.7 style.
+    """
+    java_file = tmp_path / "WebSecurityConfig.java"
+    java_file.write_text(
+        "import org.springframework.security.config.annotation.web.builders.HttpSecurity;\n"
+        "import org.springframework.security.config.annotation.web.configuration."
+        "WebSecurityConfigurerAdapter;\n"
+        "public class WebSecurityConfig extends WebSecurityConfigurerAdapter {\n"
+        "    protected void configure(HttpSecurity http) throws Exception {\n"
+        "        http.authorizeRequests()\n"
+        '            .antMatchers("/public/**").permitAll()\n'
+        "            .anyRequest().authenticated();\n"
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    assert has_centralized_authorization_rule(result) is True
+
+
+def test_has_centralized_authorization_rule_false_for_unrelated_configure_method(
+    tmp_path: Path,
+) -> None:
+    """A `configure` method with a different signature is not this pattern."""
+    java_file = tmp_path / "Widget.java"
+    java_file.write_text(
+        "public class Widget {\n"
+        "    public void configure(String name) {\n"
+        "        this.name = name;\n"
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    assert has_centralized_authorization_rule(result) is False
+
+
+def test_has_centralized_authorization_rule_detects_legacy_configure_tree_sitter_fallback(
+    tmp_path: Path,
+) -> None:
+    """The same legacy-configure pattern must be detected on a Tree-sitter fallback parse."""
+    java_file = tmp_path / "WebSecurityConfig.java"
+    java_file.write_text(
+        "import org.springframework.security.config.annotation.web.builders.HttpSecurity;\n"
+        "public class WebSecurityConfig {\n"
+        "    int helper(int level) {\n"
+        "        return switch (level) {\n"
+        "            case 1 -> 1;\n"
+        "            default -> 0;\n"
+        "        };\n"
+        "    }\n"
+        "    protected void configure(HttpSecurity http) throws Exception {\n"
+        "        http.authorizeRequests().anyRequest().authenticated();\n"
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    assert result.tree_sitter is not None
+    assert has_centralized_authorization_rule(result) is True
+
+
 def test_apply_centralized_authorization_context_appends_caveat_when_present(
     tmp_path: Path,
 ) -> None:

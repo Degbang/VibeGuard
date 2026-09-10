@@ -165,6 +165,47 @@ def test_scan_skips_root_level_test_directory(tmp_path: Path) -> None:
     assert [parsed.path.name for parsed in result.java_files] == ["Real.java"]
 
 
+def test_scan_skips_maven_failsafe_integration_test_root(tmp_path: Path) -> None:
+    """src/it/ (Maven Failsafe's integration-test convention) is a test root too.
+
+    Found scanning WebGoat (IMPLEMENTATION_LOG.md 2026-09-04): integration
+    test fixture literals (e.g. a login form field value) were being
+    scanned as production credentials because only "test"/"tests" were
+    recognized.
+    """
+    main_sources = tmp_path / "src" / "main" / "java"
+    main_sources.mkdir(parents=True)
+    (main_sources / "RealService.java").write_text("public class RealService {}\n")
+
+    it_sources = tmp_path / "src" / "it" / "java"
+    it_sources.mkdir(parents=True)
+    (it_sources / "FakeSecretIntegrationTest.java").write_text(
+        'public class FakeSecretIntegrationTest { String password = "hunter2"; }\n'
+    )
+
+    result = scan_directory(tmp_path)
+
+    assert [parsed.path.name for parsed in result.java_files] == ["RealService.java"]
+
+
+def test_scan_does_not_skip_a_production_package_named_it(tmp_path: Path) -> None:
+    """A package literally named "it" nested deeper is not the same as a test root.
+
+    Same false-exclusion protection already relied on for "test"/"tests":
+    only a top-level src/it/ or <root>/it/ counts.
+    """
+    prod_package = tmp_path / "src" / "main" / "java" / "com" / "example" / "it"
+    prod_package.mkdir(parents=True)
+    (prod_package / "ProdSecret.java").write_text(
+        'public class ProdSecret { String password = "hunter2"; }\n'
+    )
+
+    result = scan_directory(tmp_path)
+
+    assert [parsed.path.name for parsed in result.java_files] == ["ProdSecret.java"]
+    assert result.rejected_paths == ()
+
+
 def test_scan_raises_on_non_directory(tmp_path: Path) -> None:
     not_a_dir = tmp_path / "file.txt"
     not_a_dir.write_text("hi")

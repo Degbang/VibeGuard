@@ -1,0 +1,1 @@
+package com.vibeguard.samples.reports; import org.springframework.boot.*; import org.springframework.boot.autoconfigure.*; @SpringBootApplication public class ReportsApplication {public static void main(String[] args){SpringApplication.run(ReportsApplication.class,args);}}

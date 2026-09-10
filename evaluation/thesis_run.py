@@ -17,7 +17,7 @@ from evaluation.evaluate import (
 def main(argv: list[str] | None = None) -> int:
     """Build the default thesis evaluation artifact bundle."""
     args = _parse_args(argv)
-    invocation = _module_invocation("evaluation.thesis_run", argv or [])
+    invocation = _module_invocation("evaluation.thesis_run", sys.argv[1:] if argv is None else argv)
     try:
         report = build_evaluation_report(args.model_contract)
         bundle_dir = write_bundle_report(report, args.output_dir, invocation=invocation)

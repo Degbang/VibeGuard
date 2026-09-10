@@ -72,7 +72,15 @@ _EXCLUDED_DIR_NAMES = frozenset(
 # also exclude a *production* package that happens to be named "test"
 # (e.g. "com.example.test"), which is a real, not hypothetical,
 # false-exclusion risk - found via targeted testing, not assumed safe.
-_TEST_DIR_NAMES = frozenset({"test", "tests"})
+# "it" (Maven Failsafe's integration-test source root, "src/it/...") was
+# added after scanning WebGoat found integration-test fixture literals
+# (e.g. a form field value like "password" used to drive a login test)
+# being scanned as production credentials - see IMPLEMENTATION_LOG.md
+# 2026-09-04. Carries the same narrow, two-location protection as
+# "test"/"tests" above: a package segment named "it" *nested* deeper in
+# the tree is left alone, only a top-level "src/it/" or "<root>/it/" is
+# excluded.
+_TEST_DIR_NAMES = frozenset({"test", "tests", "it"})
 
 
 @dataclass(frozen=True)

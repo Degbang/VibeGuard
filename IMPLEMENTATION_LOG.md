@@ -4874,3 +4874,620 @@ limitation rather than leaving implicit. Chapter 4 should describe
 of this project's iterative, evidence-driven hardening process applied
 to itself, not just to detection rules discovered once. Chapter 3
 should note the dataset stands at 42 of 50, with 8 remaining.
+
+---
+
+## [2026-09-04] - Fourth batch (8 apps, dataset reaches the stated 50): a deliberate stress-test batch found Layer 4's edge is not universal; a severity-floor fix was tried and reverted for making things worse; a new Layer 1 CWE-287 detector was built instead and measurably helps without any collateral damage
+
+**What the plan said:** With the dataset at 42 of the thesis's stated 50,
+the student chose to spend the final batch specifically stress-testing
+the previous entry's "held-out generalization" result, rather than
+simply padding the count: 4 apps in sensitive-vocabulary domains
+(employee profile, user consent, account recovery, admin report
+export) and 4 in boring-vocabulary domains (product reviews, shipping
+labels, newsletter, inventory adjustment) that do not trip
+`has_sensitive_domain_signal`'s keyword list at all - chosen so a
+correct answer would require reasoning past the domain-name shortcut in
+either direction.
+
+**What we actually did / found:**
+
+1. **The stress test did not produce what it was designed to test, and
+   that turned out to be more informative than if it had.** The design
+   assumed at least some of the sensitive-vocabulary apps would ship
+   with real (if hand-rolled) protection, the way ~19/20 of batches 1-3
+   did. None of the 8 did - every one of the 8 shipped with zero access
+   control on its sensitive endpoints, including `ai-admin-report-
+   export-service`, whose prompt explicitly said "admin-only" and whose
+   generated code ignored that requirement outright. Each project's
+   findings and label rationale were written by hand-reading the actual
+   generated source, per this project's established post-hoc labelling
+   discipline - not assumed from the prompt.
+
+2. **One of the 8, `ai-account-recovery-service`, is a genuine full
+   account-takeover bug, not just a missing annotation.** Its
+   `request(email)` endpoint takes only an email address (no proof of
+   ownership) and returns the freshly generated recovery token directly
+   in the HTTP response body, instead of delivering it out-of-band
+   (e.g. email); `complete(token, newCredential)` then has no
+   authentication either. Net effect: anyone who knows or guesses a
+   user's email can obtain a working recovery token and set a new
+   credential in the same request chain. Labelled critical. Because all
+   8 apps happen to share a near-identical shape of finding (2-3
+   CWE-284 "missing annotation" findings, nothing else), this batch
+   became an unplanned but sharp natural experiment: 4 projects with
+   `has_sensitive_domain_signal=1` and near-identical true severity to
+   4 projects with the signal off.
+
+3. **Added all 8, retrained: 50 projects total (8 -> 15 -> 22 -> 32 ->
+   42 -> 50 - the thesis's full stated target reached).** Leave-one-out
+   accuracy is 0.58 (29/50), the fixed baseline is 0.40 (20/50) - Layer
+   4 still wins in aggregate. But the honest per-batch breakdown
+   reverses on this batch specifically: baseline 4/8 correct vs.
+   leave-one-out 2/8. Most strikingly, leave-one-out predicted the
+   account-recovery critical bug as "low" - not a near-miss, the single
+   worst finding in the entire dataset scored at the bottom of the
+   scale. The batch-2/3 "held-out generalization" claim from the
+   previous entry needs narrowing, not retracting: Layer 4's edge holds
+   on the sensitive-domain-with-hand-rolled-auth pattern those batches
+   exercise, but breaks down on this batch's low-finding-count/high-
+   severity-per-finding profile, which the feature vector genuinely
+   cannot distinguish from a well-protected project - two projects with
+   identical features and opposite true risk is a feature collision, not
+   a training problem, and no amount of retraining fixes that on its
+   own.
+
+4. **A severity-floor fix was designed, built, tested, and reverted -
+   not shipped.** The idea: never let Layer 4's predicted label fall
+   below the severity of the single worst individual Layer 3 finding
+   (`predict_project_risk` in `vibeguard/layer4_ml/predictor.py`,
+   implemented with a `_severity_floor_label` helper and a
+   `floor_applied` field on `MLPrediction`). Directly measured against
+   the full 50-project leave-one-out evaluation before deciding whether
+   to keep it: accuracy dropped from 0.58 to 0.40, identical to the
+   baseline's own accuracy, because CWE-284's "missing annotation"
+   finding is scored "high" uniformly regardless of context, and the
+   floor forced nearly every project with any CWE-284 finding - which
+   is most of the dataset, including many correctly-labelled "low"/
+   "medium" projects with real hand-rolled protection invisible to that
+   rule - up to "high" or above. The floor did not fix the one bad case
+   without erasing Layer 4's value everywhere else; it just re-
+   implemented the baseline under a different name. Reverted via `git
+   checkout` before any commit. Logged here specifically so a later
+   session does not re-attempt the same idea blind.
+
+5. **Built a real, tested Layer 1 detector instead:
+   `cwe_287.py`'s new `_check_unguarded_secret_return` /
+   `_check_tree_sitter_unguarded_secret_return`.** Flags an endpoint
+   method that generates or looks up a credential-shaped value (name-
+   matched via the existing shared `_credential_names.py` heuristic)
+   and returns it unconditionally, with neither a preceding hand-
+   written `if` guard in the method body (tracked by AST list order,
+   not source line - these Codex-generated files put an entire class on
+   one line, so line numbers cannot distinguish "before" from "after")
+   nor a framework authorization annotation (`@PreAuthorize` etc. -
+   its annotation set extracted into a new shared
+   `_authorization_annotations.py` module, following this project's
+   established "extract on the second real need" practice, now used by
+   both `cwe_284.py` and `cwe_287.py`). Deliberately narrower than a
+   bare "any credential-shaped identifier in the return" match: only a
+   bare variable/field *value* reference counts, not a credential-named
+   *method call* (`_credential_value_reference` excludes
+   `MethodInvocation`; the Tree-sitter path's
+   `_is_call_qualifier_or_name` excludes an identifier used as a call's
+   object/name) - a real false positive was found and fixed during
+   testing, where the sibling `complete(Complete complete)` endpoint's
+   `complete.token()` (validating an incoming token, not returning a
+   freshly issued one) was initially caught by a too-broad first draft
+   of the Tree-sitter matcher.
+
+**Tests/adversarial checks run:**
+- Full `pytest -q`: `288 passed` (was 279 before this entry's work).
+- `mypy .` / `ruff check .` / `black --check .` / `git diff --check`:
+  all clean.
+- 9 new unit tests in `tests/test_cwe_287.py` covering: the real
+  vulnerable shape; guarded-by-if; guarded-by-annotation; a token
+  generated but never returned (the real `ai-password-reset-service`
+  shape); the `complete.token()` method-call false positive found and
+  fixed; a non-endpoint method (unreachable, correctly not flagged);
+  and both the flagging and non-flagging cases again on the Tree-sitter
+  fallback path (required - `tests/test_java_rule_fallback_coverage.py`
+  enforces dual-parser support for every Java rule module).
+- Ran the new detector against the *entire* 50-project labelled
+  dataset (not just the motivating case): exactly one new finding
+  anywhere - `ai-account-recovery-service`'s `request` method - zero
+  new findings, zero false positives, on the other 49 projects,
+  including the batch-2/3 "well protected" ones whose CWE-284 findings
+  this detector could plausibly have also mismatched.
+- Ran it against both real, independently-maintained repositories
+  under `.qa-repos/` (155 non-test Java files across
+  `spring-petclinic-rest` and `quarkus-super-heroes`, via the real
+  `scanner.py` entry point, not a raw glob): zero findings, zero
+  crashes.
+- Found and ruled out of scope: an unrelated, pre-existing crash in
+  `ast_parser.py`'s Tree-sitter fallback path (`_build_tree_sitter_
+  parsed_file`, a `TypeError` in `node_text`), reproducible only by
+  bypassing `scanner.py`'s own `target/` build-output exclusion via a
+  raw `rglob` (real `scan_directory()` never reaches the file that
+  triggers it) and only when parsing ~278 files in one long-running
+  process, not in isolation - confirmed present with this session's
+  changes fully reverted (`git stash`), i.e. genuinely pre-existing,
+  not introduced by this work. Not fixed here: out of this task's
+  scope, and does not affect real scanning through the normal CLI path.
+  Logged as a candidate item for a future Layer 1 robustness pass.
+- `ai-account-recovery-service`'s dataset entry updated with the new
+  CWE-287 finding (verified against the actual regenerated scan
+  output, not hand-typed) and its `label_rationale` extended to explain
+  the detector; contract regenerated and confirmed
+  `training_example_count: 50`.
+- Isolated exactly what changed in the full 50-project leave-one-out
+  evaluation by diffing against a temporary contract built from a copy
+  of the dataset with only the new CWE-287 finding removed: **exactly
+  one prediction changed anywhere in the dataset** -
+  `ai-account-recovery-service` moved from predicted "low" to predicted
+  "medium" (true label: critical) - every other one of the 50
+  leave-one-out predictions is byte-identical before and after. Real,
+  measurable, narrowly-targeted improvement with zero side effects,
+  not a full fix (still under-predicts relative to the true "critical"
+  label) and not a coincidence (isolated and measured directly, not
+  assumed from the aggregate number, which is unchanged at 0.58 since
+  a wrong-to-less-wrong move doesn't cross an accuracy threshold on its
+  own).
+- Ran the real CLI (`main.py`) against `ai-account-recovery-service`
+  end-to-end post-fix: the *in-sample* model (the one `main.py` and
+  real end users actually use, trained on the full 50-project dataset
+  including this project) now predicts **critical** with 0.684
+  confidence, and Layer 5's SHAP breakdown shows `cwe_287_count` as the
+  single largest positive contributor (+0.173) - the new detector is
+  not just present in the dataset, it is the dominant signal driving
+  the correct in-sample prediction. The more conservative leave-one-out
+  number (medium, not critical) is the honest generalization estimate
+  for an unseen project of this exact shape, not a contradiction of the
+  in-sample result.
+
+**Remaining limitations:** `_check_unguarded_secret_return` is method-
+level only, unlike `cwe_284.py`'s method-or-enclosing-class check - a
+class-wide authorization annotation with no method-level guard and a
+freshly-issued secret is a narrower, unobserved-so-far edge case,
+deliberately not built speculatively (see the module docstring). The
+detector only recognises a bare bare variable/field reference flowing
+into the return statement, not deeper data-flow (e.g. a token passed
+through an intermediate builder or wrapper method before being
+returned) - consistent with every other rule in this codebase's
+name/shape-based, not full-dataflow, approach. Leave-one-out still
+under-predicts the account-recovery project relative to its true
+"critical" label (now "medium", not "low") - the new finding gives the
+model real signal, but with only one example of this exact pattern in
+the training set, leave-one-out (which excludes that one example from
+its own training fold) cannot yet learn to weight it as strongly as
+the in-sample model does. The pre-existing `ast_parser.py` Tree-sitter
+crash found during real-repo testing (see above) remains open, logged
+as a candidate future Layer 1 item, not fixed in this entry.
+
+**Why:** The student's explicit instruction after seeing the account-
+recovery miss was "we need to fix this and we can do it" - not to
+document the limitation and move on. The floor-rule fix was tried
+first because it looked cheap and general; it was reverted, not
+shipped, the moment the full-dataset leave-one-out measurement showed
+it made the tool worse, not better - a decision made from measured
+evidence, not intuition, consistent with this project's standing
+practice of computing exact numbers before trusting a change. The
+CWE-287 detector was built afterward specifically because the floor's
+failure diagnosed *why* a blunt fix couldn't work here (Layer 3's
+CWE-284 severity is uniformly noisy) and pointed at what a real fix
+needed: genuinely new information Layer 1 wasn't extracting yet, not a
+different way of weighting the same information.
+
+**Effect on thesis chapters:** Chapter 3: the dataset is complete at
+50 of 50 stated sample apps. Chapter 4 should document
+`_check_unguarded_secret_return` as a second real CWE-287 pattern
+(alongside the existing `==`/`!=` comparison check) and should
+document the severity-floor attempt and its revert as a worked example
+of this project's "measure before shipping" discipline - a fix that
+looks obviously correct until it is actually measured against the
+full dataset is a legitimate, citable methodology point, not something
+to omit because it didn't ship. Chapter 5 needs the fullest, most
+nuanced Layer 4 result of the whole project: report all four per-batch
+rows (original mix at parity, batch 2 and 3 favouring Layer 4, batch 4
+favouring the baseline), the account-recovery critical-miss as a
+concrete illustrated failure case, and the in-sample-vs-leave-one-out
+distinction the CLI run surfaced (dominant SHAP signal in-sample,
+partial-not-complete improvement under the stricter held-out estimate)
+as an explicit, honest discussion of what "the model works" can and
+cannot mean with a labelled dataset this size. This is a stronger,
+more defensible chapter than a single clean win would have been.
+
+---
+
+## [2026-09-04] - Two more real, independently-maintained repositories added to `.qa-repos/`: the new CWE-287 detector validated itself independently on OWASP WebGoat; two more real Layer 1 gaps found and fixed, same shape as previous ones
+
+**What the plan said:** With the labelled dataset at its full stated
+target (50/50) and the CWE-287 fix from earlier today logged, the
+highest-value remaining work per this file's own Section 7 build order
+is more real-repo QA, not more synthetic/Codex apps - only two real
+repositories had ever been scanned. The student was offered a choice
+between a repo that would stress precision (another well-built
+reference app, same character as the two already tested) and one that
+would stress recall for the first time (a repo with known, documented,
+planted vulnerabilities to check findings against, not just "does it
+crash or false-positive"); the student chose both.
+
+**What we actually did / found:**
+
+1. **Added `.qa-repos/spring-boot-realworld-example-app-20260904`**
+   (`gothinkster/spring-boot-realworld-example-app`, the official
+   RealWorld API spec reference backend - real JWT auth, DDD, CRUD) and
+   `.qa-repos/webgoat-20260904` (`WebGoat/WebGoat`, OWASP's official
+   deliberately-vulnerable teaching application), both shallow clones,
+   matching the existing two repos' naming/depth convention. VibeGuard
+   only ever parses Java source text into an AST - scanning WebGoat's
+   source is exactly as safe as scanning any other repository; nothing
+   in this pass ever executed or ran either application.
+
+2. **The new CWE-287 unguarded-secret-return detector (built earlier
+   today from exactly one observed case) validated itself
+   independently: 5/5 findings on WebGoat are genuine, correctly-
+   identified, deliberately-planted vulnerability lessons it had never
+   seen before** - a JWT secret leaked via `JWTSecretKeyEndpoint`, a
+   password salt returned from the "Missing Function Level Access
+   Control" lesson, a leaked API key from the Spring Boot Actuator-
+   misconfiguration lesson, and two JWT encode/decode helpers in the
+   WebWolf companion app. Zero manual tuning for WebGoat specifically.
+   WebGoat scanned cleanly (319/319 Java files parsed, no crashes) and
+   VibeGuard correctly rated the whole project **critical** at 0.843
+   confidence.
+
+3. **A genuine CWE-798 true positive on the RealWorld app**: a real,
+   high-entropy JWT signing secret
+   (`jwt.secret=nRvyYC4...`) committed directly in
+   `application.properties` in a real, public, actively-maintained
+   repository - further validation of CWE-798 on real code, not a
+   synthetic fixture.
+
+4. **Found and fixed: CWE-284's centralized-authorization detector was
+   blind to the older `WebSecurityConfigurerAdapter` Spring Security
+   style.** The RealWorld app's `WebSecurityConfig` extends
+   `WebSecurityConfigurerAdapter` and overrides a void-returning
+   `configure(HttpSecurity http)` method - not a bean method returning
+   `SecurityFilterChain`, the only shape
+   `has_centralized_authorization_rule` recognized (added
+   2026-09-02 after a different real-repo finding on
+   spring-petclinic-rest). The override contains the exact same
+   `.anyRequest().authenticated()` blanket rule the existing detector
+   already knows how to recognize once it looks at the right method -
+   this is a real, working, application-wide auth policy invisible to
+   CWE-284's annotation-only scan, same shape of gap as before, just a
+   different (older, still extremely common - it wasn't deprecated
+   until Spring Security 5.7 and not removed until 6.0) Spring Security
+   API generation. Fixed in both `has_centralized_authorization_rule`
+   (javalang) and `_has_centralized_rule_tree_sitter`: a method now
+   also counts as a plausible centralized-authorization site if it is
+   named `configure` with a single `HttpSecurity`-typed parameter
+   (`_is_legacy_web_security_configure_method` /
+   `_is_tree_sitter_centralizing_method`), matched by signature alone
+   (not by verifying the enclosing class actually extends
+   `WebSecurityConfigurerAdapter`) - the same coarse, name/shape-based
+   precision the rest of this module already uses, and unambiguous
+   enough in practice given how specific that exact signature is.
+   `_CENTRALIZED_AUTH_CAVEAT`'s wording updated from naming only
+   "SecurityFilterChain" to covering both styles, since it was now
+   factually incomplete. Verified against the real file: all 19 of the
+   RealWorld app's CWE-284 findings now correctly carry the caveat
+   (0 of 19 did before).
+
+5. **Found and fixed: `scanner.py`'s test-root exclusion didn't
+   recognize `src/it/`**, Maven Failsafe's standard integration-test
+   source root (distinct from `src/test/`, which was already handled).
+   WebGoat uses this convention for its integration tests; 14 of 241
+   findings (5.8%) were integration-test fixture literals (e.g. a
+   login form field literally named/valued `"password"` in test code)
+   being scanned as production credentials. `"it"` added to
+   `_TEST_DIR_NAMES`, carrying the exact same narrow, two-location
+   protection already relied on for `"test"`/`"tests"` (only a
+   top-level `src/it/` or `<root>/it/` is excluded; a package segment
+   named `"it"` nested deeper in the tree is left alone) - the same
+   false-exclusion risk this module's own docstring already documents
+   for `"test"`, extended consistently rather than re-litigated.
+   Verified against the real file: WebGoat's finding count dropped from
+   241 to 227 (exactly the 14 `src/it/` findings gone), and its
+   critical-severity count dropped from 32 to 18 (test-fixture
+   `"password"`-named literals no longer counted) - the project's
+   overall risk verdict is unaffected (still correctly critical), only
+   the noise is gone.
+
+**Tests/adversarial checks run:**
+- Full `pytest -q`: `293 passed` (was 288). `mypy .` / `ruff check .` /
+  `black --check .` / `git diff --check`: all clean.
+- 3 new tests for the legacy-`configure` detection
+  (`tests/test_cwe_284.py`): the real vulnerable-looking shape (which
+  is actually a real *protection*, correctly recognized), a negative
+  case (`configure(String name)` - a same-named method with a
+  different signature, must not match), and the Tree-sitter fallback
+  path. All 26 `test_cwe_284.py` tests pass, including the 23 that
+  predate today - no regression in the annotation-based detection this
+  extends.
+- 2 new tests for the `src/it/` exclusion (`tests/test_scanner.py`),
+  mirroring the existing `test`/`tests` tests exactly: the exclusion
+  itself, and the matching false-exclusion guard (a production package
+  literally named `it` nested deeper in the tree must still be
+  scanned). All 16 `test_scanner.py` tests pass.
+- Re-ran both fixes against the real files that motivated them (not
+  just the unit tests): confirmed above in items 4 and 5.
+- **A reproducible-but-out-of-scope finding**: an ad-hoc diagnostic
+  Python one-liner that calls `cwe_284`/`cwe_287`/`cwe_798`/`cwe_20`
+  directly over WebGoat's ~400 files in one long-running process
+  crashes (`exit 139`, native segfault) - but the real, user-facing
+  paths do not: `main.py`'s actual scan of the same repository
+  succeeded cleanly (twice, verified before and after these fixes),
+  and the full `pytest` suite (which exercises every rule module
+  extensively) passes cleanly with no crash. Bisected with `git
+  stash`: reproduces with the scanner.py `src/it/` change alone, and
+  also reproduces with all of today's changes fully reverted back to
+  this file's previous 2026-09-04 entry's committed state - i.e. it is
+  not caused by any of today's logic changes, only newly *encountered*
+  because excluding 14 files shifts which file lands in whatever
+  process-state-dependent position triggers it. Same character as the
+  pre-existing Tree-sitter-fallback crash already found and logged
+  earlier today (reproducible only in a specific position within a
+  long single-process batch, never in isolation, never through a real
+  entry point) - not re-investigated further for the same reason: out
+  of this task's scope, and does not affect real scanning through
+  `main.py` or the test suite.
+
+**Remaining limitations:** The legacy-`configure` detection is
+signature-only, same documented imprecision as the rest of this
+module - a coincidentally-named `configure(HttpSecurity http)` method
+that is not actually a Spring Security override would also match,
+though this is a vanishingly unlikely false positive given how
+specific that exact signature is in practice. The `src/it/` exclusion
+inherits the same narrow false-exclusion risk already accepted for
+`test`/`tests`. Both real-repo QA passes (this one and the earlier
+spring-petclinic-rest/quarkus-super-heroes one) still only cover 4
+repositories total - real-world coverage remains thin relative to the
+labelled dataset's 50 controlled/AI-generated projects, and more of it
+is still the highest-value remaining evaluation work per Section 7.
+The two long-running-process crashes found across today's real-repo
+QA (this entry and the earlier one) remain open, unfixed, logged as
+candidate future Layer 1 robustness items - real, but not user-facing
+through any currently-shipped entry point.
+
+**Why:** The student's direction was explicit ("fix both") once both
+gaps were reported with their evidence - both fixes are small,
+low-risk extensions of an already-established, already-successful
+pattern (this is the *third* time `has_centralized_authorization_rule`
+has needed broadening for a differently-styled real Spring Security
+config, and the *second* time the test-root exclusion has needed a
+new conventional name), not novel design work, which is why they were
+built and shipped in the same session rather than only logged as
+limitations the way the larger, riskier CWE-1035/OpenAPI-codegen gaps
+were deliberately left for later.
+
+**Effect on thesis chapters:** Chapter 5 gets a second real-repo QA
+round with a genuinely different, stronger character than the first:
+the first round mostly answered "does it crash or false-positive on
+real code," while this round is the project's first real recall check
+against an authoritative corpus of *known* vulnerabilities (WebGoat),
+and the CWE-287 detector's 5-for-5 result on lessons it was never
+tuned against is a strong, citable, independent validation point -
+built from one synthetic example, generalized correctly to real,
+unrelated, deliberately-planted vulnerabilities. Chapter 4 should note
+`has_centralized_authorization_rule` has now been broadened three
+times by real-repo findings (SecurityFilterChain, then this legacy
+`configure` style) and `_TEST_DIR_NAMES` twice (`test`/`tests`, then
+`it`) - a pattern of the same kind of gap recurring across different
+real codebases, worth naming explicitly as evidence that "scan more
+real repositories" is not a one-time evaluation step but a genuinely
+open-ended source of real findings. Chapter 3 should list all four
+`.qa-repos/` targets and their distinct roles (two general reference
+apps for false-positive/precision testing, RealWorld for
+auth-pattern-diversity testing, WebGoat for recall against known
+ground truth).
+
+---
+
+## [2026-09-08] - Full-project execution pass fixes combined thesis artifact failures
+
+**What the plan said:** Run the current project end to end, preserve existing
+work and the approved five-layer design, and fix confirmed operational blockers.
+The working tree already contained uncommitted Layer 1 rules, dataset, sample-app,
+test, and log changes on arrival; those were retained. No detection methodology,
+training labels, scoring policy, parser strategy, or dependencies changed in this
+pass.
+
+**What we actually did / found:** The initial suite passed all 293 tests and
+static gates, but a real `python -m evaluation.thesis_orchestrator` invocation
+failed while writing the combined manifest. The evaluation bundle path was
+resolved to an absolute path, while the run directory retained either a relative
+path or macOS's `/var` alias for `/private/var`. Consequently, `relative_to()`
+failed for the default relative output directory and for aliased absolute paths.
+The orchestrator now resolves its output root before creating any artifacts.
+
+Two related evaluation-workflow defects were also reproduced and corrected:
+- All three evaluation entrypoints parsed actual CLI arguments correctly but
+  recorded an empty argument list when called through `main()` without an
+  explicit list. They now record `sys.argv[1:]` in that case, preserving explicit
+  argument-list behavior.
+- The combined scan caught only `ValueError` from model/SHAP reporting, whereas
+  `main.py` already handled general reporting exceptions. An injected SHAP
+  `RuntimeError` escaped and prevented artifact capture. The combined scan now
+  uses the same exception boundary, retains findings and scores in JSON, and
+  records a controlled error with scan exit code 1 and no project-risk report.
+
+README instructions now cover the full scanner, combined artifact command,
+evaluation command, verification gates, and the distinction between scan exit
+status and successful evidence capture.
+
+**Tests/adversarial checks run:**
+- Reproduction tests failed before the fixes: 6 failed, 2 passed. They covered
+  absolute/relative/symlinked output paths, actual `sys.argv` handling, and an
+  injected SHAP runtime failure with existing findings to preserve.
+- The same targeted regression selection passed after the fixes: 8 passed.
+- Final full suite: **296 passed in 61.30 seconds**, clean exit code 0.
+- `mypy .`, `ruff check .`, `black --check .`, and `git diff --check`: clean.
+  Python 3.10.13; `pip check`: no broken requirements. No new CVE audit was run.
+- Rescanned all 50 labelled projects: 174 supported files, 99 candidate findings,
+  zero parse failures or rejected paths. Every project's finding trace keys and
+  rule scores matched its stored training example. All 50 SHAP baseline-plus-
+  contribution sums reconstructed the predicted probability within 1e-6.
+- Ran the real CLI and structured scan path against all four local QA checkouts:
+  555 supported files, zero parse failures/rejected paths, no runtime errors;
+  5 candidates on Quarkus Super Heroes, 20 on RealWorld, 1 on Petclinic, and
+  227 on WebGoat. These are execution checks and candidate counts, not a fresh
+  manual precision/recall adjudication. Exact checkout commits are recorded in
+  `dist/full-project-qa-20260908/real-repo-results.json`.
+- Real combined CLI runs succeeded after the fix with both relative output and
+  the macOS `/var` alias. Verified artifact inventory and relative references.
+  The account-recovery sample produced 3 candidates and an in-sample critical
+  prediction at approximately 0.684 confidence. Its complete scan/evaluation
+  bundle is under `dist/thesis_artifacts/vibeguard-thesis-run-20260908-173848/`.
+
+**Remaining limitations:** Current 50-project evaluation remains 0.70 in-sample
+accuracy, 0.58 leave-one-out accuracy (macro-F1 0.498148), and 0.40 fixed-baseline
+accuracy (macro-F1 0.422582). Working execution does not establish reliable
+generalization. Previously documented annotation/data-flow and dependency-
+resolution limits remain. The previously logged long-process native parser
+failures were not encountered in these runs and are not claimed fixed.
+AGENTS.md/CLAUDE.md still describe a 15-project dataset and two QA repositories;
+the current dataset/log describe 50 and four. Their historical overview needs
+synchronization in a documentation pass. Evidence under `dist/` is local and
+ignored by Git.
+
+**Why:** Existing tests exercised explicit Python argument lists and canonical
+absolute temporary paths, so they missed failures of the real shell invocation.
+The fixes restore the existing artifact contract without changing the analysis
+pipeline or interpreting candidate findings as confirmed vulnerabilities.
+
+**Effect on thesis chapters:** Chapter 4 can use the README's working combined
+command. Chapter 5 can cite the current measured results and artifact provenance,
+while retaining the limits above. No methodology change is introduced.
+
+**Freeze / handoff:** Layers 1-5 were not reopened by these evaluation-wrapper
+fixes. Recommend a fresh session run adversarial QA against the evaluation
+workflow changes before treating this repair scope as frozen. After that review,
+continue the independently adjudicated real-repository evaluation track.
+
+---
+
+## [2026-09-09] - Blind human-rater baseline added as a fourth evaluation signal alongside ground truth, Layer 4, and Layer 3
+
+**What the plan said:** Section 7's stated next work was continuing
+precision/recall evaluation against real, independently-maintained
+repositories. Separately from that track, the student ran a "Blind Risk
+Review" survey outside this codebase: 3 raters, each shown only a
+natural-language description of one project's endpoint/config behavior
+(no source code, no CWE labels), rating overall risk Low/Medium/High/
+Critical across 20 cases. The stated purpose was to get an independent
+human signal on what should count as "critical" or not, to complement
+the project's own single-rater ground-truth labels - not to replace or
+retrain against them.
+
+**What we actually did / found:**
+
+1. **Hand-mapped all 20 anonymized case descriptions to real projects**,
+   verified by exact route-string and config-literal matches rather than
+   inference (e.g. Case 14's quoted `gateway.upstream.apikey=sk-live-
+   gw-9f8e7d` is a literal, verbatim match against `multi-issue-gateway-
+   service/application.properties`). 15 cases map to `data/sample_apps/
+   ai-*` projects, 5 to `data/sample_apps/layer4_training/*` (the
+   original controlled Layer 4 training set) - the survey was drawn from
+   both dataset generations, not just the newest batch.
+
+2. **Built `evaluation/human_baseline.py`**, following `evaluation/
+   evaluate.py`'s existing shape (dataclasses, rich console tables,
+   optional `--json-out`). It re-runs the existing frozen Layer 1-5
+   pipeline unchanged on each mapped project and reports agreement
+   between the human median rating and three VibeGuard-side signals:
+   the committed dataset's ground-truth label, Layer 4's ML prediction,
+   and Layer 3's raw maximum rule-based finding severity. No detection
+   rule, scoring weight, or ML code was touched. Full pytest suite: 300
+   passed (up from 296 in the prior entry - 4 new tests added for this
+   module). `black`, `ruff`, `mypy` (strict): clean on the new files.
+
+3. **Quantitative result** (n=20 cases, n=3 raters - both small; stated
+   plainly, not smoothed over):
+
+   | Signal | Exact match vs. human median | Within 1 level | Mean signed distance |
+   |---|---|---|---|
+   | Ground-truth label (this project's manual labels) | 5/20 (25%) | 18/20 (90%) | +0.35 |
+   | Layer 4 ML predicted label | 7/20 (35%) | 18/20 (90%) | -0.15 |
+   | Layer 3 raw max rule severity | 6/19 (32%, 1 project had no findings) | 15/19 (79%) | +0.68 |
+
+   Human inter-rater agreement itself: exact 3-way agreement on only
+   3/20 cases, within-1-level on 16/20, mean spread 1.15 of 3 ordinal
+   levels - the humans disagreed with each other on this scale about as
+   often as any signal disagreed with their median, which bounds how
+   much weight any single number above should carry.
+
+4. **The clearest pattern: Layer 3's raw severity over-flags "High" on
+   exactly the hand-rolled-auth projects this project already knows
+   about and already corrects for.** Cases 08 (`ai-card-storage-
+   service`), 10 (`ai-api-key-service`), 11 (`ai-oauth-refresh-
+   service`), and 19 (`ai-password-reset-service`) - all of which use
+   the header/API-key-vs-configured-value or hashed-token pattern
+   documented as CWE-284's dominant real-world blind spot in the
+   2026-09-02 and 2026-09-03 entries - got a raw Layer 3 "High" in every
+   case, while independent blind humans rated 3 of the 4 uniformly
+   "Low" (case 11's raters: Low/Low/Low; case 19's: Low/Low/Low; case
+   08's: Low/Low/Low; case 10's median: Low). This is not a new
+   discovery - it corroborates, via a channel with no visibility into
+   this project's source or prior reasoning, a limitation already
+   identified and already the reason this project's ground-truth labels
+   are hand-corrected rather than taken from raw rule severity.
+
+5. **One new, specific observation: Case 17 (`ai-admin-report-export-
+   service`) is Layer 4's worst miss in this set.** Ground truth "high",
+   Layer 3 max severity "high", human median "medium" - all three point
+   the same direction - but Layer 4 predicts "low". Not investigated
+   further in this pass; flagged as a candidate for the ongoing
+   real-repository evaluation track rather than grounds to reopen the
+   frozen Layer 4 module on an n=1 disagreement.
+
+6. **One case where VibeGuard's judgment plausibly exceeds the human
+   raters':** Case 16 (`runnable-ai-orders-service`), the only project
+   in the whole labelled dataset secured by real Spring Security (HTTP
+   Basic required on every endpoint). Ground truth and Layer 4 both say
+   "low"; 2 of 3 human raters said "medium", plausibly reacting to the
+   case description's literal mention that "cross-site request forgery
+   protection [is] disabled" without the context that CSRF protection is
+   not meaningful for a non-cookie, stateless Basic-auth JSON API. Not
+   a tool defect - a reminder that a blind human baseline is itself
+   noisy in the opposite direction on specifics it lacks context for.
+
+7. **Committed data was de-identified before being added to a
+   public-release-intended repository.** One respondent submitted a
+   full name; `data/labeled/human_baseline_survey.csv` replaces all
+   three respondents' names/initials with `Rater 1`/`Rater 2`/`Rater 3`
+   (ordered by submission time) before being committed. The original
+   export is not part of this repository.
+
+**Why:** The student's stated goal was an independent check on the
+project's own notion of "critical", separate from and not derived from
+this codebase's existing labels or rules. Building it as a real
+evaluation module (rather than a one-off script) makes the comparison
+reproducible and re-runnable as more survey responses arrive, and
+keeps it consistent with how `evaluation/evaluate.py` already wraps the
+Layer 4 contract for thesis reporting.
+
+**Effect on thesis chapters:** Chapter 4/5 gains a genuine independent
+human baseline, not just ground-truth-vs-prediction metrics computed
+from labels this project itself assigned. It also gives Chapter 5 a
+concrete, quantified illustration of *why* this project's ground-truth
+labels are hand-corrected rather than taken directly from raw Layer 3
+severity: independent blind humans track the corrected labels
+(exact-match 25-35%, within-one 90%) better than they track raw rule
+severity (exact-match 32%, within-one 79%) on this sample. No change to
+Chapters 1-3's locked design decisions.
+
+**Freeze / handoff:** No frozen layer (1-5) was reopened; this is purely
+a new evaluation-track addition, same category as `evaluation/
+evaluate.py`. Recommend, as with the prior entry's own evaluation-
+wrapper changes: a fresh session should adversarially review
+`evaluation/human_baseline.py` (CSV parsing edge cases, the hand-built
+case-to-project map, the ordinal-distance math) before this specific
+module is treated as settled. Only 3 of a presumably larger distribution
+list have responded as of this entry (submitted 2026-09-04 to
+2026-09-06); whether to wait for more responses before citing this in
+the thesis narrative, or use it as-is with the small-n caveat stated
+above, is the student's call. Case 17's Layer 4 miss is a candidate data
+point for the ongoing real-repository evaluation track, not
+independently actioned here.

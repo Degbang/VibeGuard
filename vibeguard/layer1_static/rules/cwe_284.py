@@ -42,6 +42,9 @@ from vibeguard.layer1_static._tree_sitter_java import (
     declaration_name as ts_declaration_name,
 )
 from vibeguard.layer1_static._tree_sitter_java import (
+    named_children as ts_named_children,
+)
+from vibeguard.layer1_static._tree_sitter_java import (
     nearest_enclosing_type as ts_nearest_enclosing_type,
 )
 from vibeguard.layer1_static._tree_sitter_java import (
@@ -60,6 +63,7 @@ from vibeguard.layer1_static._tree_sitter_java import (
     walk_with_ancestors as ts_walk_with_ancestors,
 )
 from vibeguard.layer1_static.ast_parser import ParsedFile
+from vibeguard.layer1_static.rules._authorization_annotations import has_authorization_annotation
 from vibeguard.layer1_static.rules._endpoint_annotations import (
     has_endpoint_annotation,
     simple_name,
@@ -77,8 +81,21 @@ CWE_ID = "CWE-284"
 _SECURITY_FILTER_CHAIN_RETURN_TYPE = "SecurityFilterChain"
 _ANY_REQUEST_CALL = "anyRequest"
 _BLANKET_AUTHORIZATION_CALLS = frozenset({"authenticated", "permitAll", "denyAll"})
+
+# The now-deprecated (removed in Spring Security 6) WebSecurityConfigurerAdapter
+# base class configures authorization inside a void-returning `configure`
+# override rather than a bean method returning SecurityFilterChain - a
+# real, still extremely common pattern in Spring Security 5.x-era code,
+# found scanning a real repository (IMPLEMENTATION_LOG.md 2026-09-04).
+# Matched by method name and single-parameter type only - the same
+# coarse, name-based precision as everything else in this module - not by
+# checking the enclosing class actually extends WebSecurityConfigurerAdapter,
+# since that exact signature is unambiguous enough in practice on its own.
+_LEGACY_CONFIGURE_METHOD_NAME = "configure"
+_HTTP_SECURITY_PARAM_TYPE = "HttpSecurity"
 _CENTRALIZED_AUTH_CAVEAT = (
-    "Note: this project also declares a Spring Security SecurityFilterChain "
+    "Note: this project also declares centralized Spring Security configuration "
+    "(a SecurityFilterChain bean or a WebSecurityConfigurerAdapter override) "
     "with a project-wide '.anyRequest()' authorization rule elsewhere - this "
     "endpoint may already be covered by that rule depending on path-matching "
     "and runtime configuration (e.g. a conditional property) that is not "
@@ -87,22 +104,6 @@ _CENTRALIZED_AUTH_CAVEAT = (
 
 _TypeDeclaration: TypeAlias = javalang.tree.ClassDeclaration | javalang.tree.InterfaceDeclaration
 
-# Annotations that represent an explicit access-control decision,
-# whether restrictive or permissive. Any one of these present (on the
-# method or the class) means this rule has nothing to flag - the
-# *presence* of a decision is what's being checked for, not which one.
-_AUTHORIZATION_ANNOTATIONS = frozenset(
-    {
-        "RolesAllowed",
-        "PermitAll",
-        "DenyAll",
-        "Authenticated",  # Quarkus
-        "Secured",  # Spring Security (legacy)
-        "PreAuthorize",  # Spring Security
-        "PostAuthorize",  # Spring Security
-        "RequiresRoles",  # Apache Shiro
-    }
-)
 _HTTP_CLIENT_TYPE_ANNOTATIONS = frozenset(
     {
         "RegisterRestClient",  # Quarkus / MicroProfile REST client
@@ -155,14 +156,14 @@ def _check_tree_sitter_method(
     method_annotations = ts_annotation_names(source, method)
     if not has_endpoint_annotation(method_annotations):
         return None
-    if _has_authorization_annotation(method_annotations):
+    if has_authorization_annotation(method_annotations):
         return None
     enclosing_type = ts_nearest_enclosing_type(ancestors)
     if enclosing_type is not None:
         type_annotations = ts_annotation_names(source, enclosing_type)
         if _is_http_client_type(type_annotations):
             return None
-        if _has_authorization_annotation(type_annotations):
+        if has_authorization_annotation(type_annotations):
             return None
     method_name = ts_declaration_name(source, method)
     return Finding(
@@ -187,14 +188,14 @@ def _check_method(
     method_annotations = tuple(a.name for a in method.annotations)
     if not has_endpoint_annotation(method_annotations):
         return None
-    if _has_authorization_annotation(method_annotations):
+    if has_authorization_annotation(method_annotations):
         return None
     enclosing_type = _nearest_enclosing_type(path)
     if enclosing_type is not None:
         type_annotations = tuple(a.name for a in enclosing_type.annotations)
         if _is_http_client_type(type_annotations):
             return None
-        if _has_authorization_annotation(type_annotations):
+        if has_authorization_annotation(type_annotations):
             return None
     line = method.position.line if method.position else None
     return Finding(
@@ -224,10 +225,6 @@ def _nearest_enclosing_type(path: tuple[object, ...]) -> _TypeDeclaration | None
         ):
             return ancestor
     return None
-
-
-def _has_authorization_annotation(annotations: tuple[str, ...]) -> bool:
-    return any(simple_name(a) in _AUTHORIZATION_ANNOTATIONS for a in annotations)
 
 
 def _is_http_client_type(annotations: tuple[str, ...]) -> bool:
@@ -263,13 +260,26 @@ def has_centralized_authorization_rule(parsed_file: ParsedFile) -> bool:
     if parsed_file.tree is None:
         return False
     for _path, method in parsed_file.tree.filter(javalang.tree.MethodDeclaration):
-        if _returns_security_filter_chain(method) and _has_blanket_authorization_call(method):
+        if not _has_blanket_authorization_call(method):
+            continue
+        if _returns_security_filter_chain(method) or _is_legacy_web_security_configure_method(
+            method
+        ):
             return True
     return False
 
 
 def _returns_security_filter_chain(method: javalang.tree.MethodDeclaration) -> bool:
     return getattr(method.return_type, "name", None) == _SECURITY_FILTER_CHAIN_RETURN_TYPE
+
+
+def _is_legacy_web_security_configure_method(method: javalang.tree.MethodDeclaration) -> bool:
+    if method.name != _LEGACY_CONFIGURE_METHOD_NAME:
+        return False
+    if len(method.parameters) != 1:
+        return False
+    param_type = getattr(method.parameters[0].type, "name", None)
+    return param_type == _HTTP_SECURITY_PARAM_TYPE
 
 
 def _has_blanket_authorization_call(method: javalang.tree.MethodDeclaration) -> bool:
@@ -288,10 +298,7 @@ def _has_centralized_rule_tree_sitter(parsed_file: ParsedFile) -> bool:
     for node in ts_walk(parsed.tree.root_node):
         if node.type != "method_declaration":
             continue
-        return_type_node = ts_child_by_field(node, "type")
-        if return_type_node is None:
-            continue
-        if ts_type_name(parsed.source, return_type_node) != _SECURITY_FILTER_CHAIN_RETURN_TYPE:
+        if not _is_tree_sitter_centralizing_method(parsed.source, node):
             continue
         invocation_names = {
             ts_node_text(parsed.source, name_node)
@@ -306,6 +313,36 @@ def _has_centralized_rule_tree_sitter(parsed_file: ParsedFile) -> bool:
         ):
             return True
     return False
+
+
+def _is_tree_sitter_centralizing_method(source: bytes, method: Node) -> bool:
+    """Whether ``method`` is a plausible centralized-authorization declaration site.
+
+    Either a ``SecurityFilterChain``-returning bean method (the current
+    Spring Security style) or a legacy ``configure(HttpSecurity)``
+    override - see ``_is_legacy_web_security_configure_method``'s
+    docstring for why the latter is matched by signature alone.
+    """
+    return_type_node = ts_child_by_field(method, "type")
+    if (
+        return_type_node is not None
+        and ts_type_name(source, return_type_node) == _SECURITY_FILTER_CHAIN_RETURN_TYPE
+    ):
+        return True
+    name_node = ts_child_by_field(method, "name")
+    if name_node is None or ts_node_text(source, name_node) != _LEGACY_CONFIGURE_METHOD_NAME:
+        return False
+    parameters_node = ts_child_by_field(method, "parameters")
+    if parameters_node is None:
+        return False
+    parameters = ts_named_children(parameters_node)
+    if len(parameters) != 1:
+        return False
+    param_type_node = ts_child_by_field(parameters[0], "type")
+    return (
+        param_type_node is not None
+        and ts_type_name(source, param_type_node) == _HTTP_SECURITY_PARAM_TYPE
+    )
 
 
 def apply_centralized_authorization_context(

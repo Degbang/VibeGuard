@@ -1,0 +1,1 @@
+package com.vibeguard.samples.recovery; import org.springframework.boot.*; import org.springframework.boot.autoconfigure.*; @SpringBootApplication public class RecoveryApplication {public static void main(String[] args){SpringApplication.run(RecoveryApplication.class,args);}}

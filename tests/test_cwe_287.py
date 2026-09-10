@@ -179,3 +179,211 @@ def test_detect_in_java_flags_credential_getter_comparison_on_tree_sitter_fallba
     assert result.tree_sitter is not None
     findings = detect_in_java(result)
     assert [(f.identifier, f.line) for f in findings] == [("getPassword", 7)]
+
+
+def test_detect_in_java_flags_unguarded_endpoint_that_returns_a_fresh_token(
+    tmp_path: Path,
+) -> None:
+    """The exact real-world shape that motivated this check (2026-09-04).
+
+    A self-service recovery endpoint that generates a token from only an
+    email address (no proof of ownership) and hands it straight back in
+    the response, instead of delivering it out-of-band.
+    """
+    java_file = tmp_path / "RecoveryController.java"
+    java_file.write_text(
+        "import org.springframework.web.bind.annotation.*;\n"
+        "import java.util.*;\n"
+        "public class RecoveryController {\n"
+        '    @PostMapping("/request")\n'
+        "    public String request(String email) {\n"
+        "        String token = UUID.randomUUID().toString();\n"
+        "        store.put(token, email);\n"
+        '        return Map.of("recoveryToken", token).toString();\n'
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    findings = detect_in_java(result)
+
+    assert len(findings) == 1
+    assert findings[0].identifier == "token"
+    assert "request" in findings[0].message
+    assert "no preceding guard" in findings[0].message
+
+
+def test_detect_in_java_does_not_flag_endpoint_guarded_by_if_statement(
+    tmp_path: Path,
+) -> None:
+    """A manual header/key check before issuance is a real, if hand-rolled, guard."""
+    java_file = tmp_path / "TokenController.java"
+    java_file.write_text(
+        "import org.springframework.web.bind.annotation.*;\n"
+        "import java.util.*;\n"
+        "public class TokenController {\n"
+        '    @PostMapping("/issue")\n'
+        "    public String issue(String supplied) {\n"
+        '        if (!internalKey.equals(supplied)) return "no";\n'
+        "        String token = UUID.randomUUID().toString();\n"
+        "        return token;\n"
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    assert detect_in_java(result) == ()
+
+
+def test_detect_in_java_does_not_flag_endpoint_guarded_by_authorization_annotation(
+    tmp_path: Path,
+) -> None:
+    """Framework-enforced method security is a guard even with no manual if-check."""
+    java_file = tmp_path / "AdminTokenController.java"
+    java_file.write_text(
+        "import org.springframework.web.bind.annotation.*;\n"
+        "import org.springframework.security.access.prepost.PreAuthorize;\n"
+        "import java.util.*;\n"
+        "public class AdminTokenController {\n"
+        "    @PreAuthorize(\"hasRole('ADMIN')\")\n"
+        '    @PostMapping("/issue")\n'
+        "    public String issue() {\n"
+        "        String token = UUID.randomUUID().toString();\n"
+        "        return token;\n"
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    assert detect_in_java(result) == ()
+
+
+def test_detect_in_java_does_not_flag_a_token_that_is_never_returned(
+    tmp_path: Path,
+) -> None:
+    """The real ai-password-reset-service shape: hash-and-store, return nothing."""
+    java_file = tmp_path / "PasswordResetController.java"
+    java_file.write_text(
+        "import org.springframework.web.bind.annotation.*;\n"
+        "import java.util.*;\n"
+        "public class PasswordResetController {\n"
+        '    @PostMapping("/request")\n'
+        "    public String request(String email) {\n"
+        "        String token = UUID.randomUUID().toString();\n"
+        "        store.put(hash(token), email);\n"
+        '        return "accepted";\n'
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    assert detect_in_java(result) == ()
+
+
+def test_detect_in_java_does_not_flag_a_credential_named_method_call_in_the_return(
+    tmp_path: Path,
+) -> None:
+    """The real ai-account-recovery-service `complete` shape: validating an
+
+    incoming token, not returning a freshly issued one. `complete.token()`
+    is a method call, not a value reference - must not be confused with the
+    bare-variable pattern this check targets, a real false positive found
+    and fixed during testing (2026-09-04).
+    """
+    java_file = tmp_path / "RecoveryController.java"
+    java_file.write_text(
+        "import org.springframework.web.bind.annotation.*;\n"
+        "public class RecoveryController {\n"
+        '    @PostMapping("/complete")\n'
+        "    public String complete(Complete complete) {\n"
+        '        return tokens.remove(complete.token()) == null ? "bad" : "ok";\n'
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    assert detect_in_java(result) == ()
+
+
+def test_detect_in_java_does_not_flag_a_non_endpoint_method(tmp_path: Path) -> None:
+    """A private/unreachable helper returning a token isn't externally exploitable."""
+    java_file = tmp_path / "TokenHelper.java"
+    java_file.write_text(
+        "import java.util.*;\n"
+        "public class TokenHelper {\n"
+        "    public String mint() {\n"
+        "        String token = UUID.randomUUID().toString();\n"
+        "        return token;\n"
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    assert detect_in_java(result) == ()
+
+
+def test_detect_in_java_flags_unguarded_issuance_on_tree_sitter_fallback(
+    tmp_path: Path,
+) -> None:
+    """Tree-sitter fallback files must still feed the unguarded-issuance check."""
+    java_file = tmp_path / "ModernRecoveryController.java"
+    java_file.write_text(
+        "import org.springframework.web.bind.annotation.*;\n"
+        "import java.util.*;\n"
+        "public class ModernRecoveryController {\n"
+        "    int helper(int level) {\n"
+        "        return switch (level) {\n"
+        "            case 1 -> 1;\n"
+        "            default -> 0;\n"
+        "        };\n"
+        "    }\n"
+        '    @PostMapping("/request")\n'
+        "    public String request(String email) {\n"
+        "        String token = UUID.randomUUID().toString();\n"
+        "        store.put(token, email);\n"
+        "        return token;\n"
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    assert result.tree_sitter is not None
+    findings = detect_in_java(result)
+    assert [(f.identifier, f.line) for f in findings] == [("token", 10)]
+
+
+def test_detect_in_java_does_not_flag_guarded_issuance_on_tree_sitter_fallback(
+    tmp_path: Path,
+) -> None:
+    """Tree-sitter fallback must preserve the same if-guard exclusion."""
+    java_file = tmp_path / "ModernTokenController.java"
+    java_file.write_text(
+        "import org.springframework.web.bind.annotation.*;\n"
+        "import java.util.*;\n"
+        "public class ModernTokenController {\n"
+        "    int helper(int level) {\n"
+        "        return switch (level) {\n"
+        "            case 1 -> 1;\n"
+        "            default -> 0;\n"
+        "        };\n"
+        "    }\n"
+        '    @PostMapping("/issue")\n'
+        "    public String issue(String supplied) {\n"
+        '        if (!internalKey.equals(supplied)) return "no";\n'
+        "        String token = UUID.randomUUID().toString();\n"
+        "        return token;\n"
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    assert result.tree_sitter is not None
+    assert detect_in_java(result) == ()
