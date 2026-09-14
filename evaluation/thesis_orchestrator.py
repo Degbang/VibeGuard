@@ -1,9 +1,19 @@
-"""Combined thesis orchestrator for scan-time and evaluation artifacts."""
+"""Combined thesis orchestrator for scan-time and evaluation artifacts.
+
+When run as a script (``python -m evaluation.thesis_orchestrator``, not
+imported and called as ``main()`` directly), the scan half of this run
+executes the frozen Layer 1-5 pipeline in-process (see ``_execute_scan``),
+carrying the same native-crash exposure ``main.py`` itself guards
+against - the whole combined run happens inside a supervised child
+process for the same reason; see
+``process_supervisor.run_as_supervised_subprocess``'s docstring.
+"""
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
@@ -12,6 +22,7 @@ from io import StringIO
 from pathlib import Path
 
 import main as scan_cli
+import process_supervisor
 from evaluation import thesis_run
 from evaluation.evaluate import _DEFAULT_MODEL_CONTRACT, _module_invocation
 from vibeguard.layer1_static._parsing_guards import ParseStatus
@@ -865,4 +876,12 @@ def _required_float(value: object, context: str) -> float:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    if process_supervisor.looks_like_supervisor_worker_token(
+        os.environ.get(process_supervisor.SUPERVISOR_WORKER_ENV_VAR)
+    ):
+        raise SystemExit(main())
+    raise SystemExit(
+        process_supervisor.run_as_supervised_subprocess(
+            [sys.executable, "-m", "evaluation.thesis_orchestrator", *sys.argv[1:]]
+        )
+    )

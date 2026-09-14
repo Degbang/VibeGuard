@@ -9,6 +9,7 @@ from vibeguard.layer5_report.explainer import (
     SHAPContribution,
     explain_project_risk,
 )
+from vibeguard.layer5_report.plain_summary import build_plain_summary
 from vibeguard.layer5_report.report import (
     ProjectRiskReport,
     build_project_risk_report,
@@ -19,6 +20,7 @@ __all__ = [
     "ProjectRiskExplanation",
     "ProjectRiskReport",
     "SHAPContribution",
+    "build_plain_summary",
     "build_project_risk_report",
     "explain_project_risk",
     "render_console_report",

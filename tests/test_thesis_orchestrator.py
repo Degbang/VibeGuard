@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -13,6 +14,24 @@ from evaluation import thesis_orchestrator
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REAL_CONTRACT_PATH = REPO_ROOT / "data" / "labeled" / "layer4_random_forest_contract.json"
 FIXTURES_DIR = REPO_ROOT / "tests" / "fixtures"
+
+
+def test_real_script_invocation_is_supervised_and_transparent_on_success() -> None:
+    """Running ``python -m evaluation.thesis_orchestrator --help`` as a
+    genuine subprocess (no worker env var set, so __main__ takes the
+    supervisor branch) must still exit 0 - proving the supervisor wrapper
+    added for this entry point adds one layer of re-exec without changing
+    its observable exit-code contract. Mirrors main.py's own equivalent
+    test; the generic crash/hang/token behavior itself is covered by
+    tests/test_process_supervisor.py."""
+    completed = subprocess.run(
+        [sys.executable, "-m", "evaluation.thesis_orchestrator", "--help"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0
 
 
 @pytest.mark.parametrize("output_kind", ["absolute", "relative", "symlink"])

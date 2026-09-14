@@ -5491,3 +5491,1247 @@ the thesis narrative, or use it as-is with the small-n caveat stated
 above, is the student's call. Case 17's Layer 4 miss is a candidate data
 point for the ongoing real-repository evaluation track, not
 independently actioned here.
+
+---
+
+## [2026-09-10] - CWE-284 extended with a per-method hand-rolled-authorization caveat, targeting the dominant blind-spot pattern the human-baseline comparison just confirmed
+
+**What the plan said:** The previous entry's human-baseline comparison
+flagged four candidate fixes for known limitations. Reviewed together
+with the student, three were judged either architecturally locked
+(CWE-1035's offline-only scope, per Section 3's no-network-calls
+constraint), not yet warranted by a concrete observed case (deeper
+dataflow tracing), or bigger than a quick fix (the Tree-sitter native
+crash, investigated further below but not resolved). The fourth -
+extending CWE-284's centralized-authorization caveat mechanism to also
+cover the hand-rolled header/API-key pattern - was scoped and approved
+for this session.
+
+**What we actually did / found:**
+
+1. **Investigated the Tree-sitter crash further before setting it aside.**
+   Reproduced it directly (a raw multi-repo `rglob` across all four
+   `.qa-repos/`, bypassing `scanner.py`'s own exclusions, the same way
+   the original finding did): a genuine `SIGSEGV` (exit 139), not a
+   catchable Python exception. Ruled out the two cheapest explanations
+   before stopping: the specific file that crashed
+   (`UserInterceptor.java`) parses correctly in isolation, and 200
+   repeated parses of that same file in one process never crash: it is
+   not the file. Patching `_tree_sitter_java.py` in-memory to build a
+   fresh `Parser`/`Language` per call instead of reusing the
+   module-level singleton pushed the crash later in the run but did
+   **not** eliminate it - ruling out simple parser-object reuse as the
+   sole cause too. What is left points at something inside the
+   `tree-sitter`/`tree-sitter-java` 0.26.0/0.23.5 Python binding itself,
+   accumulating native state across many *distinct* ASTs in one
+   long-running process. A Python `try/except` cannot catch a segfault
+   at all, so the only real structural fix (isolating each file's parse
+   in its own subprocess, extending `_parsing_guards.py`'s existing
+   hang-timeout philosophy to native crashes) is a genuine architecture
+   change, not a patch. Confirmed once more that the real CLI path
+   (`scanner.py`) never reaches the file volume/variety that triggers
+   this. Not fixed - documented precisely instead of left as the vaguer
+   "278 files" note from the entry that first found it.
+
+2. **Built the CWE-284 extension**, in `vibeguard/layer1_static/rules/cwe_284.py`:
+   `has_inline_header_guard()` (javalang) and its Tree-sitter counterpart
+   detect a method with an `@RequestHeader`-annotated parameter compared
+   via `.equals()`/`.contentEquals()`/`MessageDigest.isEqual()` against
+   another value, on an `if` branch that bails out (`return`/`throw`) -
+   the exact shape of `ai-api-key-service`'s and `ai-oauth-refresh-
+   service`'s real endpoints (`if (!adminKey.equals(supplied)) return
+   ResponseEntity.status(401).build();`), including the `||`-combined
+   condition in `oauth-refresh-service.refresh()`. `apply_hand_rolled_
+   guard_context()` appends a caveat to the matching CWE-284 finding's
+   message - never suppresses it, same fail-closed discipline as the
+   existing `apply_centralized_authorization_context`. Unlike that
+   project-wide mechanism, this one is scoped **per-method**: a guarded
+   endpoint's caveat does not leak onto an unguarded sibling endpoint in
+   the same file, which is more precise than the existing centralized
+   case and was verified directly with a dedicated test
+   (`test_apply_hand_rolled_guard_context_appends_caveat_only_to_guarded_method`).
+   Wired into both real call sites (`main.py`'s `_run_rules` and
+   `evaluation/human_baseline.py`'s `_run_all_rules`;
+   `evaluation/thesis_orchestrator.py` reuses `main.py`'s function, so it
+   is covered automatically). Fixing a latent bug the new code exposed:
+   both call sites previously passed the same generator expression to
+   what is now two sequential consumers - a generator is single-use, so
+   the second call would silently have seen zero parsed files. Now
+   materialized to a tuple once and reused.
+
+3. **A real gap the first version of the matcher had, caught by its own
+   test, not shipped silently.** The initial `MessageDigest.isEqual`
+   test used `isEqual(vaultKey, supplied)` conceptually but the matcher
+   only recognised a header parameter referenced as a bare variable, not
+   as `supplied.getBytes()` - the argument `MessageDigest.isEqual`
+   actually requires (`byte[]`, not `String`), and therefore the
+   *realistic*, idiomatic shape for this exact constant-time-comparison
+   pattern, not an edge case. Fixed in both parser paths before this was
+   logged as done.
+
+4. **Deliberately scoped out: a second real shape already in the
+   dataset.** `ai-card-storage-service`'s guard is delegated through a
+   private helper method (`if (!allowed(key)) ...` where `allowed(String
+   key)` does the actual `vaultKey.equals(key)` comparison) - one hop of
+   indirection this version does not follow. Verified directly: it still
+   correctly gets no caveat (neither a false suppression nor a crash).
+   Deferred rather than built now, for the same reason this project has
+   repeatedly deferred similar one-hop extensions elsewhere (see the
+   2026-09-04 CWE-287 entry's own "unobserved-so-far edge case" framing):
+   each hop of indirection followed is a meaningfully bigger, harder-to-
+   review unit of work, and this session's real, observed need (the two
+   inline-comparison endpoints) is already fully addressed without it.
+
+5. **Verified this cannot change any severity, prediction, or accuracy
+   number, only finding text**, before treating the scope as done: grepped
+   `message`/`message_length` through `layer3_scoring/scorer.py` and
+   `layer4_ml/predictor.py` - neither is read by either. Confirmed
+   directly: `evaluation/evaluate.py`'s in-sample/leave-one-out/baseline
+   numbers (0.700/0.580/0.400 accuracy) and `evaluation/human_baseline.py`'s
+   agreement summary (5/18/6 exact-match counts) are byte-identical before
+   and after this change. `data/labeled/layer4_projects.json`'s stored
+   finding text for `ai-api-key-service`/`ai-oauth-refresh-service` is now
+   stale relative to a fresh scan (cosmetically only - a live rescan would
+   now attach the new caveat to those two projects' CWE-284 findings); not
+   regenerated in this pass, logged as a known, low-priority follow-up
+   rather than expanding this session's scope.
+
+**Tests/adversarial checks run:**
+- 10 new unit/integration tests in `tests/test_cwe_284.py`: direct
+  comparison guard; the `||`-combined-condition guard
+  (`oauth-refresh-service.refresh()`'s exact shape);
+  `MessageDigest.isEqual()` with `.getBytes()` arguments (caught the real
+  gap in point 3 above); a blank-check with no caller-supplied reference
+  (`ai-payments-service`'s exact shape) correctly *not* matching; an
+  unguarded method correctly not matching; a header parameter with no
+  comparison at all correctly not matching; per-method caveat precision
+  (guarded/unguarded siblings in one file); no-op when absent; never
+  drops findings; and the Tree-sitter fallback path via a `switch`-
+  expression-forcing fixture, per `tests/test_java_rule_fallback_coverage.py`'s
+  dual-parser requirement.
+- Full `pytest -q`: **310 passed** (up from 300). `mypy .` / `ruff check .`
+  / `black --check .` / `git diff --check`: all clean.
+- Ran the real CLI (`main.py`) against `ai-api-key-service`: both
+  `issue` and `revoke` findings now carry the caveat in the actual
+  console report, not just in a unit test.
+- Ran the detector directly against five real sample apps to confirm
+  precision against every real shape in the dataset at once:
+  `ai-api-key-service` (2/2 caveated, correct), `ai-oauth-refresh-service`
+  (2/2 caveated, correct), `ai-payments-service` (0/2 caveated, correct -
+  blank-check only), `ai-card-storage-service` (0/2 caveated, correct -
+  helper-indirection, deliberately out of scope), `ai-account-recovery-
+  service` (0/2 caveated, correct - genuinely unguarded, the real
+  account-takeover bug from the 2026-09-04 entry must never be
+  suppressed by this).
+
+**Remaining limitations:** The helper-indirection shape (point 4) is
+undetected by design, not by oversight. The Tree-sitter native crash
+(point 1) is now more precisely characterized but still open - a real
+fix needs subprocess-level isolation, a bigger change than this
+session's scope. `data/labeled/layer4_projects.json`'s stored finding
+text for the two affected projects is stale relative to a fresh scan
+(point 5) - cosmetic only, does not affect any label, feature, or score.
+
+**Why:** The human-baseline comparison independently confirmed (blind
+raters converging on "Low" for exactly the projects this pattern
+affects) what the dataset's hand-corrected ground-truth labels already
+encoded but the raw Layer 3 rule severity could not see. Section 4's
+fail-closed discipline ruled out a suppression from the start: this adds
+an honest caveat to a finding that must keep existing, the same
+precedent already set for the centralized Spring Security case, extended
+to the pattern this project's own data shows is actually dominant (~19
+of 20 real protection mechanisms observed across the AI-generated
+batches, not Spring Security).
+
+**Effect on thesis chapters:** Chapter 4 gains a second, more common
+real-world CWE-284 caveat mechanism, and a concretely diagnosed (if not
+yet resolved) native-crash investigation with a stated real fix
+(subprocess isolation) rather than a vague "278 files" note. Chapter 5's
+discussion of CWE-284's annotation-blindness limitation can now cite a
+partial, measured mitigation for the dominant pattern specifically,
+while stating plainly what remains uncovered (helper-indirection) and
+why it was deferred rather than built speculatively.
+
+**Freeze / handoff:** Layer 1 is reopened by this entry, on the same
+"real-world/human-validation evidence found a blocking gap" grounds
+already established repeatedly for it - re-freeze once a fresh session
+has run adversarial QA against this specific change (the fail-closed
+guarantee, the per-method precision boundary, and false-positive risk on
+an unrelated header comparison that happens to use `.equals()` for
+non-auth reasons, are the three things most worth trying to break).
+Recommend that session also decide whether to regenerate
+`layer4_projects.json`'s stale finding text (point 5) while it is there.
+The Tree-sitter crash investigation (point 1) and the helper-indirection
+gap (point 4) are both logged as open, scoped candidates for a future
+session, not silently dropped.
+
+---
+
+## [2026-09-10] - Tree-sitter native crash: root cause narrowed further, real risk found to be near-zero through the actual CLI, and a fail-closed supervisor built for main.py specifically
+
+**What the plan said:** The previous entry's investigation characterized
+the Tree-sitter crash precisely but left it open, proposing subprocess
+isolation as "the real fix" without having actually scoped what that
+would require. Asked directly to fix it, the scoping work below found
+that proposal was understated - true per-file process isolation is
+blocked by `tree_sitter.Tree`/`Node` objects not being picklable, not
+just "more overhead." Given a choice between building a whole-process
+supervisor for `main.py` only, extending the same pattern to all three
+entry points, or documenting only, the first was chosen.
+
+**What we actually did / found:**
+
+1. **The crash does not reproduce through the actual product CLI, at
+   all, even under deliberately maximal stress - re-confirmed, not
+   assumed.** `main.py` run directly against `.qa-repos/webgoat-20260904`
+   (the single worst real case on file count/variety): 3/3 clean runs,
+   matching the original 2026-09-04 finding. Escalated further than the
+   previous entry did: ran `main.py` against **all four** `.qa-repos/`
+   combined in one invocation (898 Java files, the same scale that
+   reliably crashed a bare `scan_directory()` call) - still clean, still
+   a valid `critical` report (253 findings, 0.843-class confidence
+   range consistent with the single-repo run). The crash is real, but
+   through every real invocation path tested, it is confined to small,
+   minimal-import-graph processes calling `scan_directory()` directly,
+   not to `main.py` itself.
+
+2. **Ruled out both cheap causes precisely, this time with a controlled
+   comparison, not just "it still crashed."** Confirmed `subprocess.run`
+   reports a negative returncode (`-11` for `SIGSEGV`) on this platform
+   via a minimal `ctypes` null-dereference, establishing the detection
+   mechanism works before building anything around it. Confirmed
+   `tree-sitter` (0.26.0) and `tree-sitter-java` (0.23.5) are both
+   already the latest available release on PyPI - no upgrade path
+   exists to test. The remaining, unfalsified explanation: this is a
+   real bug in the native binding that is sensitive to the *overall*
+   process memory footprint at the time of the crash, not to file count,
+   thread reuse, or parser-object reuse alone - a small script with only
+   this project's Layer 1 imports loaded triggers it; `main.py`'s full
+   import graph (`rich`, `scikit-learn`, `shap`, `numpy`, every
+   `vibeguard` layer) does not, consistently, across every test run.
+   This was not fully explained at the C-extension level (out of
+   proportion to chase further for a thesis-scope robustness item) but
+   is now precisely characterized, not vaguely gestured at.
+
+3. **Built a whole-process supervisor in `main.py`, scoped to `main.py`
+   only** (the actual product entry point - `evaluation/human_baseline.py`
+   and `evaluation/thesis_orchestrator.py` call the scanning code
+   in-process and remain unprotected, a deliberate scope choice, not an
+   oversight). `__main__` now re-execs itself as a child process
+   (`subprocess.run([sys.executable, __file__, *argv], env=...)`) unless
+   an internal `VIBEGUARD_SUPERVISOR_WORKER` environment variable is
+   already set, in which case it runs `main()` directly - this is what
+   the child sees, so there is no unbounded re-exec recursion. A normal
+   exit (0 or 1, `main()`'s existing contract) passes through completely
+   unchanged - the wrapper is invisible on the success and ordinary-error
+   paths, verified directly. A negative returncode (child killed by a
+   signal) is translated into an explicit stderr message plus a new,
+   distinct exit code (`3`, chosen specifically not to collide with
+   `main()`'s existing 0/1 meanings) instead of a silent process death -
+   this is the actual fail-closed guarantee Section 4 requires and the
+   status quo did not provide for this specific failure mode (a segfault
+   cannot be caught by any Python `try/except` anywhere in this
+   codebase, so before this change it would have looked like the tool
+   just stopped, with zero diagnostic output and no indication results
+   were incomplete).
+
+4. **Could not validate the crash-handling branch with a genuinely live
+   segfault through the real worker path, because it does not reproduce
+   there** (see point 1) - this is itself informative, not a testing
+   gap papered over. Validated instead with the standard, correct
+   technique for this situation: `subprocess.run` mocked to return a
+   negative code, confirming the detection/translation logic is correct
+   in isolation, plus a real subprocess-level test of the actual
+   `__main__` dispatch (`python main.py <clean file>` invoked for real,
+   no worker env var set) confirming the supervisor is transparent on
+   the success path end to end. Deliberately did not attempt to bake a
+   live, unreliable native crash into the test suite - flaky-by-design
+   native-crash tests are worse than mocked ones, not more rigorous.
+
+**Tests/adversarial checks run:**
+- 4 new tests in `tests/test_main.py`: normal-exit pass-through (both 0
+  and 1, plus verifying the exact subprocess command/env constructed);
+  signal-death detection and fail-closed translation; a real end-to-end
+  subprocess invocation of the actual `__main__` entry point confirming
+  transparency on success.
+- Full `pytest -q`: **313 passed** (up from 310). `mypy .` / `ruff check .`
+  / `black --check .` / `git diff --check`: all clean.
+- Manual verification beyond the automated tests: `main.py` against a
+  clean fixture (exit 0, unchanged), against `ai-api-key-service` (exit
+  1, output byte-identical with and without the supervisor wrapper via
+  the worker env var), and the 898-file four-repo stress run described
+  in point 1.
+
+**Remaining limitations:** The underlying native-binding bug itself is
+contained, not fixed or explained at the root-cause level - a genuine
+explanation would require instrumenting the C extension directly
+(valgrind/ASan on the native library), disproportionate to this
+project's scope. `evaluation/human_baseline.py` and `evaluation/
+thesis_orchestrator.py` remain exposed to the same failure mode in
+principle, though neither has ever reproduced it in any test run either
+(both go through the same `scan_directory()`/`_run_rules()` path
+`main.py`'s successful stress test exercised, just not via `main.py`'s
+own subprocess boundary). Given the crash has never reproduced through
+any process with this project's full import graph loaded, real-world
+risk through any of the three entry points looks low - this session's
+choice was to protect the one with a real audience (a thesis reviewer
+or downstream user running the CLI directly) rather than build the same
+plumbing three times for a risk that has not materialized anywhere it
+was tested.
+
+**Why:** A segfault is unlike every other failure mode this codebase
+already guards against (parse timeout, oversized file, malformed
+syntax) in one specific way: it cannot be caught, at all, by any code
+this project controls. Every other robustness guarantee in Section 5
+assumes Python-level exception handling works; this is the one case
+where that assumption is false, which is exactly why it needed a
+process-boundary answer rather than another `try/except`.
+
+**Effect on thesis chapters:** Chapter 4/5's robustness discussion
+(Section 5's stated "legitimate 'robustness' evaluation point") gains a
+concrete, non-hypothetical example: a real native crash was found, its
+trigger conditions were narrowed as far as reasonably possible without
+native-level tooling, and a fail-closed guarantee was built for it where
+none existed before - a defensible answer to "what happens if the
+parser itself crashes," which a purely rule-based static-analysis
+thesis chapter would otherwise have no story for at all.
+
+**Freeze / handoff:** This is a CLI-entry-point robustness addition, not
+a change to any of Layer 1-5's detection/scoring/ML logic - no frozen
+layer's detection behavior changed. Recommend a fresh session
+specifically try to break the supervisor itself (a child that hangs
+instead of crashing - already covered by the existing per-file timeout,
+worth confirming; a child that exits with an unusual but legitimate
+positive code; environment-variable injection edge cases) before
+treating this as settled. Extending the same pattern to `evaluation/
+human_baseline.py` and `evaluation/thesis_orchestrator.py` remains a
+logged, deliberately deferred option, not a plan.
+
+---
+
+## [2026-09-10] - Supervisor QA: hang and env-var bypass reproduced and fixed
+
+**What the plan said:** The previous entry handed off "recommend a fresh
+session specifically try to break the supervisor itself (a child that
+hangs instead of crashing - already covered by the existing per-file
+timeout, worth confirming; a child that exits with an unusual but
+legitimate positive code; environment-variable injection edge cases)
+before treating this as settled."
+
+**What we actually did / found:**
+
+1. **The "covered by the existing per-file timeout" assumption was only
+   half true.** `_parsing_guards.run_with_timeout` bounds Layer 1
+   parsing only (`ast_parser.py`/`config_parser.py`/`pom_parser.py`).
+   CWE rule execution (`_run_rules`), Layer 4 ML training/prediction,
+   and Layer 5 SHAP/report rendering all run afterward, inside the same
+   supervised child, with zero timeout of their own - and
+   `_run_as_supervised_subprocess`'s `subprocess.run(...)` call itself
+   had no `timeout=` kwarg either. Reproduced directly: patched the
+   call to wait on a real, genuinely hanging child process and bounded
+   the *test* itself with an outer kill-after-8s harness (since the
+   call under test has no bound of its own) - it blocked for the full
+   8s and had to be force-killed. Fixed by adding a
+   `_SUPERVISOR_TIMEOUT_SECONDS` (1800s, a generous last-resort
+   backstop chosen to clear the largest real scan exercised so far -
+   898 files across all four `.qa-repos` combined - without a false
+   trip) wall-clock budget around the whole `subprocess.run` call, a
+   new distinct exit code (`_SUPERVISOR_TIMEOUT_EXIT_CODE = 4`,
+   separate from the existing crash code `3`), and a clear stderr
+   message. Re-verified post-fix with a real (not mocked-away) hung
+   child process and a real `subprocess.TimeoutExpired`: returns in
+   ~2s against a patched-down 2s budget instead of blocking.
+
+2. **The environment-variable bypass reproduced exactly as described.**
+   `VIBEGUARD_SUPERVISOR_WORKER` used a fixed `"1"` sentinel to tell a
+   re-exec'd child not to re-wrap itself. If that exact variable is
+   already `"1"` in the invoking shell/CI environment for any unrelated
+   reason (a copied `.env` file, a CI variable set at workflow rather
+   than step scope, a leftover shell export), `__main__` takes the
+   "already a worker" branch directly - completely skipping
+   `_run_as_supervised_subprocess`, with no warning printed anywhere.
+   Reproduced with a structural mirror of the real dispatch logic (same
+   env var name, same subprocess.run shape) substituting a guaranteed
+   `ctypes` null-pointer-dereference segfault for the real scan (the
+   same substitution technique the original crash-detection logic was
+   itself validated with): with the var unset, the crash was caught and
+   cleanly translated to exit code 3 with a diagnostic message; with
+   `VIBEGUARD_SUPERVISOR_WORKER=1` pre-set, the identical crash escaped
+   completely raw as exit code 139, with no VibeGuard message at all -
+   the exact silent-death failure mode this feature exists to prevent.
+   Fixed by replacing the fixed `"1"` sentinel with a fresh
+   `secrets.token_hex(16)` per supervisor invocation, checked by a new
+   `_looks_like_supervisor_worker_token()` heuristic (exact-length
+   lowercase hex) instead of an equality check - not a cryptographic
+   guarantee (a child has no independent way to verify a value actually
+   came from its own parent), but it makes *coincidental* collision
+   with an unrelated pre-existing environment variable astronomically
+   unlikely, where a single-character sentinel was not. Re-verified
+   post-fix with the same crash-mirror technique: `VIBEGUARD_SUPERVISOR_
+   WORKER=1` pre-set no longer bypasses supervision - the segfault is
+   still caught and translated to exit code 3.
+
+3. **The "unusual but legitimate positive exit code" case (argparse's
+   own pre-existing usage-error code, `2`) was checked and found not to
+   be a bug.** Confirmed via real invocation (missing required `path`
+   arg; an invalid `--timeout` value) that `main.py` exits `2` in both
+   cases, and the supervisor's `completed.returncode < 0` check correctly
+   leaves it untouched (a positive code is never treated as a crash).
+   The only issue was documentation: the wrapper's docstring described
+   the "normal" pass-through contract as strictly 0/1, without
+   mentioning this third, pre-existing, already-legitimate code -
+   fixed by updating the docstring rather than the logic.
+
+**Tests/adversarial checks run:** 5 new tests in `tests/test_main.py`
+(fresh-token-per-invocation, a parametrized table of values the token
+heuristic must reject including the literal old `"1"` sentinel, a real
+`secrets.token_hex(16)` value it must accept, and mocked-`TimeoutExpired`
+detection/translation) plus updates to the 2 existing supervisor tests
+(token-shaped env value instead of literal `"1"`; asserting the new
+`timeout=` kwarg is passed to `subprocess.run`). Full `pytest -q`: 324
+passed (up from 313: +11 from this session, the rest already pending in
+the working tree from other in-progress work - see `git status`).
+`mypy main.py tests/test_main.py` / `ruff check` / `black --check` /
+`git diff --check`: all clean. Beyond the automated suite: two live,
+non-mocked reproductions (before fix: forced-kill after an 8s bound
+proving the hang had no ceiling at all; after fix: a real hung child
+process, with a real `subprocess.TimeoutExpired`, returning in ~2s
+against a patched-down budget) and two live crash-mirror reproductions
+(before fix: a real `ctypes` segfault escaping raw once the env var was
+pre-set; after fix: the same segfault still caught and translated).
+
+**Limitations:** The 1800s default timeout is a judgment call, not a
+measured one - chosen to comfortably clear the largest scan exercised
+so far with margin, not derived from a formal analysis of expected
+scan duration vs. file count. It is currently a module constant, not
+exposed as a CLI flag (kept out of scope to keep this fix minimal); if
+a real scan legitimately needs longer than 30 minutes, this will need
+revisiting. The worker-token heuristic defends against *coincidental*
+collision only, not a deliberate adversary who reads this source file -
+that was always the actual, and only relevant, threat model for this
+specific gap (accidental environment interference), not adversarial
+input to the tool's own detection logic.
+
+**Why:** Both gaps were exactly the "worth confirming" items the
+previous session flagged rather than assumed fixed - reproducing them
+for real (not just reasoning about them) is what turned "plausible
+concern" into "confirmed bug, now fixed with a regression test",
+consistent with this project's fail-closed requirement (Section 4) and
+the QA/build session separation this project's workflow protocol
+(Section 11) is built around.
+
+**Effect on thesis chapters:** Extends the same Chapter 4/5 robustness
+story the original supervisor entry started: a second, independently-
+reproduced fail-closed gap in the *same* new mechanism, found and
+closed within one QA cycle rather than shipped unexamined - itself a
+small but concrete data point for a methodology chapter about this
+project's build/QA session discipline actually catching real issues,
+not just process for its own sake.
+
+**Freeze / handoff:** Recommend one more fresh session specifically
+re-attack these two fixes before treating the supervisor as settled -
+in particular, whether the 1800s default is actually reasonable for
+this project's real scan workloads, and whether the token-heuristic
+approach has any gap not covered by the parametrized rejection table
+above. This is a CLI-entry-point robustness fix, not a change to any
+of Layer 1-5's detection/scoring/ML logic - no frozen layer's
+detection behavior changed.
+
+---
+
+## [2026-09-10] - Supervisor re-attack: timeout retuned with a real measurement, token heuristic re-attacked and holds
+
+**What the plan said:** The previous entry's handoff asked a fresh
+session to re-attack exactly two things before calling the supervisor
+settled: whether 1800s is actually reasonable for this project's real
+workloads, and whether the token heuristic has any gap the existing
+parametrized table doesn't cover.
+
+**What we actually did / found:**
+
+1. **The 1800s value was never actually timed against the reference
+   workload it cites - it was a file-count guess.** Ran `main.py`
+   against the same corpus its own justification names (`.qa-repos`, all
+   four repos combined) for real, timed: **9.22s wall-clock** (526/526
+   Java files parsed OK, 17/17 config, 12/12 pom.xml, 253 findings -
+   consistent with the earlier entry's numbers). That is a ~195x margin,
+   not merely "comfortable." Retuned `_SUPERVISOR_TIMEOUT_SECONDS` from
+   1800.0 to **300.0** (5 minutes): still ~32x the measured baseline
+   (still a last-resort backstop, not the per-file throttle), while
+   cutting the worst-case silent-hang wait from 30 minutes to 5. Updated
+   the constant's comment block in `main.py` to cite the measured number
+   instead of the file-count reasoning it replaces.
+
+2. **The token heuristic was re-attacked directly, not just re-read.**
+   Beyond the existing 8-case parametrized table, tried a 33-char value
+   (the untested mirror of the existing "31 chars, one short" case), a
+   single uppercase character mixed into an otherwise-valid token, a
+   Unicode fullwidth-digit lookalike (`０`×32), a trailing newline, and
+   tab-padding - all five correctly rejected by
+   `_looks_like_supervisor_worker_token` as-is. No logic gap found. Added
+   the missing `"a"*33 -> False` case to `tests/test_main.py`'s
+   parametrized table for symmetric regression coverage of both boundary
+   directions (previously only the "too short" side was tested). The
+   residual risk is exactly what the function's own docstring already
+   names and scopes out - a genuine, correctly-shaped token surviving in
+   a developer's shell from a forgotten manual export - which is
+   inherent to any env-var handshake and not closable by a tighter shape
+   check.
+
+**Tests/adversarial checks run:** Full `pytest -q`: 324 passed
+(pre-existing suite, unaffected by the retune since tests reference
+`main._SUPERVISOR_TIMEOUT_SECONDS` symbolically, not a hardcoded value)
+plus the new 33-char parametrized case. `mypy` / `ruff check` /
+`black --check` / `git diff --check`: all clean.
+
+**Limitations:** 300s is still a judgment call, now anchored to one
+measured data point rather than zero - it has not been validated against
+a real project larger than the 526-file `.qa-repos` corpus, because no
+larger real corpus was available to test against.
+
+**Why:** This is exactly the "reproduce it, don't just reason about it"
+standard the previous two supervisor QA entries were held to - the
+1800s value's own justification cited a file count but never a timing,
+so timing it was the direct way to answer "is this reasonable," not
+another round of reasoning about the existing reasoning.
+
+**Effect on thesis chapters:** Sharpens the same Chapter 4/5 robustness
+story further: the backstop timeout is now grounded in a measured
+number, not an estimate, and its stated margin is precise.
+
+**Freeze / handoff:** Both items from the previous handoff are now
+settled - the supervisor mechanism (crash detection, hang detection,
+env-token heuristic, timeout value) is not being reopened again absent
+a new blocking finding. Next real gap is the one found by a broader
+defense-readiness audit run in the same session - see the entry below.
+
+---
+
+## [2026-09-10] - Defense-readiness audit: verified claims against real runs, found a real Layer 4 blind spot, corrected an inaccurate dependency-audit claim, added inter-rater agreement reporting and measured test coverage
+
+**What the plan said:** Asked directly "is this ready for a defense,
+what are the gaps," with an explicit instruction not to just re-narrate
+the log's own claims. The scope was verification first (run the actual
+test suite, static gates, evaluation script, and dependency audit rather
+than trust prior entries), then fix what was safely fixable without
+reopening a frozen layer without cause.
+
+**What we actually did / found:**
+
+1. **Verified, not just re-read:** 324/324 tests passed, `mypy`/`ruff`/
+   `black --check` all clean, no `TODO`/`FIXME`/`NotImplementedError` in
+   the source tree, 50 projects confirmed in
+   `data/labeled/layer4_projects.json`, `evaluation/evaluate.py` run for
+   real (in-sample acc 0.700/F1 0.681, leave-one-out acc 0.580/F1 0.498,
+   fixed-severity baseline acc 0.400/F1 0.423 - matches `CLAUDE.md`'s
+   existing claim exactly).
+
+2. **A real Layer 4 gap the aggregate metric was hiding.** Broke down
+   the leave-one-out predictions by label instead of trusting the
+   aggregate: across all 50 folds, VibeGuard's Random Forest **never
+   once predicts "high"** (predicted-label distribution: 18 low / 25
+   medium / 7 critical / 0 high), despite 10 of the 50 actual labels
+   being "high" - all 10 fall into "low" or "medium" instead, and never
+   into "critical" either. Checked whether this is a simple class-count
+   imbalance fix: it is not - `RandomForestClassifier` already uses
+   `class_weight="balanced"` (`vibeguard/layer4_ml/trainer.py`), and
+   "low" (9 examples, the smallest class) is predicted correctly 8/9
+   times, so raw example count alone doesn't explain the collapse. Most
+   consistent with "high" sitting in a feature-space dead zone between
+   "medium" and "critical" given the current project-level feature
+   vector (`vibeguard/layer4_ml/predictor.py`'s CWE/source/severity
+   count features), with too few "high" examples (10) for the forest to
+   carve out that boundary. **Not fixed** - Layer 4 is frozen, and a fix
+   here means changing feature engineering, label thresholds, or
+   hyperparameters, which is a methodology decision for the thesis
+   owner, not something to silently retune. Flagged as a candidate for a
+   deliberate, separately-scoped Layer 4 reopening, not done in this
+   pass.
+
+3. **Human baseline was real (a genuine Tally CSV export,
+   `data/labeled/human_baseline_survey.csv`) but had no rigor around how
+   much the 3 raters agreed with each other before being compared to
+   VibeGuard's signals.** Added `InterRaterAgreementSummary` and
+   `summarize_inter_rater_agreement()` to
+   `evaluation/human_baseline.py` (computed from the `human_spread`
+   field that already existed per case but was never aggregated),
+   rendered as a new console table and added to the JSON report. Run
+   against the real committed survey: raters agreed exactly on only
+   **3/20 cases**, within one ordinal level on 16/20, mean spread 1.15,
+   max spread 3 (i.e., at least one case spanned the full Low-to-Critical
+   range across the 3 raters). This number now sits next to the
+   VibeGuard-vs-human-median agreement numbers so a reader can judge the
+   latter against how consistent the raters were with each other, rather
+   than assuming a stable reference point. Updated the module docstring
+   to state plainly that n=3 is exploratory/qualitative evidence, not a
+   statistically powered validation.
+
+4. **The "security tool passes its own dependency audit" claim in
+   `CLAUDE.md`/`AGENTS.md` Section 6 was not true as stated.** Ran
+   `safety check` for real: 2 CVEs reported - one in `pip` itself, one in
+   `cryptography`, both pulled in transitively by `safety`'s own
+   dependency chain (Authlib/joserfc), not by anything VibeGuard's code
+   imports. Confirmed `safety==3.8.1` is already the latest release on
+   PyPI (`pip index versions safety`), so there is no upgrade path that
+   clears the `cryptography` finding today. Corrected the claim in both
+   `CLAUDE.md` and `AGENTS.md` (kept identical, per this project's own
+   rule) to state the precise, current truth instead of the "nice irony
+   point" framing: not a clean audit, but no known vulnerability in the
+   tool's own runtime import graph either.
+
+5. **"Meaningful coverage" was asserted (Section 4) but never measured.**
+   Added `pytest-cov==7.1.0` to `requirements.txt` and ran it for real:
+   **89% overall statement coverage** across `vibeguard/` + `evaluation/`
+   + `main.py`. Per Section 4's own stated priority (detection logic over
+   glue code), the parts that matter most measure well: `cwe_1035.py`
+   100%, `layer2_features/extractor.py` 100%, `layer4_ml/predictor.py`
+   100%, `layer3_scoring/scorer.py` 98%, `cwe_20.py` 94%, `cwe_284.py`/
+   `cwe_287.py` 89% each. Two real soft spots: `cwe_798.py` at 81% (the
+   largest rule module, 390 statements) and `layer5_report/explainer.py`
+   (the SHAP attribution code) at 69% - the latter is worth a look given
+   explainability is a core thesis claim, not incidental code. Added a
+   report-only (non-blocking - no `--cov-fail-under` threshold imposed)
+   coverage step to `.github/workflows/ci.yml` so this number is visible
+   on every CI run going forward instead of being a one-off manual
+   check; deliberately did not add a hard coverage gate, since picking a
+   threshold and which modules it should apply to is a scope decision
+   for the thesis owner, not something to impose unilaterally.
+
+**Tests/adversarial checks run:** New tests added:
+`test_summarize_inter_rater_agreement_computes_spread_buckets` (hand-
+picked spread values covering the exact/within-one/neither buckets) and
+`test_end_to_end_inter_rater_agreement_on_real_survey_is_computable`
+(sanity bounds against the real 3-rater CSV) in
+`tests/test_human_baseline.py`. Full `pytest -q`: 327 passed (up from
+324: +3 from this session - the missing 33-char supervisor-token case
+from the entry above, plus these 2). `mypy .` / `ruff check .` /
+`black --check .` (after one auto-reformat of `human_baseline.py`) /
+`git diff --check`: all clean.
+
+**Limitations:** Point 2 (the Layer 4 "high"-class blind spot) is
+reported, not fixed - this is the single most significant open item
+from this audit and is a real, defensible thing to be asked about in a
+viva. Point 3's inter-rater number makes the human baseline's limits
+legible but does not and cannot fix the small-n problem itself; growing
+the panel past 3 raters is a data-collection task for the thesis owner,
+not something addressable in code. Point 4's dependency findings are
+outside VibeGuard's own runtime import graph but are still real CVEs
+present in the development/audit environment; there is currently no
+version bump that clears them given `safety` itself has no newer
+release.
+
+**Why:** Directly asked "prove it, stop hallucinating, is this ready
+for a defense" - the only honest way to answer that is to run the real
+artifacts (tests, evaluation script, dependency audit, coverage) rather
+than summarize what earlier log entries already claimed, and to report
+what the raw data shows even when it's less flattering than the
+aggregate metric already on record (point 2 specifically).
+
+**Effect on thesis chapters:** Chapter 4/5 gains a concrete, honest limitation
+to state explicitly (Layer 4's zero recall on "high" in leave-one-out)
+rather than letting the 0.58-vs-0.40 aggregate stand alone; the human-
+baseline discussion (Chapter 4/5) gains a defensible answer to "how much
+did your raters agree with each other"; Chapter 5's dependency-hygiene
+line needs to read as stated in the corrected `CLAUDE.md`/`AGENTS.md`
+text, not the original "clean audit" framing; and a coverage number now
+exists to cite instead of an unmeasured "meaningful coverage" assertion.
+
+**Freeze / handoff:** No frozen layer's detection/scoring/classification
+*behavior* changed in this entry - Layer 4's model, features, and
+training logic are untouched. The one item that would require reopening
+a frozen layer (point 2) was deliberately left as a reported finding,
+not acted on, pending the thesis owner's explicit decision on whether
+and how to address it (candidate directions: revisit the "high" label's
+threshold definition from Chapter 3's scoring rubric, add features that
+better separate "high" from its neighbors, or accept and document it as
+a known model limitation). Growing the human-rater panel (point 3) is
+the other open, non-code item. Everything else in this entry (timeout
+retune, token-heuristic symmetry, dependency-claim correction,
+inter-rater reporting, measured coverage) is applied and tested, not
+pending.
+
+---
+
+## [2026-09-10] - Layer 4 reopened to fix zero recall on "high": root cause found and confirmed, a targeted feature fix was built, tested, and reverted after empirically failing; one legitimate dataset fix kept
+
+**What the plan said:** Explicitly authorized by the thesis owner to fix
+the previous entry's point 2 (Layer 4 never predicts "high" in
+leave-one-out). Scope: Layer 4 only (`vibeguard/layer4_ml/`), narrowly
+targeting this one recall gap - no changes to Layers 1/2/3/5's detection
+or scoring behavior unless the root cause required it.
+
+**What we actually did / found:**
+
+1. **Found the exact root cause, not a guess.** Built every project's
+   full 22-feature Layer 4 vector and grouped by exact vector equality:
+   50 labelled projects collapse to only **20 distinct vectors**, and 4
+   of those groups span more than one severity label - one group alone
+   has 12 members spanning low/medium/high. This is not a class-
+   imbalance problem (ruled out directly: `RandomForestClassifier`
+   already uses `class_weight="balanced"`, and "low," the smallest
+   class at 9 examples, predicts correctly 8/9 times). It is an
+   information-insufficiency problem: several projects with genuinely
+   different human-assigned risk are indistinguishable to the current
+   feature vector, so no classifier - Random Forest or otherwise - can
+   separate them without a new feature.
+
+2. **Traced one duplicate-vector group to an exact, real cause and
+   confirmed it two different ways before touching any code.** For the
+   12-member low/medium/high group: `ai-api-key-service` (label "low")
+   and `ai-employee-profile-service`/`ai-user-consent-service`/
+   `ai-admin-report-export-service` (label "high") all produce the
+   identical CWE-284-only vector. Live-rescanned all four against
+   current Layer 1 rules: `ai-api-key-service`'s two CWE-284 findings
+   both carry the `_HAND_ROLLED_GUARD_CAVEAT` annotation (a caller-
+   header-comparison guard is present, even if unverifiable); the three
+   "high" projects' findings carry no caveat at all (genuinely
+   unguarded). This distinction is real, current, and exactly what a
+   human labeller would use - but it lives only in `Finding.message`
+   prose, which Layer 4's feature vector never reads.
+
+3. **Also checked, before assuming: is the labelled dataset's frozen
+   `findings` data itself stale relative to current Layer 1 rules?**
+   First pass (CWE-id/count comparison only, live-rescanning all 50
+   projects against current rules): zero drift, seemed to rule this out.
+   Second, more careful pass (comparing full `message` text, not just
+   counts): **9 of 50 projects had stale messages** - missing the
+   `_HAND_ROLLED_GUARD_CAVEAT`/`_CENTRALIZED_AUTH_CAVEAT` annotations
+   entirely, because those two caveat mechanisms were built earlier
+   *today* (see this file's earlier 2026-09-04/09-10 entries) and the
+   dataset's hand-authored JSON records were never refreshed after. This
+   was a real gap in the first check, not a false alarm - counting CWE
+   ids can't detect a message-only annotation.
+
+4. **Built the fix, verified it addressed exactly the traced cause, then
+   tested it empirically rather than shipping on that verification
+   alone.** Promoted `_CENTRALIZED_AUTH_CAVEAT`/`_HAND_ROLLED_GUARD_CAVEAT`
+   to public constants in `cwe_284.py` (pure rename, zero behavior
+   change - confirmed via `git diff` showing no other change to that
+   file), added a `has_unverified_guard_signal` feature to
+   `vibeguard/layer4_ml/predictor.py` matching on those literal
+   constants (not a guessed substring), refreshed the 9 stale dataset
+   messages via a live re-scan (matched by `(cwe_id, identifier)` per
+   finding, every other field left untouched, dataset JSON round-trip
+   verified byte-identical before editing), and regenerated the trusted
+   model contract. Result: the specific traced collision *did* resolve
+   (`ai-api-key-service` no longer shares a vector with the three "high"
+   projects). But re-running the real leave-one-out evaluator end to end
+   showed the fix **did not achieve its goal and made overall
+   performance worse**: leave-one-out accuracy dropped from 0.580 to
+   **0.420** (barely above the 0.400 fixed baseline) and macro-F1 dropped
+   from 0.498 to **0.413** (now *below* the 0.423 baseline). True "high"
+   recall stayed at **0/10** - the "high" predictions that did appear
+   (10 of them) were all mispredictions of *other* classes' projects as
+   "high," never a correct identification of an actual "high" project.
+
+5. **Diagnosed why before deciding whether to salvage or revert.**
+   Checked the new feature's value across all 50 projects by class: mean
+   0.33 for low, 0.25 for medium, 0.10 for high, 0.0 for critical - the
+   signal is real but sparse (only 9/50 projects have it at all) and
+   does not uniquely mark "high": the large majority of low/medium/
+   critical projects *also* score 0 on it, so it narrows "definitely not
+   the traced group" without helping separate "high" from the bulk of
+   its neighbors. Recomputed duplicate-vector groups with the new
+   23-feature vector: **5 groups still span multiple labels**, including
+   one 9-member group (3 low, 3 medium, 3 high) with *zero* separation
+   from the new feature at all - the guard-caveat signal only ever
+   applied to the one group it was traced from. Ran a bounded
+   hyperparameter sweep (`max_depth` in {3,5,8}, `min_samples_leaf` in
+   {2,3}, `n_estimators=300`, `class_weight="balanced_subsample"`) on
+   top of the new feature to check whether regularization could recover
+   the loss: best configuration (`max_depth=5`) reached 0.520/0.459 -
+   still below the original 0.580/0.498 with high recall still 0-1/10.
+   No tested configuration recovered the original performance while
+   fixing "high" recall.
+
+6. **Reverted the ML feature change; kept the dataset fix.** Removed
+   `has_unverified_guard_signal` from `predictor.py` entirely (import,
+   feature function, schema entries), reverted the two `cwe_284.py`
+   constants back to their original private names (`git diff` on that
+   file now shows zero residual change from this entry), and
+   regenerated the trusted model contract back to the original 22-
+   feature schema. Re-ran leave-one-out: **confirmed back to exactly
+   0.580 accuracy / 0.498 macro-F1**, matching the frozen baseline
+   exactly. Kept the 9 refreshed dataset messages - this is a real,
+   independent data-accuracy correction (the committed dataset should
+   reflect what current Layer 1 rules actually produce), and re-running
+   leave-one-out after the message refresh but before the reverted
+   feature confirmed it is fully inert against the original feature
+   schema (message content was never read by any of the original 22
+   features), so keeping it carries zero risk to the frozen model's
+   behavior.
+
+**Tests/adversarial checks run:** Full `pytest -q`: 327 passed
+(unchanged from the previous entry - no test additions in this entry,
+since the shipped change is a pure revert plus an inert dataset-text
+correction). `mypy .` / `ruff check .` / `black --check .` /
+`git diff --check`: all clean. The empirical falsification itself *is*
+the adversarial check for this entry: the fix was not accepted on the
+strength of tracing one root cause and confirming it twice - it was
+built, and then run through the real `leave_one_out_evaluate_project_
+risk_model` end to end, which is what caught the regression a purely
+logical argument for the feature would have missed.
+
+**Limitations:** The zero-recall-on-"high" gap is now root-caused, not
+just observed, but it is **not fixed** - it remains exactly as reported
+in the previous entry. What's now known precisely, that wasn't before:
+it is a genuine information/data-density problem (50 examples, 4
+classes, an unknown number of distinct real-world "why is this worse"
+signals none of which are captured single-handedly by any one available
+feature), not a quick feature-engineering fix, and not a hyperparameter
+tuning problem either (both were tried and both failed empirically).
+Closing it for real most likely needs one of: (a) substantially more
+labelled examples so each duplicate-vector cluster has enough members
+for a majority-vote signal to be statistically meaningful, (b) a
+research-scale feature-engineering effort investigating each of the
+(at least 5) remaining duplicate-vector clusters individually, the way
+this entry did for exactly one of them, or (c) accepting and precisely
+documenting this as a stated Chapter 4/5 limitation of a 50-project
+labelled dataset for 4-way project-risk classification.
+
+**Why:** The thesis owner explicitly asked to fix this after the
+previous entry's report. The honest, rigorous path was to trace a real
+root cause (not assume one), build the smallest fix that addressed it,
+and then verify the fix against the actual evaluation harness rather
+than accept "the traced collision resolved" as proof of success. It
+didn't hold up under that test, and shipping it anyway - a change that
+makes the model measurably worse while still not achieving the stated
+goal - would have been worse for the thesis than reporting the
+attempt honestly and reverting it. This is exactly the "reproduce it,
+don't just reason about it" standard this project's QA discipline has
+been held to all session (see the two supervisor entries above).
+
+**Effect on thesis chapters:** This substantially strengthens Chapter
+4/5's honesty and rigor on Layer 4's known limitation: rather than "the
+model never predicts 'high,' cause unknown," the thesis can now state
+precisely *why* (dataset information density: 20 distinct feature
+vectors for 50 labelled projects, several spanning 3+ severity labels),
+show a concrete, traced example, and show that a natural first fix was
+tried, measured, and found insufficient - a stronger, more defensible
+research narrative for a limitations section than either an unexamined
+gap or a fix that looks plausible but wasn't actually verified end to
+end. Chapter 3's dataset-labelling methodology may also warrant a note
+that some project pairs are, by the current feature vector's own
+information content, indistinguishable - a methodology-level finding,
+not just an implementation one.
+
+**Freeze / handoff:** Layer 4's model, features, and training logic are
+back to exactly their pre-session state (verified: identical leave-one-
+out accuracy/macro-F1) and remain frozen. The only non-reverted change
+is the 9-project dataset message refresh, which is inert for the
+current model and does not need separate freezing/QA beyond what this
+entry already did. The next real option for point 2 above is a
+deliberate, separately-scoped decision by the thesis owner among the
+three directions in **Limitations** above - not something to attempt
+again inside this same session's momentum.
+
+---
+
+## [2026-09-14] - Layer 5 plain-language summary added alongside the SHAP table
+
+**Status: DRAFT, pending student review** (see note at end).
+
+**What the plan said:** Layer 5 is frozen (passed independent adversarial
+QA 2026-07-30); reopen only for a blocking correctness issue. This is not
+one - it is a student-requested additive feature on top of the existing
+SHAP report, not a fix.
+
+**What we actually did:** The SHAP attribution table is precise but
+assumes familiarity with SHAP values, baseline probabilities, and Layer
+4's feature schema. Added a third panel to the console report - a short
+prose paragraph translating the same numbers into plain English (label,
+confidence, baseline, then one sentence per top contributing feature with
+its real direction) - printed alongside the existing prediction table and
+SHAP table, not replacing either.
+
+1. **`vibeguard/layer5_report/_feature_descriptions.py`** - a hand-
+   maintained dict translating each of Layer 4's 21 fixed feature names
+   into plain English, with a safe fallback (de-slugify the raw name) for
+   anything not in the map.
+2. **`vibeguard/layer5_report/plain_summary.py`** - `build_plain_summary()`
+   takes the same `ProjectRiskExplanation` the SHAP table already renders
+   and produces the prose paragraph. No new computation; a pure
+   formatting layer over existing SHAP output.
+3. **`report.py`/`__init__.py`** - wired the new panel into
+   `render_console_report()` as a third, always-shown section; added a
+   `max_summary_features` parameter (default 3) alongside the existing
+   `max_contributions`, both validated up front the same way.
+
+**Tests/adversarial checks run:**
+- New `tests/test_layer5_plain_summary.py`: label/confidence wording,
+  correct toward/away direction per feature, `max_features` truncation,
+  the "no notable contributions" fallback sentence, negative-argument
+  rejection, and a coverage test asserting every name Layer 4's
+  `build_project_features()` can currently produce has an entry in the
+  description dict - so a future Layer 4 schema change fails a test
+  instead of silently degrading everywhere.
+- Two assertions added to the existing `tests/test_layer5_report.py`
+  (panel title appears in rendered output; negative
+  `max_summary_features` rejected).
+- Full `pytest -q`: 335 passed at the time, `black`/`ruff`/`mypy` clean.
+- Verified live against both ends of the spectrum: a real scan of the
+  `vibe-coded-disaster-service` sample app (critical, 87% confidence) and
+  a clean, findings-free file (low, 89% confidence) - both render
+  sensible, correctly-directed prose without crashing.
+
+**Remaining limitations:** Purely a presentation layer; does not change
+what SHAP computes or which features it attributes. The low-risk/all-zero
+case's prose reads slightly awkwardly ("the total number of issues found
+in the project pushed the rating toward low" at value 0) but is accurate
+and was judged acceptable rather than over-engineered for a first pass.
+
+**Why:** The student's own feedback mid-session was that the raw SHAP
+table was "too technical" to read without translation. Keeping SHAP
+itself as the rigorous, citable computation and layering a simpler
+representation on top - rather than replacing SHAP with a less rigorous
+method - was the explicit alternative considered and rejected (SHAP is
+the only one of the realistic alternatives, LIME included, with a
+mathematical guarantee that per-feature attributions sum exactly to the
+prediction).
+
+**Effect on thesis chapters:** Chapter 5 can note the console report has
+a plain-language explanation panel alongside the technical SHAP table,
+useful for a thesis defense audience less familiar with SHAP mechanics.
+No change to Chapter 3/4's methodology description of SHAP itself.
+
+**Freeze / handoff:** This reopens frozen Layer 5 on student request, not
+a blocking-issue ground - flagged as such rather than silently treated as
+in-scope maintenance. Recommend a fresh session review this addition
+(the description-dict coverage guarantee and the fallback wording
+specifically) before re-freezing Layer 5. This entry was drafted by the
+same session that built the feature, at the student's explicit request,
+and has not yet been independently reviewed or confirmed - per Section 9,
+do not treat it as settled project history until the student confirms it.
+
+---
+
+## [2026-09-14] - Whole-process crash/hang supervisor extended from main.py to all three CLI entry points
+
+**Status: DRAFT, pending student review** (see note at end).
+
+**What the plan said:** The 2026-09-10 supervisor entries built and
+hardened a whole-process crash/hang guard for `main.py` only, deliberately
+scoped there because it is "the actual product entry point... a real
+audience" - `evaluation/human_baseline.py` and
+`evaluation/thesis_orchestrator.py` were explicitly left unprotected as "a
+deliberate scope choice, not an oversight," logged as a candidate for
+later extension.
+
+**What we actually did:** Asked directly whether to close that gap;
+student chose to extend the existing mechanism rather than leave it
+scoped to one entry point, since both other entry points run the same
+Layer 1-5 pipeline in-process and share the identical native-crash
+exposure.
+
+1. **Extracted the mechanism into a new shared module,
+   `process_supervisor.py`**, at the repo root - the same "extract on the
+   second real need" practice this project has applied repeatedly in
+   Layer 1 (`_finding.py`, `_credential_names.py`,
+   `_endpoint_annotations.py`, `_java_literals.py`,
+   `_authorization_annotations.py`), now applied to this exact
+   security-relevant crash-detection logic once a third caller needed it -
+   copy-pasting it a third time was judged a real divergence risk, not
+   just duplication. `run_as_supervised_subprocess()`,
+   `looks_like_supervisor_worker_token()`, and the env-var name/exit-code
+   constants moved out of `main.py` unchanged in behavior; `main.py`'s
+   `__main__` dispatch now delegates to the shared module instead of its
+   own private copy.
+2. **Wired the identical protection into `evaluation/human_baseline.py`
+   and `evaluation/thesis_orchestrator.py`**: both `__main__` blocks now
+   check the same worker-token env var and, if absent, re-exec themselves
+   via `python -m evaluation.<module>` inside
+   `run_as_supervised_subprocess()`, exactly mirroring `main.py`'s own
+   dispatch shape.
+3. **Added `process_supervisor` to the CI coverage report**
+   (`.github/workflows/ci.yml`) - it had been silently absent from the
+   tracked module list.
+
+**Tests/adversarial checks run:**
+- Moved the generic crash/hang/token-heuristic tests out of
+  `tests/test_main.py` into a new `tests/test_process_supervisor.py`,
+  testing the shared module directly rather than through any one entry
+  point; kept `main.py`'s own real end-to-end subprocess test
+  (`python main.py <fixture>`, no worker token set) unchanged, and added
+  the equivalent real end-to-end test for both `human_baseline.py`
+  (`python -m evaluation.human_baseline --help`) and
+  `thesis_orchestrator.py` (`--help`).
+- Full `pytest -q`: 339 passed at the time, all four static gates clean.
+- Live verification beyond the automated suite: ran all three entry
+  points for real end to end (`main.py` against a clean fixture,
+  `python -m evaluation.human_baseline` against the real committed
+  survey/dataset, `python -m evaluation.thesis_orchestrator` against a
+  clean fixture into a scratch output directory) - all three exit 0 and
+  produce correct output through the real supervised-subprocess path.
+- Independent QA (fresh session, no memory of the build): verified the
+  extraction byte-identical to the original mechanism (env var name,
+  token-shape heuristic, exit codes 3/4, 300s default timeout) by
+  reproducing a real segfault (`ctypes.string_at(0)` in a child) and a
+  real hang through the extracted module directly; confirmed
+  `thesis_orchestrator.py`'s `import main as scan_cli` does not cause
+  double-supervision (its calls are plain function calls, never
+  triggering `main.py`'s own `__main__` guard). Found one real,
+  unrelated regression in the same diff: a pre-existing assertion in
+  `tests/test_main.py`
+  (`test_main_returns_nonzero_when_shap_reporting_raises_runtime_error`)
+  had been silently deleted while editing that file for this change, with
+  no connection to the supervisor work. Reproduced the scenario directly
+  and confirmed the underlying behavior was never actually broken - only
+  its test coverage had vanished. Restored the assertion; re-verified it
+  passes.
+
+**Remaining limitations:** None new. Same underlying native-binding
+uncertainty already documented in the 2026-09-10 entries - this only
+widens which entry points are protected against it, does not change the
+mechanism itself.
+
+**Why:** Copy-pasting security-relevant crash-detection logic a third
+time was judged the wrong call the moment a third caller needed it,
+consistent with this project's established practice everywhere else.
+Extending coverage to all three entry points closes a gap the original
+supervisor entry explicitly flagged as deliberately deferred, not
+discovered new.
+
+**Effect on thesis chapters:** Chapter 4/5's robustness discussion can
+now state that all three CLI entry points (not just the primary scan
+command) are protected against the documented native-crash failure mode,
+not only the one with "a real audience."
+
+**Freeze / handoff:** This is a CLI-entry-point robustness change, not a
+change to any of Layer 1-5's detection/scoring/ML logic. This entry was
+drafted by the same session that built the feature, at the student's
+explicit request, following one independent QA pass (which found and this
+session then fixed the unrelated test-assertion regression above) - per
+Section 9, do not treat it as settled project history until the student
+confirms it.
+
+---
+
+## [2026-09-14] - CWE-284 extended to recognize endpoint annotations inherited from an implemented interface
+
+**Status: DRAFT, pending student review** (see note at end).
+
+**What the plan said:** Logged 2026-09-02 as a real, precisely
+characterized, deliberately unfixed gap: 9 of `spring-petclinic-rest`'s
+10 controllers implement an auto-generated interface (Spring's
+`openapi-generator-maven-plugin` output) carrying the real
+`@RequestMapping`/`@PostMapping` annotations, with the concrete
+`@Override` method carrying none of its own - invisible to
+`has_endpoint_annotation()`, which only ever inspects a method's own
+annotation list. Judged "too large and too edge-case-prone to build under
+today's time pressure" at the time, logged as future work. Section 7
+named continued real-repo evaluation as the highest-value remaining work;
+asked directly whether to build this specific fix now, student said yes.
+
+**What we actually did:**
+
+1. **Scoped to CWE-284 only, explicitly not CWE-20.** CWE-20's equivalent
+   gap needs parameter-level annotations (`@RequestBody`, `@Valid`), and
+   Layer 1's `ParsedParameter` does not capture parameter annotations at
+   all today, on either parser path - extending this same approach to
+   CWE-20 would need that new AST capability first. Attempting both in
+   one pass was judged the same mistake already avoided repeatedly in
+   this project's history (a half-built fix for a harder problem);
+   deferred, not attempted.
+
+2. **New shared module,
+   `vibeguard/layer1_static/rules/_interface_annotations.py`**: builds a
+   project-wide index of every top-level type's methods by
+   `(type_name, method_name) -> annotations`, and a per-file lookup of
+   what each of that file's own top-level types implements. Built
+   entirely from `ParsedFile.classes` (Layer 1's existing flattened
+   summary), which is already parser-path-agnostic - both javalang and
+   Tree-sitter populate the identical `ParsedClass`/`ParsedMethod` shape
+   (confirmed by reading `_build_parsed_file`/`_build_tree_sitter_class`
+   before writing anything), so this needed zero new parser-specific
+   code. Deliberately scoped to top-level types only, since
+   `ParsedFile.classes` only ever represents those by design - a nested
+   class's implemented interfaces are not resolved by this feature (a
+   narrower limitation than the general nested-class support `cwe_284.py`'s
+   own per-file detection already has).
+
+3. **`cwe_284.detect_in_java()` gained an optional
+   `interface_annotations` parameter** (default: an empty index, so every
+   existing single-file call/test keeps its exact current behavior
+   unchanged). `main.py`'s `_run_rules()` and
+   `evaluation/human_baseline.py`'s `_run_all_rules()` (a near-duplicate
+   of `_run_rules`, per its own docstring) both now build the index once
+   per scan from all successfully-parsed Java files and pass it through.
+   `evaluation/evaluate.py`/`thesis_run.py` need no equivalent change -
+   confirmed by grep that neither calls `cwe_284.detect_in_java` at all;
+   they only ever work off the already-frozen labelled dataset.
+
+4. **A design correction made before shipping, not after.** The first
+   draft let an interface's `@PreAuthorize` silently suppress a finding
+   the same way an endpoint annotation was widened. This is wrong: Spring
+   MVC always resolves an interface-declared routing annotation against
+   the real bean regardless of proxy style (a documented, proxy-independent
+   framework feature), but an AOP-based authorization annotation declared
+   the same way is only actually *enforced* if Spring is using
+   interface-based JDK dynamic proxies - CGLIB class proxies, Spring
+   Boot's default, typically do not honor it. Neither is visible to
+   static analysis. Caught this asymmetry before shipping and split the
+   design accordingly: `resolve_effective_annotations()` widens the
+   *endpoint* check unconditionally (safe, fail-toward-more-findings
+   direction); a separate `interface_annotations_for_method()` is used
+   only to attach a new, explicit caveat
+   (`_INTERFACE_AUTHORIZATION_CAVEAT`) when an interface method's
+   authorization annotation is not repeated on the concrete override -
+   the finding still fires either way, matching the exact "caveat, never
+   silently suppress" discipline already established twice in this same
+   file (`apply_centralized_authorization_context`,
+   `apply_hand_rolled_guard_context`).
+
+5. **Independent QA (fresh session) found one real, serious bug before
+   this was treated as done.** `build_interface_method_index()`'s first
+   version keyed its index by simple type name only; if two distinct
+   top-level types anywhere in a scan shared a simple name, the index
+   silently resolved to whichever declaration was scanned *last* -
+   confirmed to actually happen, not merely theoretical: 14 colliding
+   simple names across this project's own `.qa-repos` real-repo test
+   corpus (`UserService`x4, `User`x4, `UserRepository`x4,
+   `WebSecurityConfig`x3, etc.). This meant the exact same source code
+   could either correctly find or silently miss the same unprotected
+   endpoint purely depending on file-processing order - a real,
+   non-deterministic false-negative risk in exactly the CWE this project
+   has repeatedly treated as its worst-failure-mode category. Fixed by
+   detecting when two *distinct* declarations (identified by
+   `(file_path, line)`) share a simple name and excluding that name from
+   the index entirely, rather than guessing - degrading back to exactly
+   the pre-this-feature behavior (annotation not found) for that name,
+   the same "when genuinely unresolvable, admit it rather than guess"
+   principle already used for CWE-1035's unresolved dependency versions.
+   New regression test builds the exact colliding scenario in both file
+   orderings and asserts identical (empty) results; traced by hand that
+   this test would have failed under the pre-fix code (0 findings one
+   order, 1 finding the other) before confirming it passes now.
+
+6. **The same QA pass also found and this session fixed** an unrelated,
+   accidentally-deleted test assertion in `tests/test_main.py` (logged in
+   the supervisor-extension entry above, since it was found during the
+   same QA pass but is unrelated to this feature).
+
+7. **Honestly measured, not assumed: the fix currently has zero
+   real-world effect against the repository that originally motivated
+   it.** `spring-petclinic-rest`'s `OwnersApi` interface only exists under
+   `target/generated-sources/openapi/...`, which `scanner.py` correctly
+   excludes as build output - so in this repo's committed-source
+   snapshot, the interface-widening mechanism never fires at all. Live
+   `.qa-repos` scan finding count is unchanged at 253, identical to
+   before this change. Not a bug - the module's own docstring already
+   states this ceiling - but it had not been verified end-to-end until
+   this QA pass did so, and it should be stated plainly rather than
+   assumed to have closed the original gap.
+
+**Tests/adversarial checks run:**
+- 7 new tests in `tests/test_cwe_284.py`: the real motivating shape
+  (interface has `@GetMapping`, concrete override has neither annotation
+  - now correctly found, was previously invisible); the interface-auth
+  caveat case (interface has `@PreAuthorize` too - still found, now with
+  the caveat, never suppressed); the own-class-authorization case (own
+  `@PreAuthorize` on the override - still correctly suppressed, no
+  caveat, since this coverage is not proxy-dependent); the
+  unimplemented-interface non-leak case (a second, unrelated interface
+  sharing a method name must never contribute); the Tree-sitter fallback
+  parity case; and the order-independence regression test for the
+  collision fix.
+- Full `pytest -q`: 345 passed (was 344 before the collision-fix
+  regression test), all four static gates clean.
+- Independent QA (fresh session): constructed and ran, not just reasoned
+  about, every scenario above via real fixture files through
+  `cwe_284.detect_in_java()` directly; traced the overload-false-positive
+  limitation (an interface method sharing a name with an unrelated,
+  differently-signed concrete method) and confirmed it produces exactly
+  the documented failure mode (an over-broad false positive) and never a
+  suppression; confirmed the nested-class exclusion produces zero
+  findings without crashing; confirmed
+  `evaluation/evaluate.py`/`thesis_run.py` have zero `cwe_284`/
+  `detect_in_java` references by grep; confirmed
+  `data/labeled/layer4_projects.json`/the trusted model contract are
+  untouched by this change (their diffs are unrelated carryover from
+  the earlier, separately-logged Layer-4 dataset-message-refresh work).
+- Live re-verification against the real `.qa-repos` corpus after the
+  collision fix: identical 253-finding count across two separate runs.
+
+**Remaining limitations:** CWE-20's parameter-annotation equivalent
+remains unbuilt (needs a new `ParsedParameter` annotation capability
+first, on both parser paths). The name-only, no-overload-resolution
+matching is a stated, coarse-match limitation consistent with every
+other heuristic in this codebase - confirmed by QA to fail only in the
+safe direction (over-broad false positive on an unrelated same-named
+overload), never a suppression. The interface-widening mechanism has
+zero measured effect on the real `.qa-repos` corpus today, since the
+motivating interface lives under correctly-excluded build output in that
+repo's current snapshot - it would need either a project that commits
+its generated interface source, or a scan run after `mvn
+generate-sources`, to demonstrate real-world effect.
+
+**Why:** Endpoint-annotation widening was made unconditional because
+Spring MVC's interface-annotation resolution is a genuine, always-true
+framework feature - there is no proxy-style ambiguity for routing,
+unlike authorization. Authorization was deliberately kept caveat-only
+because the CGLIB-vs-JDK-proxy distinction is real, not visible to static
+analysis, and silently trusting it would have traded a well-understood,
+already-logged gap for a less-understood, silently-introduced one - the
+same mistake this project has explicitly avoided multiple times before
+(e.g. the severity-floor revert on 2026-09-04). The collision bug was
+fixed by exclusion rather than by picking a "best guess" candidate for
+the same reason CWE-1035 refuses to flag a dependency with an unresolved
+version: a coarse heuristic that guesses when it can't actually resolve
+something is a worse failure mode for a security tool than one that
+admits the limit.
+
+**Effect on thesis chapters:** Chapter 5's CWE-284 evaluation gains a
+third caveat mechanism (project-wide centralized-auth, per-method
+hand-rolled-guard, and now per-method interface-authorization), each
+targeting a structurally different way real Java code expresses "an
+access-control decision was made" that annotation-only detection alone
+cannot see - worth presenting as a cumulative pattern, not three
+unrelated patches. Chapter 5 should also report the honest zero-effect
+finding against `.qa-repos` plainly, alongside the fix's real, positive
+effect demonstrated in the accompanying test suite - a defensible,
+precisely-scoped result rather than an overstated "gap closed" claim.
+Chapter 6 (future work) should list CWE-20's parameter-annotation
+equivalent as a concrete, now well-motivated next item, and package-aware
+(not just simple-name) interface resolution as a second, smaller
+possible refinement if broader real-repo testing finds the current
+exclusion-on-collision behavior too conservative in practice.
+
+**Second independent QA pass (fresh session, specifically re-attacking
+the collision fix, not the feature as a whole): confirmed correct.**
+Beyond the two file orderings the existing regression test already
+covers, verified all 6 permutations of the 3-file fixture (with and
+without unrelated files padded before/after - not position-sensitive),
+a 3-way collision (generalizes past the pairwise case), and that parsing
+the same file twice into two distinct `ParsedFile` objects is correctly
+*not* treated as a collision with itself (`Path` equality is value-based,
+confirmed directly). Proved the regression test is non-vacuous, not just
+present: reverted `build_interface_method_index` to the old last-write-
+wins logic, reran the test, confirmed it **fails** exactly as expected
+(order `(a, b, controller)` finds nothing, order `(b, a, controller)`
+finds the violation), then restored the file byte-identical (md5-verified)
+and reran the full suite clean.
+
+That pass also found one new, real, but narrowly-scoped bug this fix did
+not touch: the sibling function `top_level_interfaces_by_type_name` has
+an analogous, unfixed collision - but only within a *single file*
+declaring two top-level types with the identical simple name, which is
+not valid Java (`javac` rejects this as a duplicate-class compile error)
+and therefore cannot occur in any real, compiling source file, unlike the
+cross-file collision this entry's fix addresses (confirmed 14 times in
+real, compiling `.qa-repos` code). It is also a false-positive-direction
+failure, not a false negative - the less severe of the two directions per
+this project's own stated CWE-284 priority. Logged here as a known,
+deliberately-unfixed limitation (malformed-input-only) rather than
+chased, consistent with this project's practice of not building defenses
+against inputs that cannot arise from valid source.
+
+**Freeze / handoff:** This reopens frozen Layer 1 on the same "real-world
+QA found a blocking gap" grounds already established repeatedly for it.
+Two independent QA passes have now run: the first found the collision
+bug and the unrelated test-assertion deletion (both fixed by this
+session), the second specifically re-verified the collision fix itself
+and found it correct, using a revert-and-confirm-failure technique
+against its own regression test rather than only reading the code. This
+entry was drafted by the same session that built the feature, at the
+student's explicit request - per Section 9, do not treat it as settled
+project history until the student confirms it.

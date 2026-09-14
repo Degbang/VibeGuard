@@ -113,6 +113,7 @@ def test_build_and_render_project_risk_report(tmp_path: Path) -> None:
     assert report.scored_findings == findings
     assert "VibeGuard Layer 4 - Project Risk Prediction" in rendered
     assert "VibeGuard Layer 5 - SHAP Feature Attribution" in rendered
+    assert "VibeGuard Layer 5 - Plain-Language Summary" in rendered
     assert report.explanation.prediction.label.value in rendered
 
 
@@ -203,3 +204,21 @@ def test_render_console_report_rejects_negative_max_contributions(tmp_path: Path
 
     with pytest.raises(ValueError, match="max_contributions must be non-negative"):
         render_console_report(report, console=Console(file=StringIO()), max_contributions=-1)
+
+
+def test_render_console_report_rejects_negative_max_summary_features(tmp_path: Path) -> None:
+    findings = (
+        _scored_finding(tmp_path, "CWE-798", "Controller.java", identifier="password"),
+        _scored_finding(tmp_path, "CWE-284", "Controller.java", identifier="login"),
+    )
+    model = train_project_risk_model(
+        (
+            TrainingExample((), MLRiskLabel.LOW),
+            TrainingExample(findings, MLRiskLabel.CRITICAL),
+        ),
+        random_state=11,
+    )
+    report = build_project_risk_report(tmp_path, model, findings)
+
+    with pytest.raises(ValueError, match="max_summary_features must be non-negative"):
+        render_console_report(report, console=Console(file=StringIO()), max_summary_features=-1)

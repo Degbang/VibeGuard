@@ -33,3 +33,6 @@ jobs:
 
       - name: pytest
         run: pytest -q
+
+      - name: coverage (report only, not a merge gate)
+        run: pytest -q --cov=vibeguard --cov=evaluation --cov=main --cov=process_supervisor --cov-report=term-missing

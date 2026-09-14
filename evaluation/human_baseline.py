@@ -9,6 +9,22 @@ prediction, and Layer 3's raw maximum rule-based finding severity. This
 module does not modify any Layer 1-5 detection, scoring, or
 classification logic - it only re-runs the existing frozen pipeline and
 reports agreement statistics against an independent human baseline.
+
+The committed survey has 3 raters, 20 cases each - a real, blind panel,
+but small enough that it should be read as exploratory/qualitative
+evidence, not a statistically powered validation. To make that legible
+rather than asserted, this module also reports how much the 3 raters
+agreed with *each other* (``summarize_inter_rater_agreement``) alongside
+how much VibeGuard's signals agree with their median - a reader can then
+judge whether "VibeGuard agrees with the human median" is meaningful
+given how much the humans themselves agreed.
+
+When run as a script (``python -m evaluation.human_baseline``, not
+imported and called as ``main()`` directly), this re-runs the frozen
+Layer 1-5 pipeline in-process for every mapped project, so it carries
+the same native-crash exposure ``main.py`` does - the run happens inside
+a supervised child process for the same reason; see
+``process_supervisor.run_as_supervised_subprocess``'s docstring.
 """
 
 from __future__ import annotations
@@ -16,6 +32,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import statistics
 import sys
 from collections.abc import Callable
@@ -25,9 +42,11 @@ from pathlib import Path
 from rich.console import Console
 from rich.table import Table
 
+import process_supervisor
 from vibeguard.layer1_static._parsing_guards import ParseStatus
 from vibeguard.layer1_static.rules import cwe_20, cwe_284, cwe_287, cwe_798, cwe_1035
 from vibeguard.layer1_static.rules._finding import Finding
+from vibeguard.layer1_static.rules._interface_annotations import build_interface_method_index
 from vibeguard.layer1_static.scanner import ScanResult, scan_directory
 from vibeguard.layer2_features import extract_features
 from vibeguard.layer3_scoring import score_features
@@ -119,6 +138,47 @@ class AgreementSummary:
     mean_signed_distance: float
 
 
+@dataclass(frozen=True)
+class InterRaterAgreementSummary:
+    """How much the human raters agreed with *each other*, per case.
+
+    Computed from ``CaseComparison.human_spread`` (max ordinal minus min
+    ordinal among that case's raters), independent of any VibeGuard
+    signal. This exists so a reader isn't left to assume the 3-rater
+    panel was internally consistent just because VibeGuard's signals
+    happen to track their median - a low inter-rater agreement score
+    would mean that median is a weak reference point in the first place.
+    """
+
+    case_count: int
+    exact_agreement_count: int
+    within_one_level_count: int
+    mean_spread: float
+    max_spread: int
+
+
+def summarize_inter_rater_agreement(
+    comparisons: tuple[CaseComparison, ...],
+) -> InterRaterAgreementSummary:
+    """Summarize how often the human raters agreed with each other.
+
+    Args:
+        comparisons: Per-case rows, each already carrying that case's
+            ``human_spread`` (max rater ordinal minus min rater ordinal).
+
+    Returns:
+        Aggregate agreement across all cases.
+    """
+    spreads = [comparison.human_spread for comparison in comparisons]
+    return InterRaterAgreementSummary(
+        case_count=len(spreads),
+        exact_agreement_count=sum(1 for spread in spreads if spread == 0),
+        within_one_level_count=sum(1 for spread in spreads if spread <= 1),
+        mean_spread=statistics.mean(spreads) if spreads else 0.0,
+        max_spread=max(spreads) if spreads else 0,
+    )
+
+
 def load_survey_responses(csv_path: Path) -> tuple[SurveyResponse, ...]:
     """Parse the Blind Risk Review CSV export into per-rater case ratings.
 
@@ -200,12 +260,12 @@ def collect_vibeguard_signals(
 
 def _run_all_rules(result: ScanResult) -> tuple[Finding, ...]:
     """Run every implemented CWE rule, mirroring ``main.py``'s ``_run_rules``."""
+    ok_java_files = tuple(jf for jf in result.java_files if jf.status == ParseStatus.OK)
+    interface_annotations = build_interface_method_index(ok_java_files)
     findings: list[Finding] = []
-    for java_file in result.java_files:
-        if java_file.status != ParseStatus.OK:
-            continue
+    for java_file in ok_java_files:
         findings.extend(cwe_798.detect_in_java(java_file))
-        findings.extend(cwe_284.detect_in_java(java_file))
+        findings.extend(cwe_284.detect_in_java(java_file, interface_annotations))
         findings.extend(cwe_287.detect_in_java(java_file))
         findings.extend(cwe_20.detect_in_java(java_file))
     for config_file in result.config_files:
@@ -216,10 +276,10 @@ def _run_all_rules(result: ScanResult) -> tuple[Finding, ...]:
         if pom_file.status != ParseStatus.OK:
             continue
         findings.extend(cwe_1035.detect_in_pom(pom_file))
-    return cwe_284.apply_centralized_authorization_context(
-        tuple(findings),
-        (jf for jf in result.java_files if jf.status == ParseStatus.OK),
+    findings_with_centralized_context = cwe_284.apply_centralized_authorization_context(
+        tuple(findings), ok_java_files
     )
+    return cwe_284.apply_hand_rolled_guard_context(findings_with_centralized_context, ok_java_files)
 
 
 def build_case_comparisons(
@@ -288,6 +348,7 @@ def summarize_agreement(
 def render_console_report(
     comparisons: tuple[CaseComparison, ...],
     summaries: tuple[AgreementSummary, ...],
+    inter_rater: InterRaterAgreementSummary,
     *,
     console: Console | None = None,
 ) -> None:
@@ -328,9 +389,29 @@ def render_console_report(
         )
     target_console.print(summary_table)
 
+    rater_table = Table(
+        title=(
+            "Human Baseline - Inter-Rater Agreement "
+            f"(n={inter_rater.case_count} cases, 3 raters - read as exploratory, not powered)"
+        )
+    )
+    rater_table.add_column("Exact Agreement (spread=0)")
+    rater_table.add_column("Within 1 Level (spread<=1)")
+    rater_table.add_column("Mean Spread")
+    rater_table.add_column("Max Spread")
+    rater_table.add_row(
+        f"{inter_rater.exact_agreement_count}/{inter_rater.case_count}",
+        f"{inter_rater.within_one_level_count}/{inter_rater.case_count}",
+        f"{inter_rater.mean_spread:.2f}",
+        str(inter_rater.max_spread),
+    )
+    target_console.print(rater_table)
+
 
 def build_json_report(
-    comparisons: tuple[CaseComparison, ...], summaries: tuple[AgreementSummary, ...]
+    comparisons: tuple[CaseComparison, ...],
+    summaries: tuple[AgreementSummary, ...],
+    inter_rater: InterRaterAgreementSummary,
 ) -> dict[str, object]:
     """Convert the comparison and summaries into a JSON-serializable mapping."""
     return {
@@ -361,6 +442,13 @@ def build_json_report(
             }
             for summary in summaries
         ],
+        "inter_rater_agreement": {
+            "case_count": inter_rater.case_count,
+            "exact_agreement_count": inter_rater.exact_agreement_count,
+            "within_one_level_count": inter_rater.within_one_level_count,
+            "mean_spread": inter_rater.mean_spread,
+            "max_spread": inter_rater.max_spread,
+        },
     }
 
 
@@ -394,17 +482,21 @@ def main(argv: list[str] | None = None) -> int:
                 signal_selector=lambda c: c.signals.layer3_max_severity,
             ),
         )
+        inter_rater = summarize_inter_rater_agreement(comparisons)
     except (ValueError, OSError, KeyError) as exc:
         print(f"Human-baseline comparison failed: {exc}", file=sys.stderr)
         return 1
 
     if args.json_out is not None:
         args.json_out.write_text(
-            json.dumps(build_json_report(comparisons, summaries), indent=2, sort_keys=True) + "\n",
+            json.dumps(
+                build_json_report(comparisons, summaries, inter_rater), indent=2, sort_keys=True
+            )
+            + "\n",
             encoding="utf-8",
         )
     else:
-        render_console_report(comparisons, summaries)
+        render_console_report(comparisons, summaries, inter_rater)
     return 0
 
 
@@ -429,4 +521,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    if process_supervisor.looks_like_supervisor_worker_token(
+        os.environ.get(process_supervisor.SUPERVISOR_WORKER_ENV_VAR)
+    ):
+        sys.exit(main())
+    sys.exit(
+        process_supervisor.run_as_supervised_subprocess(
+            [sys.executable, "-m", "evaluation.human_baseline", *sys.argv[1:]]
+        )
+    )

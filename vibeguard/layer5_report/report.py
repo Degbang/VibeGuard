@@ -6,11 +6,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from rich.console import Console
+from rich.panel import Panel
 from rich.table import Table
 
 from vibeguard.layer3_scoring import ScoredFinding
 from vibeguard.layer4_ml import RiskModel
 from vibeguard.layer5_report.explainer import ProjectRiskExplanation, explain_project_risk
+from vibeguard.layer5_report.plain_summary import build_plain_summary
 
 
 @dataclass(frozen=True)
@@ -40,13 +42,26 @@ def render_console_report(
     *,
     console: Console | None = None,
     max_contributions: int = 8,
+    max_summary_features: int = 3,
 ) -> None:
-    """Render Layer 4/5 output to the console."""
+    """Render Layer 4/5 output to the console.
+
+    Args:
+        report: The built project risk report.
+        console: Rich console to render to. Defaults to a new console.
+        max_contributions: How many SHAP contribution rows to show in
+            the attribution table. Must be non-negative.
+        max_summary_features: How many top contributing features to
+            describe in the plain-language summary. Must be non-negative.
+    """
     if max_contributions < 0:
         raise ValueError("max_contributions must be non-negative")
+    if max_summary_features < 0:
+        raise ValueError("max_summary_features must be non-negative")
     target_console = console or Console()
     _render_prediction_summary(report, target_console)
     _render_shap_contributions(report.explanation, target_console, max_contributions)
+    _render_plain_summary(report.explanation, target_console, max_summary_features)
 
 
 def _render_prediction_summary(report: ProjectRiskReport, console: Console) -> None:
@@ -90,3 +105,12 @@ def _render_shap_contributions(
         )
 
     console.print(table)
+
+
+def _render_plain_summary(
+    explanation: ProjectRiskExplanation,
+    console: Console,
+    max_features: int,
+) -> None:
+    summary = build_plain_summary(explanation, max_features=max_features)
+    console.print(Panel(summary, title="VibeGuard Layer 5 - Plain-Language Summary"))

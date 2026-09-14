@@ -83,7 +83,7 @@ These serve different purposes and both must be present in final output.
 - Guard against path traversal: resolve all file paths with `Path.resolve()` and verify they remain inside the expected sample-apps root before reading.
 - Set limits on input size and parse time per file (a large or adversarial file must not hang or OOM the process) — this is also a legitimate "robustness" evaluation point for Chapter 4/5.
 - No secrets, API keys, or credentials — real or plausible-looking — committed anywhere outside clearly labeled test fixtures.
-- Dependency hygiene: pin versions in `requirements.txt`, and periodically check for known-vulnerable dependencies (there's a nice irony/rigor point in a security thesis project itself passing a dependency audit — worth a line in Chapter 5 if true).
+- Dependency hygiene: pin versions in `requirements.txt`, and periodically check for known-vulnerable dependencies with `safety check`. **As of the 2026-09-10 QA re-run, this audit is not clean**: 2 CVEs are reported (one in `pip` itself, one in `cryptography`, pulled in transitively by `safety`'s own dependency chain via Authlib/joserfc — not by anything VibeGuard's own code imports). `safety==3.8.1` is already the latest release on PyPI, so there is no upgrade path that clears the `cryptography` finding today. State this precisely in Chapter 5 if it comes up — "clean audit" is not currently an accurate claim; "no known vulnerability in the tool's own runtime import graph" is.
 
 ---
 
@@ -105,6 +105,7 @@ vibeguard/
 │       ├── _finding.py             (shared Finding dataclass)
 │       ├── _credential_names.py    (shared credential-name heuristic)
 │       ├── _endpoint_annotations.py (shared endpoint-annotation heuristic)
+│       ├── _authorization_annotations.py (shared framework authorization-annotation set; used by cwe_284.py and cwe_287.py)
 │       ├── cwe_798.py
 │       ├── cwe_284.py
 │       ├── cwe_287.py
@@ -120,12 +121,16 @@ vibeguard/
 │   ├── dataset.py               (labelled JSON dataset loader, project-relative paths only)
 │   └── evaluator.py             (accuracy / macro-F1 / confusion matrix)
 ├── layer5_report/
-│   └── (not started)
+│   ├── report.py                (ProjectRiskReport assembly + console rendering)
+│   └── explainer.py             (SHAP attribution for the predicted risk label)
 ├── data/
 │   ├── sample_apps/
 │   └── labeled/
 ├── evaluation/
-│   └── evaluate.py
+│   ├── evaluate.py              (Layer 4 metrics: in-sample, leave-one-out, fixed-baseline comparison)
+│   ├── thesis_orchestrator.py   (combined scan + evaluation artifact bundle)
+│   ├── thesis_run.py            (single-command wrapper around the orchestrator)
+│   └── human_baseline.py        (blind human-rater survey vs. ground-truth/Layer 4/Layer 3 comparison)
 ├── tests/
 │   └── fixtures/
 ├── IMPLEMENTATION_LOG.md
@@ -145,16 +150,16 @@ Note: exact version floors above come from the 2026-07-13 dependency vulnerabili
 
 ## 7. Build Order
 
-**Current status: Layers 1–5 are all frozen.** Layer 5 passed its independent adversarial QA pass on 2026-07-30 (SHAP multiclass shape validation hardened, CLI reporting failures made fail-closed) and is frozen. Layer 1 has since been narrowly reopened and re-frozen twice more on the same "real-world QA found a blocking gap" grounds already established for it: once for the Layer 4 dataset-circularity fix's supporting work, and again on 2026-09-02 when scanning real, independently-maintained repositories (`.qa-repos/spring-petclinic-rest`, `.qa-repos/quarkus-super-heroes`) found CWE-284 blind to centralized Spring Security authorization config, fixed as a fail-closed caveat (never a suppression) — see `IMPLEMENTATION_LOG.md`. The build order below is the original plan — for what's actually built and what remains, `IMPLEMENTATION_LOG.md` and Section 8's freeze status are authoritative, not this list.
+**Current status: Layers 1–5 are all frozen.** Layer 5 passed its independent adversarial QA pass on 2026-07-30 (SHAP multiclass shape validation hardened, CLI reporting failures made fail-closed) and is frozen. Layer 1 has since been narrowly reopened and re-frozen several more times on the same "real-world QA found a blocking gap" grounds already established for it: for the Layer 4 dataset-circularity fix's supporting work; on 2026-09-02 when scanning `.qa-repos/spring-petclinic-rest` and `.qa-repos/quarkus-super-heroes` found CWE-284 blind to centralized Spring Security authorization config, fixed as a fail-closed caveat (never a suppression); and again on 2026-09-04, when a new `cwe_287.py` unguarded-secret-return detector was built after a genuine account-takeover bug was under-predicted, `cwe_284.py`'s centralized-authorization detection was extended to the older `WebSecurityConfigurerAdapter` Spring Security style after real-repo QA on a newly-added reference backend, and `scanner.py`'s test-root exclusion was extended to Maven Failsafe's `src/it/`; and again on 2026-09-10, when the human-baseline comparison's confirmation of CWE-284's hand-rolled-authorization blind spot led to a second, per-method caveat mechanism (`apply_hand_rolled_guard_context`, alongside the existing project-wide centralized-authorization one) for the dominant real-world pattern (a caller-supplied header compared against a configured value) — see `IMPLEMENTATION_LOG.md`. The build order below is the original plan — for what's actually built and what remains, `IMPLEMENTATION_LOG.md` and Section 8's freeze status are authoritative, not this list.
 
 1. ~~`ast_parser.py` — Java AST parsing via `javalang`~~ — done. Now a dual-parser dispatch: `javalang` (+ `_modern_java_preprocessor.py` text-level desugaring) as primary, `tree-sitter`/`tree-sitter-java` as fallback for syntax neither of those handles (e.g. records with bodies, switch expressions). `ParsedFile` exposes both `tree` and `tree_sitter` AST slots.
 2. ~~`rules/cwe_798.py`~~ — done, including config-file detection, assignment/call-site literal coverage, and both parser paths.
 3. ~~Remaining four CWE rule modules~~ — done (`cwe_284.py`, `cwe_287.py`, `cwe_20.py`, `cwe_1035.py`), all with both parser paths where applicable (`cwe_1035.py` is POM-only, no Java AST involved).
 4. ~~`scanner.py`~~ — done, including symlink-escape protection, build/IDE-output exclusion, and conventional-test-root exclusion scoped narrowly (not a blanket name match).
-5. Layer 2 (feature extraction) — done and frozen. Layer 3 (rule-based scoring) — done and frozen. Layer 4 (ML) — done and frozen: project-level Random Forest, labelled dataset loader, deterministic leave-one-out evaluator, and trusted retraining-based model contract are all in place. Its labelled dataset was expanded from 8 to 15 controlled projects on 2026-09-02 after review found the original 8 could not distinguish the ML classifier from a fixed max-severity baseline (they scored identically on the expanded dataset too — see `IMPLEMENTATION_LOG.md` for the honest result and why). Layer 5 (SHAP explainability + reporting) — implemented 2026-07-22, passed independent QA 2026-07-30, frozen.
-6. `evaluation/evaluate.py` — implemented on 2026-07-22 as a thesis-evaluation convenience wrapper around the frozen Layer 4 contract/dataset workflow; renders console metrics, leave-one-out predictions, confusion-matrix summaries, and (since 2026-09-02) a fixed-baseline comparison row alongside the ML metrics.
+5. Layer 2 (feature extraction) — done and frozen. Layer 3 (rule-based scoring) — done and frozen. Layer 4 (ML) — done and frozen: project-level Random Forest, labelled dataset loader, deterministic leave-one-out evaluator, and trusted retraining-based model contract are all in place. Its labelled dataset was expanded across five batches from the original 8 to the thesis's full stated target of 50 controlled/AI-generated projects (8 → 15 → 22 → 32 → 42 → 50, 2026-09-02 through 2026-09-04). Leave-one-out accuracy now exceeds a fixed max-severity baseline in aggregate (0.58 vs. 0.40 on the full 50) — a real, measured edge, but not universal across every batch (one batch specifically favours the baseline instead) — see `IMPLEMENTATION_LOG.md` for the honest per-batch breakdown, not just the aggregate number. Layer 5 (SHAP explainability + reporting) — implemented 2026-07-22, passed independent QA 2026-07-30, frozen.
+6. `evaluation/evaluate.py` — implemented on 2026-07-22 as a thesis-evaluation convenience wrapper around the frozen Layer 4 contract/dataset workflow; renders console metrics, leave-one-out predictions, confusion-matrix summaries, and (since 2026-09-02) a fixed-baseline comparison row alongside the ML metrics. `evaluation/thesis_orchestrator.py`/`thesis_run.py` (added 2026-09-02, a path-resolution bug affecting relative/aliased output directories fixed 2026-09-08) combine a real scan with this evaluation into one thesis-evidence artifact bundle. `evaluation/human_baseline.py` (added 2026-09-09) compares an independent blind human-rater survey (natural-language case descriptions only, no source code shown) against the ground-truth label, Layer 4 prediction, and Layer 3 rule severity for the same projects.
 
-**Next actual piece of work:** continue evaluating precision/recall against real, independently-maintained repositories (two are already available under `.qa-repos/` for this) rather than only controlled sample apps — the 2026-09-02 pass already found and addressed two real gaps this way (see `IMPLEMENTATION_LOG.md`) and more real-repo testing is the highest-value remaining evaluation work. Public-release housekeeping (LICENSE, CI, dependency hygiene) is a parallel, lower-risk track, not a substitute for it.
+**Next actual piece of work:** continue evaluating precision/recall against real, independently-maintained repositories (four are already available under `.qa-repos/`: `spring-petclinic-rest`, `quarkus-super-heroes`, the RealWorld reference backend, and OWASP WebGoat) rather than only controlled sample apps — this track has already found and fixed several real Layer 1 gaps this way (see `IMPLEMENTATION_LOG.md`) and more real-repo testing remains the highest-value evaluation work, alongside following up on the human-baseline comparison's flagged Layer 4 miss (`ai-admin-report-export-service`, Case 17). Public-release housekeeping (LICENSE, CI, dependency hygiene) is already in place as a parallel, lower-risk track — not a substitute for the evaluation work above.
 
 ---
 

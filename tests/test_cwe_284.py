@@ -4,12 +4,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import javalang
+
 from vibeguard.layer1_static.ast_parser import parse_file
+from vibeguard.layer1_static.rules._interface_annotations import build_interface_method_index
 from vibeguard.layer1_static.rules.cwe_284 import (
     CWE_ID,
     apply_centralized_authorization_context,
+    apply_hand_rolled_guard_context,
     detect_in_java,
     has_centralized_authorization_rule,
+    has_inline_header_guard,
 )
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -503,3 +508,466 @@ def test_apply_centralized_authorization_context_never_drops_findings(tmp_path: 
     )
 
     assert len(annotated) == len(findings)
+
+
+def _first_method(
+    tree: javalang.tree.CompilationUnit, name: str
+) -> javalang.tree.MethodDeclaration:
+    for _path, method in tree.filter(javalang.tree.MethodDeclaration):
+        if method.name == name:
+            return method
+    raise AssertionError(f"no method named {name!r} in {tree!r}")
+
+
+# Mirrors the real ai-api-key-service/ai-oauth-refresh-service shape: a
+# caller-supplied header compared directly against a configured value,
+# bailing out on mismatch - see IMPLEMENTATION_LOG.md's 2026-09-10 entry.
+_DIRECT_HEADER_GUARD_JAVA = (
+    "import org.springframework.web.bind.annotation.*;\n"
+    "@RestController\n"
+    "public class ApiKeyController {\n"
+    '    @Value("${API_KEY_ADMIN_KEY:}") private String adminKey;\n'
+    "    @PostMapping\n"
+    '    public String issue(@RequestHeader("X-Api-Key-Admin-Key") String supplied) {\n'
+    '        if (!adminKey.equals(supplied)) return "unauthorized";\n'
+    '        return "ok";\n'
+    "    }\n"
+    "}\n"
+)
+
+
+def test_has_inline_header_guard_detects_direct_comparison() -> None:
+    tree = javalang.parse.parse(_DIRECT_HEADER_GUARD_JAVA)
+    method = _first_method(tree, "issue")
+
+    assert has_inline_header_guard(method) is True
+
+
+def test_has_inline_header_guard_detects_combined_or_condition() -> None:
+    """Mirrors ai-oauth-refresh-service's refresh(): the comparison is one
+    operand of a larger ``||`` condition, not the whole condition."""
+    java = (
+        "import org.springframework.web.bind.annotation.*;\n"
+        "public class TokenController {\n"
+        '    @Value("${OAUTH_CLIENT_KEY:}") private String clientKey;\n'
+        "    @PostMapping\n"
+        '    public String refresh(@RequestHeader("X-OAuth-Client-Key") String supplied, '
+        "String grantType) {\n"
+        '        if (!clientKey.equals(supplied) || !"refresh_token".equals(grantType)) '
+        'return "unauthorized";\n'
+        '        return "ok";\n'
+        "    }\n"
+        "}\n"
+    )
+    tree = javalang.parse.parse(java)
+    method = _first_method(tree, "refresh")
+
+    assert has_inline_header_guard(method) is True
+
+
+def test_has_inline_header_guard_detects_message_digest_is_equal() -> None:
+    java = (
+        "import org.springframework.web.bind.annotation.*;\n"
+        "public class VaultController {\n"
+        '    @Value("${VAULT_KEY:}") private String vaultKey;\n'
+        "    @PostMapping\n"
+        '    public String save(@RequestHeader("X-Vault-Key") String supplied) {\n'
+        "        if (!MessageDigest.isEqual(vaultKey.getBytes(), supplied.getBytes())) "
+        'return "unauthorized";\n'
+        '        return "ok";\n'
+        "    }\n"
+        "}\n"
+    )
+    tree = javalang.parse.parse(java)
+    method = _first_method(tree, "save")
+
+    assert has_inline_header_guard(method) is True
+
+
+def test_has_inline_header_guard_false_for_blank_check_without_caller_input() -> None:
+    """Mirrors ai-payments-service: checks a config value is non-blank, but
+    never compares it against anything the caller supplied - not an
+    authorization check, must not match."""
+    java = (
+        "import org.springframework.web.bind.annotation.*;\n"
+        "public class PaymentController {\n"
+        '    @Value("${PAYMENT_PROVIDER_API_KEY:}") private String providerApiKey;\n'
+        "    @PostMapping\n"
+        '    public String charge(@RequestHeader("X-Trace-Id") String traceId) {\n'
+        '        if (providerApiKey.isBlank()) return "unavailable";\n'
+        '        return "ok";\n'
+        "    }\n"
+        "}\n"
+    )
+    tree = javalang.parse.parse(java)
+    method = _first_method(tree, "charge")
+
+    assert has_inline_header_guard(method) is False
+
+
+def test_has_inline_header_guard_false_for_unguarded_method() -> None:
+    java = (
+        "import org.springframework.web.bind.annotation.*;\n"
+        "public class OpenController {\n"
+        "    @PostMapping\n"
+        '    public String save(@RequestHeader("X-Trace-Id") String traceId) {\n'
+        '        return "ok";\n'
+        "    }\n"
+        "}\n"
+    )
+    tree = javalang.parse.parse(java)
+    method = _first_method(tree, "save")
+
+    assert has_inline_header_guard(method) is False
+
+
+def test_has_inline_header_guard_false_without_any_header_parameter() -> None:
+    java = (
+        "import org.springframework.web.bind.annotation.*;\n"
+        "public class OpenController {\n"
+        '    @Value("${KEY:}") private String key;\n'
+        "    @PostMapping\n"
+        "    public String save(String body) {\n"
+        '        if (!key.equals(body)) return "unauthorized";\n'
+        '        return "ok";\n'
+        "    }\n"
+        "}\n"
+    )
+    tree = javalang.parse.parse(java)
+    method = _first_method(tree, "save")
+
+    assert has_inline_header_guard(method) is False
+
+
+def test_apply_hand_rolled_guard_context_appends_caveat_only_to_guarded_method(
+    tmp_path: Path,
+) -> None:
+    """Per-method precision: an unguarded sibling endpoint in the same class
+    must not be caveated just because another method in the same file has a
+    guard - unlike the centralized-authorization caveat, which is
+    deliberately project-wide, this one must stay narrowly scoped."""
+    java_file = tmp_path / "ApiKeyController.java"
+    assert _DIRECT_HEADER_GUARD_JAVA.endswith("}\n")
+    java_file.write_text(
+        _DIRECT_HEADER_GUARD_JAVA[: -len("}\n")]
+        + '    @DeleteMapping("/{id}")\n'
+        + '    public String revoke(String id) { return "ok"; }\n'
+        + "}\n"
+    )
+
+    result = parse_file(java_file)
+    findings = detect_in_java(result)
+    assert {f.identifier for f in findings} == {"issue", "revoke"}
+
+    annotated = apply_hand_rolled_guard_context(findings, (result,))
+
+    by_identifier = {f.identifier: f for f in annotated}
+    assert "hand-rolled authorization check" in by_identifier["issue"].message
+    assert "hand-rolled authorization check" not in by_identifier["revoke"].message
+
+
+def test_apply_hand_rolled_guard_context_no_op_when_absent(tmp_path: Path) -> None:
+    java_file = tmp_path / "OpenController.java"
+    java_file.write_text(
+        "import org.springframework.web.bind.annotation.*;\n"
+        "@RestController\n"
+        "public class OpenController {\n"
+        "    @PostMapping\n"
+        '    public String save(@RequestHeader("X-Trace-Id") String traceId) {\n'
+        '        return "ok";\n'
+        "    }\n"
+        "}\n"
+    )
+    result = parse_file(java_file)
+    findings = detect_in_java(result)
+
+    unchanged = apply_hand_rolled_guard_context(findings, (result,))
+
+    assert unchanged == findings
+
+
+def test_apply_hand_rolled_guard_context_never_drops_findings(tmp_path: Path) -> None:
+    java_file = tmp_path / "ApiKeyController.java"
+    java_file.write_text(_DIRECT_HEADER_GUARD_JAVA)
+    result = parse_file(java_file)
+    findings = detect_in_java(result)
+
+    annotated = apply_hand_rolled_guard_context(findings, (result,))
+
+    assert len(annotated) == len(findings)
+
+
+def test_apply_hand_rolled_guard_context_tree_sitter_fallback(tmp_path: Path) -> None:
+    """The same direct-comparison guard must be detected on a Tree-sitter
+    fallback parse, and attach the same per-method caveat."""
+    java_file = tmp_path / "ApiKeyController.java"
+    java_file.write_text(
+        "import org.springframework.web.bind.annotation.*;\n"
+        "@RestController\n"
+        "public class ApiKeyController {\n"
+        '    @Value("${API_KEY_ADMIN_KEY:}") private String adminKey;\n'
+        "    int helper(int level) {\n"
+        "        return switch (level) {\n"
+        "            case 1 -> 1;\n"
+        "            default -> 0;\n"
+        "        };\n"
+        "    }\n"
+        "    @PostMapping\n"
+        '    public String issue(@RequestHeader("X-Api-Key-Admin-Key") String supplied) {\n'
+        '        if (!adminKey.equals(supplied)) return "unauthorized";\n'
+        '        return "ok";\n'
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+    assert result.tree_sitter is not None
+    findings = detect_in_java(result)
+    assert len(findings) == 1
+
+    annotated = apply_hand_rolled_guard_context(findings, (result,))
+
+    assert "hand-rolled authorization check" in annotated[0].message
+
+
+# -- Interface-inherited annotation resolution -------------------------------
+#
+# Reproduces the real gap found scanning spring-petclinic-rest: a concrete
+# class implementing a codegen-style interface (Spring's
+# openapi-generator-maven-plugin output) that carries the real
+# @GetMapping/@PostMapping annotations only on the *interface* method,
+# with the concrete @Override implementation carrying none of its own -
+# see IMPLEMENTATION_LOG.md's 2026-09-02 entry.
+
+_OWNERS_API_INTERFACE_JAVA = (
+    "import org.springframework.web.bind.annotation.GetMapping;\n"
+    "public interface OwnersApi {\n"
+    '    @GetMapping("/owners/{id}")\n'
+    "    String getOwner(int id);\n"
+    "}\n"
+)
+
+_OWNERS_API_WITH_PREAUTHORIZE_JAVA = (
+    "import org.springframework.web.bind.annotation.GetMapping;\n"
+    "import org.springframework.security.access.prepost.PreAuthorize;\n"
+    "public interface OwnersApi {\n"
+    '    @GetMapping("/owners/{id}")\n'
+    "    @PreAuthorize(\"hasRole('ADMIN')\")\n"
+    "    String getOwner(int id);\n"
+    "}\n"
+)
+
+_UNRELATED_INTERFACE_JAVA = (
+    "import org.springframework.security.access.prepost.PreAuthorize;\n"
+    "public interface UnrelatedApi {\n"
+    "    @PreAuthorize(\"hasRole('ADMIN')\")\n"
+    "    String getOwner(int id);\n"
+    "}\n"
+)
+
+
+def test_detect_in_java_finds_endpoint_inherited_from_implemented_interface(
+    tmp_path: Path,
+) -> None:
+    """A concrete @Override method with no annotations of its own must
+    still be recognized as an endpoint when the interface it implements
+    declares @GetMapping on the matching method - the exact real-world
+    codegen-controller shape this index was built for."""
+    (tmp_path / "OwnersApi.java").write_text(_OWNERS_API_INTERFACE_JAVA)
+    controller_file = tmp_path / "OwnerRestControllerV1.java"
+    controller_file.write_text(
+        "public class OwnerRestControllerV1 implements OwnersApi {\n"
+        "    @Override\n"
+        "    public String getOwner(int id) {\n"
+        '        return "owner";\n'
+        "    }\n"
+        "}\n"
+    )
+    interface_result = parse_file(tmp_path / "OwnersApi.java")
+    controller_result = parse_file(controller_file)
+    index = build_interface_method_index((interface_result, controller_result))
+
+    # Without the index, the gap this fix targets reproduces exactly:
+    # the method is invisible as an endpoint at all.
+    assert detect_in_java(controller_result) == ()
+
+    findings = detect_in_java(controller_result, index)
+
+    assert len(findings) == 1
+    assert findings[0].identifier == "getOwner"
+    assert "interface" not in findings[0].message  # no auth-caveat: interface has none
+
+
+def test_detect_in_java_adds_caveat_when_interface_method_has_authorization(
+    tmp_path: Path,
+) -> None:
+    """An interface-declared @PreAuthorize on the matching method must
+    NOT silently suppress the finding - whether it's actually enforced
+    depends on Spring's proxy style (CGLIB vs. JDK dynamic proxy), which
+    is not visible to static analysis. The finding must still fire, with
+    an honest caveat attached."""
+    (tmp_path / "OwnersApi.java").write_text(_OWNERS_API_WITH_PREAUTHORIZE_JAVA)
+    controller_file = tmp_path / "OwnerRestControllerV1.java"
+    controller_file.write_text(
+        "public class OwnerRestControllerV1 implements OwnersApi {\n"
+        "    @Override\n"
+        "    public String getOwner(int id) {\n"
+        '        return "owner";\n'
+        "    }\n"
+        "}\n"
+    )
+    interface_result = parse_file(tmp_path / "OwnersApi.java")
+    controller_result = parse_file(controller_file)
+    index = build_interface_method_index((interface_result, controller_result))
+
+    findings = detect_in_java(controller_result, index)
+
+    assert len(findings) == 1
+    assert "proxy style" in findings[0].message
+    assert "PreAuthorize" in findings[0].message
+
+
+def test_detect_in_java_does_not_add_caveat_when_own_class_is_authorized(
+    tmp_path: Path,
+) -> None:
+    """Coverage from the concrete method/class's own annotations - not
+    proxy-dependent at all, since Spring always invokes the real bean's
+    own annotations - must still fully suppress the finding, with no
+    interface-authorization caveat attached."""
+    (tmp_path / "OwnersApi.java").write_text(_OWNERS_API_INTERFACE_JAVA)
+    controller_file = tmp_path / "OwnerRestControllerV1.java"
+    controller_file.write_text(
+        "import org.springframework.security.access.prepost.PreAuthorize;\n"
+        "public class OwnerRestControllerV1 implements OwnersApi {\n"
+        "    @Override\n"
+        "    @PreAuthorize(\"hasRole('ADMIN')\")\n"
+        "    public String getOwner(int id) {\n"
+        '        return "owner";\n'
+        "    }\n"
+        "}\n"
+    )
+    interface_result = parse_file(tmp_path / "OwnersApi.java")
+    controller_result = parse_file(controller_file)
+    index = build_interface_method_index((interface_result, controller_result))
+
+    assert detect_in_java(controller_result, index) == ()
+
+
+def test_detect_in_java_does_not_borrow_annotations_from_an_unimplemented_interface(
+    tmp_path: Path,
+) -> None:
+    """A same-named method on an interface this class does NOT implement
+    must never contribute annotations - only types actually listed in
+    the class's own ``implements`` clause are consulted."""
+    (tmp_path / "OwnersApi.java").write_text(_OWNERS_API_INTERFACE_JAVA)
+    (tmp_path / "UnrelatedApi.java").write_text(_UNRELATED_INTERFACE_JAVA)
+    controller_file = tmp_path / "OwnerRestControllerV1.java"
+    controller_file.write_text(
+        "public class OwnerRestControllerV1 implements OwnersApi {\n"
+        "    @Override\n"
+        "    public String getOwner(int id) {\n"
+        '        return "owner";\n'
+        "    }\n"
+        "}\n"
+    )
+    index = build_interface_method_index(
+        (
+            parse_file(tmp_path / "OwnersApi.java"),
+            parse_file(tmp_path / "UnrelatedApi.java"),
+            parse_file(controller_file),
+        )
+    )
+
+    findings = detect_in_java(parse_file(controller_file), index)
+
+    # OwnersApi contributes @GetMapping (endpoint, no auth) - found, no
+    # caveat. UnrelatedApi's @PreAuthorize must not leak in even though
+    # it shares the method name "getOwner".
+    assert len(findings) == 1
+    assert "proxy style" not in findings[0].message
+
+
+def test_detect_in_java_finds_endpoint_inherited_from_interface_tree_sitter_fallback(
+    tmp_path: Path,
+) -> None:
+    """The same interface-inherited-endpoint resolution must hold when
+    the concrete file takes the Tree-sitter fallback path."""
+    (tmp_path / "OwnersApi.java").write_text(_OWNERS_API_INTERFACE_JAVA)
+    controller_file = tmp_path / "OwnerRestControllerV1.java"
+    controller_file.write_text(
+        "public class OwnerRestControllerV1 implements OwnersApi {\n"
+        "    @Override\n"
+        "    public String getOwner(int id) {\n"
+        "        return switch (id) {\n"
+        '            case 1 -> "first";\n'
+        '            default -> "owner";\n'
+        "        };\n"
+        "    }\n"
+        "}\n"
+    )
+    interface_result = parse_file(tmp_path / "OwnersApi.java")
+    controller_result = parse_file(controller_file)
+    assert controller_result.tree_sitter is not None
+    index = build_interface_method_index((interface_result, controller_result))
+
+    assert detect_in_java(controller_result) == ()
+    findings = detect_in_java(controller_result, index)
+
+    assert len(findings) == 1
+    assert findings[0].identifier == "getOwner"
+
+
+def test_build_interface_method_index_is_order_independent_on_colliding_simple_names(
+    tmp_path: Path,
+) -> None:
+    """Two distinct top-level types sharing a simple name (real, not
+    hypothetical - confirmed to occur repeatedly in real repositories,
+    e.g. multiple unrelated ``UserService`` interfaces in different
+    packages) must never let file-processing order decide whether a
+    real vulnerability is found. An earlier version of this index let
+    whichever declaration was scanned last silently win, which meant
+    the exact same source code could either correctly flag or silently
+    miss the same unprotected endpoint purely depending on scan order -
+    the index must instead exclude the ambiguous name entirely,
+    deterministically, regardless of which order the files are given in.
+    """
+    package_a_dir = tmp_path / "a"
+    package_a_dir.mkdir()
+    (package_a_dir / "Service.java").write_text(
+        "package a;\n"
+        "import org.springframework.web.bind.annotation.GetMapping;\n"
+        "public interface Service {\n"
+        '    @GetMapping("/a")\n'
+        "    String run();\n"
+        "}\n"
+    )
+    package_b_dir = tmp_path / "b"
+    package_b_dir.mkdir()
+    (package_b_dir / "Service.java").write_text(
+        "package b;\npublic interface Service {\n    void run();\n}\n"
+    )
+    controller_file = tmp_path / "Controller.java"
+    controller_file.write_text(
+        "import a.Service;\n"
+        "public class Controller implements Service {\n"
+        "    @Override\n"
+        "    public String run() {\n"
+        '        return "ok";\n'
+        "    }\n"
+        "}\n"
+    )
+
+    a_result = parse_file(package_a_dir / "Service.java")
+    b_result = parse_file(package_b_dir / "Service.java")
+    controller_result = parse_file(controller_file)
+
+    index_a_first = build_interface_method_index((a_result, b_result, controller_result))
+    index_b_first = build_interface_method_index((b_result, a_result, controller_result))
+
+    findings_a_first = detect_in_java(controller_result, index_a_first)
+    findings_b_first = detect_in_java(controller_result, index_b_first)
+
+    assert findings_a_first == findings_b_first
+    # The ambiguous name is excluded entirely (degrading to pre-feature
+    # behavior), not resolved to either candidate's annotations.
+    assert findings_a_first == ()

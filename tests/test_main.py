@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
 import main
+import process_supervisor
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -160,3 +164,42 @@ def test_main_returns_nonzero_when_shap_reporting_raises_runtime_error(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "ML/reporting failed: boom" in captured.err
+
+
+def test_main_dunder_dispatch_builds_the_correct_supervised_child_command(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """main.py's own __main__ wiring must hand the shared supervisor the
+    right child command (its own script path, re-invoked) - the generic
+    crash/hang/token behavior itself is covered by
+    tests/test_process_supervisor.py, not duplicated here."""
+    completed = SimpleNamespace(returncode=0)
+    with patch("process_supervisor.subprocess.run", return_value=completed) as mock_run:
+        result = process_supervisor.run_as_supervised_subprocess(
+            [sys.executable, str(Path(main.__file__).resolve()), "some/path"]
+        )
+    capsys.readouterr()
+
+    assert result == 0
+    (call_args,), _call_kwargs = mock_run.call_args
+    assert call_args == [sys.executable, str(Path(main.__file__).resolve()), "some/path"]
+
+
+def test_real_script_invocation_is_supervised_and_transparent_on_success() -> None:
+    """End-to-end check of the actual ``__main__`` dispatch, not just the
+    helper function in isolation: running ``python main.py <clean file>``
+    as a genuine subprocess (mirroring real CLI use - no worker env var
+    set, so __main__ takes the supervisor branch) must still produce
+    exit code 0, proving the wrapper adds one layer of re-exec but does
+    not change the CLI's observable exit-code contract."""
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(Path(main.__file__).resolve()),
+            str(FIXTURES_DIR / "CleanService.java"),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0

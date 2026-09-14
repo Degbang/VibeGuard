@@ -297,7 +297,7 @@
           "file_path": "src/main/java/com/vibeguard/samples/orders/OrderController.java",
           "line": 26,
           "identifier": "create",
-          "message": "Endpoint method 'create' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class) Note: this project also declares a Spring Security SecurityFilterChain with a project-wide '.anyRequest()' authorization rule elsewhere - this endpoint may already be covered by that rule depending on path-matching and runtime configuration (e.g. a conditional property) that is not visible to static analysis.",
+          "message": "Endpoint method 'create' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class) Note: this project also declares centralized Spring Security configuration (a SecurityFilterChain bean or a WebSecurityConfigurerAdapter override) with a project-wide '.anyRequest()' authorization rule elsewhere - this endpoint may already be covered by that rule depending on path-matching and runtime configuration (e.g. a conditional property) that is not visible to static analysis.",
           "redacted_value": null
         },
         {
@@ -305,7 +305,7 @@
           "file_path": "src/main/java/com/vibeguard/samples/orders/OrderController.java",
           "line": 32,
           "identifier": "get",
-          "message": "Endpoint method 'get' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class) Note: this project also declares a Spring Security SecurityFilterChain with a project-wide '.anyRequest()' authorization rule elsewhere - this endpoint may already be covered by that rule depending on path-matching and runtime configuration (e.g. a conditional property) that is not visible to static analysis.",
+          "message": "Endpoint method 'get' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class) Note: this project also declares centralized Spring Security configuration (a SecurityFilterChain bean or a WebSecurityConfigurerAdapter override) with a project-wide '.anyRequest()' authorization rule elsewhere - this endpoint may already be covered by that rule depending on path-matching and runtime configuration (e.g. a conditional property) that is not visible to static analysis.",
           "redacted_value": null
         }
       ]
@@ -737,7 +737,7 @@
           "file_path": "src/main/java/com/vibeguard/samples/webhooks/PaymentWebhookController.java",
           "line": 1,
           "identifier": "receive",
-          "message": "Endpoint method 'receive' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "message": "Endpoint method 'receive' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class) Note: this endpoint method itself contains a conditional check comparing a caller-supplied header against another value before continuing (a hand-rolled authorization check) - this rule cannot verify whether that check is correct, complete, or even authorization-related, only that no framework authorization annotation covers it.",
           "redacted_value": null
         },
         {
@@ -809,7 +809,7 @@
           "file_path": "src/main/java/com/vibeguard/samples/linking/AccountLinkController.java",
           "line": 1,
           "identifier": "link",
-          "message": "Endpoint method 'link' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "message": "Endpoint method 'link' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class) Note: this endpoint method itself contains a conditional check comparing a caller-supplied header against another value before continuing (a hand-rolled authorization check) - this rule cannot verify whether that check is correct, complete, or even authorization-related, only that no framework authorization annotation covers it.",
           "redacted_value": null
         }
       ]
@@ -825,7 +825,7 @@
           "file_path": "src/main/java/com/vibeguard/samples/flags/FlagController.java",
           "line": 1,
           "identifier": "create",
-          "message": "Endpoint method 'create' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "message": "Endpoint method 'create' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class) Note: this endpoint method itself contains a conditional check comparing a caller-supplied header against another value before continuing (a hand-rolled authorization check) - this rule cannot verify whether that check is correct, complete, or even authorization-related, only that no framework authorization annotation covers it.",
           "redacted_value": null
         },
         {
@@ -833,7 +833,7 @@
           "file_path": "src/main/java/com/vibeguard/samples/flags/FlagController.java",
           "line": 1,
           "identifier": "toggle",
-          "message": "Endpoint method 'toggle' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "message": "Endpoint method 'toggle' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class) Note: this endpoint method itself contains a conditional check comparing a caller-supplied header against another value before continuing (a hand-rolled authorization check) - this rule cannot verify whether that check is correct, complete, or even authorization-related, only that no framework authorization annotation covers it.",
           "redacted_value": null
         },
         {
@@ -857,7 +857,7 @@
           "file_path": "src/main/java/com/vibeguard/samples/health/HealthController.java",
           "line": 1,
           "identifier": "status",
-          "message": "Endpoint method 'status' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "message": "Endpoint method 'status' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class) Note: this endpoint method itself contains a conditional check comparing a caller-supplied header against another value before continuing (a hand-rolled authorization check) - this rule cannot verify whether that check is correct, complete, or even authorization-related, only that no framework authorization annotation covers it.",
           "redacted_value": null
         }
       ]
@@ -873,7 +873,7 @@
           "file_path": "src/main/java/com/vibeguard/samples/imports/ImportController.java",
           "line": 1,
           "identifier": "importUsers",
-          "message": "Endpoint method 'importUsers' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "message": "Endpoint method 'importUsers' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class) Note: this endpoint method itself contains a conditional check comparing a caller-supplied header against another value before continuing (a hand-rolled authorization check) - this rule cannot verify whether that check is correct, complete, or even authorization-related, only that no framework authorization annotation covers it.",
           "redacted_value": null
         }
       ]
@@ -889,7 +889,7 @@
           "file_path": "src/main/java/com/vibeguard/samples/apikeys/ApiKeyController.java",
           "line": 1,
           "identifier": "issue",
-          "message": "Endpoint method 'issue' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "message": "Endpoint method 'issue' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class) Note: this endpoint method itself contains a conditional check comparing a caller-supplied header against another value before continuing (a hand-rolled authorization check) - this rule cannot verify whether that check is correct, complete, or even authorization-related, only that no framework authorization annotation covers it.",
           "redacted_value": null
         },
         {
@@ -897,7 +897,7 @@
           "file_path": "src/main/java/com/vibeguard/samples/apikeys/ApiKeyController.java",
           "line": 1,
           "identifier": "revoke",
-          "message": "Endpoint method 'revoke' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "message": "Endpoint method 'revoke' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class) Note: this endpoint method itself contains a conditional check comparing a caller-supplied header against another value before continuing (a hand-rolled authorization check) - this rule cannot verify whether that check is correct, complete, or even authorization-related, only that no framework authorization annotation covers it.",
           "redacted_value": null
         }
       ]
@@ -913,7 +913,7 @@
           "file_path": "src/main/java/com/vibeguard/samples/oauth/TokenController.java",
           "line": 1,
           "identifier": "issue",
-          "message": "Endpoint method 'issue' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "message": "Endpoint method 'issue' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class) Note: this endpoint method itself contains a conditional check comparing a caller-supplied header against another value before continuing (a hand-rolled authorization check) - this rule cannot verify whether that check is correct, complete, or even authorization-related, only that no framework authorization annotation covers it.",
           "redacted_value": null
         },
         {
@@ -921,7 +921,7 @@
           "file_path": "src/main/java/com/vibeguard/samples/oauth/TokenController.java",
           "line": 1,
           "identifier": "refresh",
-          "message": "Endpoint method 'refresh' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "message": "Endpoint method 'refresh' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class) Note: this endpoint method itself contains a conditional check comparing a caller-supplied header against another value before continuing (a hand-rolled authorization check) - this rule cannot verify whether that check is correct, complete, or even authorization-related, only that no framework authorization annotation covers it.",
           "redacted_value": null
         }
       ]
@@ -937,7 +937,7 @@
           "file_path": "src/main/java/com/vibeguard/samples/lockouts/LockoutController.java",
           "line": 1,
           "identifier": "failure",
-          "message": "Endpoint method 'failure' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "message": "Endpoint method 'failure' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class) Note: this endpoint method itself contains a conditional check comparing a caller-supplied header against another value before continuing (a hand-rolled authorization check) - this rule cannot verify whether that check is correct, complete, or even authorization-related, only that no framework authorization annotation covers it.",
           "redacted_value": null
         },
         {
@@ -945,7 +945,7 @@
           "file_path": "src/main/java/com/vibeguard/samples/lockouts/LockoutController.java",
           "line": 1,
           "identifier": "status",
-          "message": "Endpoint method 'status' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "message": "Endpoint method 'status' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class) Note: this endpoint method itself contains a conditional check comparing a caller-supplied header against another value before continuing (a hand-rolled authorization check) - this rule cannot verify whether that check is correct, complete, or even authorization-related, only that no framework authorization annotation covers it.",
           "redacted_value": null
         },
         {
@@ -953,7 +953,7 @@
           "file_path": "src/main/java/com/vibeguard/samples/lockouts/LockoutController.java",
           "line": 1,
           "identifier": "reset",
-          "message": "Endpoint method 'reset' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "message": "Endpoint method 'reset' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class) Note: this endpoint method itself contains a conditional check comparing a caller-supplied header against another value before continuing (a hand-rolled authorization check) - this rule cannot verify whether that check is correct, complete, or even authorization-related, only that no framework authorization annotation covers it.",
           "redacted_value": null
         }
       ]

@@ -8,17 +8,28 @@ runs every implemented CWE rule against successfully parsed files,
 normalizes/deduplicates findings via Layer 2, assigns deterministic
 Layer 3 scores, predicts project-level risk through Layer 4, and
 prints a Layer 5 SHAP explanation/report.
+
+When run as a script (``python main.py ...``, not imported and called
+as ``main()`` directly), the actual scan runs inside a supervised child
+process - see ``process_supervisor.run_as_supervised_subprocess``'s
+docstring for why: a real, reproduced native crash in the Tree-sitter
+fallback parser's underlying C binding cannot be caught with a Python
+``try/except``, so without this a large enough scan could die silently,
+losing every result with no trace at all, which Section 4's fail-closed
+requirement does not allow.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
 from rich.console import Console
 from rich.table import Table
 
+import process_supervisor
 from vibeguard.layer1_static._parsing_guards import ParseStatus
 from vibeguard.layer1_static.ast_parser import (
     DEFAULT_MAX_FILE_BYTES,
@@ -35,6 +46,7 @@ from vibeguard.layer1_static.config_parser import (
 from vibeguard.layer1_static.pom_parser import ParsedPomFile, parse_pom_file
 from vibeguard.layer1_static.rules import cwe_20, cwe_284, cwe_287, cwe_798, cwe_1035
 from vibeguard.layer1_static.rules._finding import Finding
+from vibeguard.layer1_static.rules._interface_annotations import build_interface_method_index
 from vibeguard.layer1_static.scanner import RejectedPath, ScanResult, scan_directory
 from vibeguard.layer2_features import extract_features
 from vibeguard.layer3_scoring import ScoredFinding, score_features
@@ -120,12 +132,12 @@ def _run_rules(result: ScanResult) -> tuple[Finding, ...]:
     AST/entries to inspect, and that failure is already surfaced
     separately via the parse report, not silently dropped.
     """
+    ok_java_files = tuple(jf for jf in result.java_files if jf.status == ParseStatus.OK)
+    interface_annotations = build_interface_method_index(ok_java_files)
     findings: list[Finding] = []
-    for java_file in result.java_files:
-        if java_file.status != ParseStatus.OK:
-            continue
+    for java_file in ok_java_files:
         findings.extend(cwe_798.detect_in_java(java_file))
-        findings.extend(cwe_284.detect_in_java(java_file))
+        findings.extend(cwe_284.detect_in_java(java_file, interface_annotations))
         findings.extend(cwe_287.detect_in_java(java_file))
         findings.extend(cwe_20.detect_in_java(java_file))
     for config_file in result.config_files:
@@ -136,10 +148,10 @@ def _run_rules(result: ScanResult) -> tuple[Finding, ...]:
         if pom_file.status != ParseStatus.OK:
             continue
         findings.extend(cwe_1035.detect_in_pom(pom_file))
-    return cwe_284.apply_centralized_authorization_context(
-        tuple(findings),
-        (jf for jf in result.java_files if jf.status == ParseStatus.OK),
+    findings_with_centralized_context = cwe_284.apply_centralized_authorization_context(
+        tuple(findings), ok_java_files
     )
+    return cwe_284.apply_hand_rolled_guard_context(findings_with_centralized_context, ok_java_files)
 
 
 def _score_findings(findings: tuple[Finding, ...]) -> tuple[ScoredFinding, ...]:
@@ -385,4 +397,12 @@ def _summarize(message: str | None, *, limit: int = 120) -> str:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    if process_supervisor.looks_like_supervisor_worker_token(
+        os.environ.get(process_supervisor.SUPERVISOR_WORKER_ENV_VAR)
+    ):
+        raise SystemExit(main())
+    raise SystemExit(
+        process_supervisor.run_as_supervised_subprocess(
+            [sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]]
+        )
+    )
