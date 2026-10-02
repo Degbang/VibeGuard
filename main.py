@@ -22,6 +22,7 @@ requirement does not allow.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import os
 import sys
 from pathlib import Path
@@ -43,7 +44,11 @@ from vibeguard.layer1_static.config_parser import (
     is_conventional_config_path,
     parse_config_file,
 )
-from vibeguard.layer1_static.pom_parser import ParsedPomFile, parse_pom_file
+from vibeguard.layer1_static.pom_parser import (
+    ParsedPomFile,
+    parse_pom_file,
+    resolve_inherited_versions,
+)
 from vibeguard.layer1_static.rules import cwe_20, cwe_284, cwe_287, cwe_798, cwe_1035
 from vibeguard.layer1_static.rules._finding import Finding
 from vibeguard.layer1_static.rules._interface_annotations import (
@@ -91,6 +96,9 @@ def main(argv: list[str] | None = None) -> int:
     if not result.java_files and not result.config_files and not result.pom_files:
         print(f"No .java/config/pom.xml files found under {args.path}", file=sys.stderr)
         return 1
+
+    if result.pom_files:
+        result = dataclasses.replace(result, pom_files=resolve_inherited_versions(result.pom_files))
 
     findings = _run_rules(result)
     try:

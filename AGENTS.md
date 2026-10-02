@@ -106,6 +106,7 @@ vibeguard/
 │       ├── _credential_names.py    (shared credential-name heuristic)
 │       ├── _endpoint_annotations.py (shared endpoint-annotation heuristic)
 │       ├── _authorization_annotations.py (shared framework authorization-annotation set; used by cwe_284.py and cwe_287.py)
+│       ├── _interface_annotations.py (project-wide interface method/parameter annotation index + nearest_enclosing_type; used by cwe_284.py and cwe_20.py)
 │       ├── cwe_798.py
 │       ├── cwe_284.py
 │       ├── cwe_287.py
@@ -122,7 +123,9 @@ vibeguard/
 │   └── evaluator.py             (accuracy / macro-F1 / confusion matrix)
 ├── layer5_report/
 │   ├── report.py                (ProjectRiskReport assembly + console rendering)
-│   └── explainer.py             (SHAP attribution for the predicted risk label)
+│   ├── explainer.py             (SHAP attribution for the predicted risk label)
+│   ├── plain_summary.py         (plain-language prose translation of the same SHAP output, no new computation)
+│   └── _feature_descriptions.py (Layer 4 feature name -> plain-English description map, used by plain_summary.py)
 ├── data/
 │   ├── sample_apps/
 │   └── labeled/
@@ -135,6 +138,7 @@ vibeguard/
 │   └── fixtures/
 ├── IMPLEMENTATION_LOG.md
 ├── main.py
+├── process_supervisor.py        (shared whole-process crash/hang supervisor; used by main.py and the evaluation/ entry points)
 ├── requirements.txt
 └── CLAUDE.md          <- this file
 ```

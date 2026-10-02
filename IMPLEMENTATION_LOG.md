@@ -7029,3 +7029,155 @@ purely environment/dependency hygiene. No code in `vibeguard/`,
 settled: the fix was verified by reconstructing the exact failure from a
 genuinely fresh environment, not merely patching the one venv already in
 use.
+
+---
+
+## [2026-10-02] - CWE-1035 resolves dependency versions inherited from a local multi-module (reactor) parent POM
+
+**Status: DRAFT, pending student review** (see note at end).
+
+**What the plan said:** `pom_parser.py`'s own module docstring had always
+stated this plainly as a known limitation: "Maven property substitution
+(`${propertyName}`) is resolved against the local `<properties>` block
+only; a property inherited from a parent POM this parser doesn't have
+access to resolves to `None` (unresolved), not a guess." The 2026-09-02
+real-repo entry measured the resulting recall gap directly (19/24
+unresolved on `spring-petclinic-rest`, 162/204 on
+`quarkus-super-heroes`) and the CLI's "Unchecked" column (also added
+that day) made the gap visible rather than silent, but neither entry
+attempted to close any of it. Asked directly whether a bounded, still
+fully local fix existed, found one: when a project's parent is itself a
+sibling `pom.xml` within the same scanned directory tree (a genuine
+multi-module "reactor" project, as opposed to a third-party BOM resolved
+from Maven Central/`~/.m2`), that parent's `<dependencyManagement>` and
+`<properties>` are already sitting right there, unread.
+
+**What we actually did:**
+
+1. **`ParsedPomFile` gained three new fields**: `dependency_management`
+   (a POM's own `<dependencyManagement>/<dependencies>` entries -
+   version *constraints*, never themselves used dependencies, already
+   the case for the direct-dependencies extraction and locked in by the
+   pre-existing `test_parse_ignores_dependency_management_entries`),
+   `parent` (a new `MavenParentReference` capturing the `<parent>`
+   element's `groupId`/`artifactId`/`version`/`relativePath` - defaulting
+   to Maven's own `../pom.xml` convention when `<relativePath>` is
+   absent, and preserving an *explicitly empty* `<relativePath/>` as
+   Maven's own "never resolve this parent locally" marker rather than
+   falling back to the default), and `properties` (exposing what was
+   already computed internally for single-file resolution, now needed
+   cross-file too).
+
+2. **New `resolve_inherited_versions()`** - a project-wide post-processing
+   pass, run once per scan (the same architectural shape as Layer 1's
+   existing interface-annotation indexes): for every parsed POM with a
+   `<parent>` reference, walks up the chain of locally-available
+   ancestors (stopping at the first ancestor not present in the same
+   scan, an explicitly empty `relativePath`, a detected cycle, or a
+   depth cap - never raises, never hangs on adversarial/malformed
+   parent-chain input, verified directly with a constructed two-POM
+   mutual-parent cycle), and fills in any dependency whose `version` was
+   `None` using the nearest ancestor's `dependency_management` entry
+   that itself resolves to a concrete version - a deliberate, stated
+   simplification from Maven's own strict nearest-wins precedence
+   (favouring successful resolution, this rule's whole purpose, over
+   exact fidelity in the rarer case the two disagree). `raw_version`
+   (what the child literally declared) is never altered, only `version`
+   (the best resolved answer) - consistent with every other
+   resolve-vs-report distinction already in this codebase.
+
+3. **Wired into all three call sites that touch `pom_files`**:
+   `main.py`'s `main()` (applied once, right after scanning, before both
+   `_run_rules()` and `_print_pom_report()` see `result.pom_files`, so
+   the "Unchecked" count and CWE-1035's findings stay consistent with
+   each other), `evaluation/human_baseline.py`'s `_run_all_rules()`, and
+   `evaluation/thesis_orchestrator.py`'s `_execute_scan()` (which calls
+   `main.py`'s `_run_rules()` and renders its own pom report directly,
+   bypassing `main()` entirely - missing this third site would have
+   reproduced the exact "fixed in two places, forgotten in the third"
+   pattern this project has hit before with the crash supervisor).
+
+**Tests/adversarial checks run:**
+- 6 new tests in `tests/test_pom_parser.py`: the real motivating shape
+  (child has no `<version>` at all, parent's `dependencyManagement`
+  resolves it); the dominant real-world case correctly doing nothing (no
+  local parent in the scan - degrades to the pre-fix behavior, not a
+  crash or a guess); the explicit-empty-`relativePath` marker correctly
+  overriding the default-path fallback; a 3-level chain (grandparent's
+  entry reached through an intermediate parent with no matching entry of
+  its own); a constructed mutual-parent cycle correctly terminating
+  rather than hanging; and the nearest-match-vs-resolved-match
+  simplification.
+- Full `pytest -q`: 356 passed (was 350), all four static gates clean.
+- Verified live end-to-end through the actual `main.py` CLI against a
+  constructed two-module reactor fixture carrying a real Log4Shell
+  dependency with no declared version: before the fix, 1 unchecked
+  dependency and 0 findings; after, 0 unchecked and a correct critical
+  CWE-1035 finding, matched against the known-vulnerable entry.
+- **Honestly measured against the real `.qa-repos` corpus, not assumed**:
+  precisely diffed before/after dependency resolution across all of
+  `quarkus-super-heroes`'s 10 POMs (204 total declared dependencies, 162
+  unresolved) - **zero newly resolved**. Root-caused, not just observed:
+  none of its 9 service modules declares a `<parent>` element at all,
+  despite being listed as `<module>`s of the root aggregator POM - each
+  manages its own dependencies independently, importing the external
+  `quarkus-bom` directly rather than inheriting from a local parent. This
+  is a different (and here, equally unresolvable locally) Maven pattern
+  than the one this fix targets - not a bug in the implementation, and
+  not fixable by also supporting BOM-`<scope>import</scope>` resolution
+  either, since the referenced BOM is still a third-party artifact not
+  present in this repository either way. The other three `.qa-repos`
+  have no local parent/reactor relationships to test against at all.
+
+**Remaining limitations:** Only helps when a project's parent (or an
+ancestor further up the chain) is genuinely committed as a sibling file
+within the same scanned directory tree - the dominant real-world pattern
+actually observed so far (both repos tested at 2026-09-02, and now also
+`quarkus-super-heroes`'s own module structure) is inheriting from a
+third-party, externally-published parent or BOM, which no local-only
+tool can resolve without either a network call or a local Maven
+repository cache consultation - both rejected, the latter specifically
+because it would make scan results depend on what happens to be cached
+on the machine running the scan, undermining reproducibility between
+machines scanning the identical repository. BOM import via
+`<dependencyManagement>`'s `<scope>import</scope>` (a different Maven
+mechanism than `<parent>` inheritance) is not resolved by this entry -
+investigated and found it would not have helped either real case tested,
+for the reason above, so not built speculatively.
+
+**Why:** Scoped to local-parent-only resolution, explicitly excluding
+both a live Maven Central query and a `~/.m2` cache consultation, for
+the same "runs entirely locally, reproducibly" reason CWE-1035's offline
+vulnerability database was chosen over a live lookup back on 2026-07-15 -
+a tool whose results depend on what's cached on whichever machine
+happens to run it is a worse outcome for a thesis evaluation methodology
+than one that stays honestly unresolved in a stated, bounded way.
+
+**Effect on thesis chapters:** Chapter 4 should document
+`resolve_inherited_versions` as a project-wide Layer 1 pass, architecturally
+parallel to the interface-annotation indexes, and state its exact scope
+(local `<parent>` chains only, not BOM imports, not `~/.m2`). Chapter 5's
+CWE-1035 evaluation should report the honest real-world measurement
+plainly: a real, demonstrated fix for a genuine Maven pattern, with zero
+effect so far on any of the four `.qa-repos` tested, each for its own
+specific, now precisely diagnosed reason (two inherit from a third-party
+parent; `quarkus-super-heroes`'s modules don't use `<parent>` inheritance
+at all). This is the third time this exact honest-zero-effect finding
+has been reported for a real, correctly-built fix (alongside the
+CWE-284/CWE-20 interface-annotation work) - worth naming as a pattern in
+its own right: `.qa-repos`'s four repositories, while valuable for
+precision testing, do not currently exercise several of the specific
+structural patterns this project's later fixes have targeted, which is
+itself a scoped, concrete argument for the standing "add a fifth
+real repo" item in Section 7.
+
+**Freeze / handoff:** This reopens frozen Layer 1 on the same "a bounded,
+local, deterministic improvement with a clear and honestly-stated
+ceiling" grounds as this project's other real-repo-motivated fixes. Not
+yet independently QA'd by a fresh session - recommend one before this is
+treated as settled, specifically targeting the parent-chain cycle/depth
+guard and the nearest-vs-resolved-match precedence choice, the two
+places most likely to hide a subtle bug. This entry was drafted by the
+same session that built the feature, at the student's explicit request -
+per Section 9, do not treat it as settled project history until the
+student confirms it.

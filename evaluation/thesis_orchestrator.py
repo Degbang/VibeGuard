@@ -16,7 +16,7 @@ import json
 import os
 import sys
 from contextlib import redirect_stderr, redirect_stdout
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from io import StringIO
 from pathlib import Path
@@ -32,7 +32,7 @@ from vibeguard.layer1_static.ast_parser import (
     ParsedFile,
 )
 from vibeguard.layer1_static.config_parser import ParsedConfigFile
-from vibeguard.layer1_static.pom_parser import ParsedPomFile
+from vibeguard.layer1_static.pom_parser import ParsedPomFile, resolve_inherited_versions
 from vibeguard.layer1_static.rules._finding import Finding
 from vibeguard.layer1_static.scanner import ScanResult, scan_directory
 from vibeguard.layer3_scoring import ScoredFinding
@@ -654,6 +654,9 @@ def _execute_scan(
             exit_code=1,
             error_message=f"No .java/config/pom.xml files found under {scan_path}",
         )
+
+    if result.pom_files:
+        result = replace(result, pom_files=resolve_inherited_versions(result.pom_files))
 
     findings = scan_cli._run_rules(result)
     try:

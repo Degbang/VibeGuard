@@ -44,6 +44,7 @@ from rich.table import Table
 
 import process_supervisor
 from vibeguard.layer1_static._parsing_guards import ParseStatus
+from vibeguard.layer1_static.pom_parser import resolve_inherited_versions
 from vibeguard.layer1_static.rules import cwe_20, cwe_284, cwe_287, cwe_798, cwe_1035
 from vibeguard.layer1_static.rules._finding import Finding
 from vibeguard.layer1_static.rules._interface_annotations import (
@@ -278,7 +279,7 @@ def _run_all_rules(result: ScanResult) -> tuple[Finding, ...]:
         if config_file.status != ParseStatus.OK:
             continue
         findings.extend(cwe_798.detect_in_config(config_file))
-    for pom_file in result.pom_files:
+    for pom_file in resolve_inherited_versions(result.pom_files):
         if pom_file.status != ParseStatus.OK:
             continue
         findings.extend(cwe_1035.detect_in_pom(pom_file))
