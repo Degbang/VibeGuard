@@ -7181,3 +7181,134 @@ places most likely to hide a subtle bug. This entry was drafted by the
 same session that built the feature, at the student's explicit request -
 per Section 9, do not treat it as settled project history until the
 student confirms it.
+
+---
+
+## [2026-10-02] - CWE-284's hand-rolled guard detection follows a one-hop helper-method delegation
+
+**Status: DRAFT, pending student review** (see note at end).
+
+**What the plan said:** `has_inline_header_guard`'s own docstring stated
+this plainly since 2026-09-10: "this intentionally only recognises the
+guard inline in the endpoint method itself; a guard delegated to a
+private helper method (one further hop) is a known, deliberately
+deferred scope limit." The real motivating example was named explicitly
+in that same entry - `ai-card-storage-service`'s `allowed(key)` helper,
+observed but not built against at the time since the session's actual
+need (two inline-comparison endpoints) was already fully addressed
+without it. Asked directly whether to close that named, deferred gap
+now, student said yes.
+
+**What we actually did:**
+
+1. **`has_inline_header_guard` gained an optional
+   `sibling_methods_by_name` parameter** (default: empty mapping, so
+   every existing call site without class context sees exactly the
+   prior, inline-only behavior). When the direct, inline comparison
+   isn't found, a new `_bails_out_via_helper_call` checks whether the
+   bailing-out condition instead calls a **same-class** helper method
+   (bare, e.g. `allowed(key)`, or `this`-qualified, e.g.
+   `this.allowed(key)` - handling that qualifier distinction proactively
+   this time, rather than waiting for adversarial testing to find it the
+   way `cwe_287.py`'s `this.field` gap originally was) with a header
+   parameter as one of its arguments, and if so, whether the helper's
+   **own corresponding parameter** (matched by argument *position*, not
+   name, since a helper's parameter name need not match the caller's) is
+   itself compared via `.equals()`/`.contentEquals()`/`MessageDigest.isEqual()`
+   anywhere in the helper's body - reusing the existing
+   `_references_header_comparison` unchanged, just pointed at the
+   helper's parameter name instead of an `@RequestHeader` one.
+
+2. **New `_sibling_methods_by_name`** resolves a method's own enclosing
+   class's other direct members (via the already-shared
+   `nearest_enclosing_type`, extracted for the interface-annotation work
+   earlier this session) - the same bounded, this-class-only scope
+   already used throughout this module, not a cross-file or
+   cross-inheritance resolution.
+
+3. **Tree-sitter fallback mirror built alongside, not after** -
+   `_tree_sitter_sibling_methods_by_name` and
+   `_tree_sitter_bails_out_via_helper_call`, wired into
+   `_hand_rolled_guard_methods_tree_sitter` (which switched from a plain
+   `ts_walk` to `ts_walk_with_ancestors` to get the ancestor chain
+   sibling resolution needs) - satisfying
+   `tests/test_java_rule_fallback_coverage.py`'s dual-parser requirement
+   from the start, the same proactive practice already applied to
+   `cwe_20.py` earlier this session.
+
+4. **A real process hiccup, caught by verification, not assumed fixed.**
+   The first attempt at the javalang-path edit did not actually persist
+   to disk - a subsequent `grep` confirmed only the Tree-sitter mirror
+   had landed, with `has_inline_header_guard`'s signature and
+   `_hand_rolled_guard_methods`'s caller still showing their pre-edit
+   form. Caught immediately by re-grepping after the edit (a habit, not
+   a one-off), not by trusting the edit tool's own success report;
+   reapplied both changes and re-verified with `grep`/`mypy` before
+   proceeding, then ran the full suite and gates twice more before
+   calling this done. Logged here as a reminder that this project's
+   "verify, don't assume" discipline applies to the build session's own
+   tooling, not only to the code being built.
+
+**Tests/adversarial checks run:**
+- 7 new tests in `tests/test_cwe_284.py`: the real motivating shape
+  (bare `allowed(key)` call, helper does the actual comparison); the
+  pre-extension default behavior preserved when no sibling context is
+  given; the `this.allowed(key)` qualifier variant; a call through an
+  unrelated object (`other.allowed(key)`) correctly not followed even
+  when a same-named method exists in this class; a helper that doesn't
+  actually compare its forwarded parameter correctly not matching; the
+  full per-file, end-to-end path (`detect_in_java` +
+  `apply_hand_rolled_guard_context`, which builds the sibling map
+  itself, not a hand-built one); and the Tree-sitter fallback parity
+  case.
+- Full `pytest -q`: 363 passed (was 356), all four static gates clean.
+- Verified live end-to-end through the actual `main.py` CLI against a
+  constructed reproduction of the real `ai-card-storage-service` shape -
+  the finding correctly carries the hand-rolled-guard caveat.
+- Re-ran the real `.qa-repos` corpus: no crashes, finding count unchanged
+  at 253 (matching the established baseline), zero new hand-rolled-guard
+  caveats - an honest, measured result, not assumed: none of the four
+  real repositories happens to use this specific helper-delegation
+  shape, so this extension (like the CWE-284/CWE-20 interface-annotation
+  work and the CWE-1035 reactor-POM fix earlier this session) has
+  real-world effect only against the AI-generated dataset it was
+  originally observed in, not the current `.qa-repos` corpus.
+
+**Remaining limitations:** Still exactly one hop - a guard delegated
+through two or more levels of helper indirection (the helper itself
+calls another helper) is not followed, an even narrower, unobserved-so-far
+case than the one just closed. Matching by argument position assumes the
+helper's parameter order corresponds to how it's called at each call
+site actually used by this detection (always exactly one call site
+matters, enforced implicitly by only acting on the first matching
+condition found) - not a general call-site/parameter-binding resolver.
+
+**Why:** Built now because the gap had a named, real, specific
+motivating example already in the dataset (not a speculative future
+case), and the one-hop bound keeps this addition as narrowly scoped and
+auditable as the rest of this module's existing hand-rolled-guard logic
+- extending to arbitrary-depth helper chains would need something closer
+to real call-graph analysis, a materially larger undertaking this
+project has consistently declined to build speculatively.
+
+**Effect on thesis chapters:** Chapter 4 should describe this as closing
+a specifically-named, previously-logged scope limit (not a newly
+discovered gap), and can cite the `this`-qualifier handling as a second
+instance of this project proactively applying a lesson (javalang's
+representational variation for `this`-qualified access) rather than
+waiting to be bitten by it again. Chapter 5's CWE-284 evaluation should
+report the same honest zero-effect-on-`.qa-repos` finding as the other
+two extensions built this session, continuing to support the standing
+argument that a fifth, structurally different real repository remains
+the highest-value remaining evaluation step.
+
+**Freeze / handoff:** This reopens frozen Layer 1 on the same
+"closing a specifically-named, already-logged deferred gap" grounds as
+the rest of this session's Layer 1 work. Not yet independently QA'd by a
+fresh session - recommend one before this is treated as settled,
+specifically targeting the `this`-qualifier detection on both parser
+paths and the argument-position-matching logic, the two places most
+likely to hide a subtle bug. This entry was drafted by the same session
+that built the feature, at the student's explicit request - per Section
+9, do not treat it as settled project history until the student confirms
+it.

@@ -479,7 +479,13 @@ def apply_centralized_authorization_context(
     )
 
 
-def has_inline_header_guard(method: javalang.tree.MethodDeclaration) -> bool:
+_EMPTY_SIBLING_METHODS: Mapping[str, javalang.tree.MethodDeclaration] = {}
+
+
+def has_inline_header_guard(
+    method: javalang.tree.MethodDeclaration,
+    sibling_methods_by_name: Mapping[str, javalang.tree.MethodDeclaration] = _EMPTY_SIBLING_METHODS,
+) -> bool:
     """Whether this method itself compares an ``@RequestHeader`` parameter
     against another value via ``.equals()``/``.contentEquals()``/
     ``MessageDigest.isEqual()``, on a branch that bails out (``return``/
@@ -497,10 +503,18 @@ def has_inline_header_guard(method: javalang.tree.MethodDeclaration) -> bool:
     the *other* side of the comparison is genuinely config-sourced (e.g.
     an ``@Value``-annotated field) - the same coarse, name/shape-based
     precision every other check in this module already uses, not a
-    symbol-table cross-reference. This intentionally only recognises the
-    guard inline in the endpoint method itself; a guard delegated to a
-    private helper method (one further hop) is a known, deliberately
-    deferred scope limit - see IMPLEMENTATION_LOG.md.
+    symbol-table cross-reference.
+
+    Args:
+        method: The candidate endpoint method.
+        sibling_methods_by_name: Other methods declared directly in this
+            method's own enclosing class (see ``_sibling_methods_by_name``),
+            used to resolve a guard delegated one hop to a private helper
+            method (``if (!allowed(key)) ...`` where ``allowed`` does the
+            actual comparison) - a real shape found in this project's
+            AI-generated dataset (``ai-card-storage-service``), previously
+            a known, deliberately deferred scope limit. Defaults to empty,
+            so a caller with no class context sees only the inline case.
     """
     header_params = _endpoint_header_param_names(method)
     if not header_params:
@@ -510,6 +524,63 @@ def has_inline_header_guard(method: javalang.tree.MethodDeclaration) -> bool:
             continue
         if _references_header_comparison(if_statement.condition, header_params):
             return True
+        if _bails_out_via_helper_call(
+            if_statement.condition, header_params, sibling_methods_by_name
+        ):
+            return True
+    return False
+
+
+def _sibling_methods_by_name(
+    path: tuple[object, ...],
+) -> Mapping[str, javalang.tree.MethodDeclaration]:
+    """Other methods declared directly in this method's nearest enclosing
+    class - its own direct members only, not inherited or nested further,
+    the same bounded scope as the rest of this module's hand-rolled-guard
+    detection. Used to resolve a one-hop helper-method call; see
+    ``_bails_out_via_helper_call``."""
+    enclosing_type = nearest_enclosing_type(path)
+    if enclosing_type is None:
+        return {}
+    return {
+        member.name: member
+        for member in enclosing_type.body
+        if isinstance(member, javalang.tree.MethodDeclaration)
+    }
+
+
+def _bails_out_via_helper_call(
+    condition: object,
+    header_params: frozenset[str],
+    sibling_methods_by_name: Mapping[str, javalang.tree.MethodDeclaration],
+) -> bool:
+    """Whether ``condition`` calls a same-class helper method with a header
+    parameter as an argument, where that helper itself compares its own
+    corresponding parameter via an equality check - one hop of indirection
+    beyond ``_references_header_comparison``'s direct, inline case.
+
+    Only a bare (``allowed(key)``) or ``this``-qualified (``this.allowed(key)``)
+    call counts - a call through any other qualifier
+    (``other.allowed(key)``, a static import, a different instance) is a
+    different class's method, not this one's own helper, and is correctly
+    not followed.
+    """
+    if not hasattr(condition, "filter"):
+        return False
+    for _path, invocation in condition.filter(javalang.tree.MethodInvocation):
+        if invocation.qualifier not in (None, "", "this"):
+            continue
+        helper = sibling_methods_by_name.get(invocation.member)
+        if helper is None:
+            continue
+        for index, arg in enumerate(invocation.arguments):
+            if index >= len(helper.parameters):
+                continue
+            if not _argument_references_header(arg, header_params):
+                continue
+            helper_param_name = helper.parameters[index].name
+            if _references_header_comparison(helper, frozenset({helper_param_name})):
+                return True
     return False
 
 
@@ -568,8 +639,8 @@ def _hand_rolled_guard_methods(parsed_file: ParsedFile) -> frozenset[tuple[str, 
     if parsed_file.tree is None:
         return frozenset()
     guarded: set[tuple[str, int]] = set()
-    for _path, method in parsed_file.tree.filter(javalang.tree.MethodDeclaration):
-        if not has_inline_header_guard(method):
+    for path, method in parsed_file.tree.filter(javalang.tree.MethodDeclaration):
+        if not has_inline_header_guard(method, _sibling_methods_by_name(path)):
             continue
         line = method.position.line if method.position else None
         if line is not None:
@@ -645,17 +716,78 @@ def _tree_sitter_argument_references_header(
     return False
 
 
+def _tree_sitter_sibling_methods_by_name(
+    source: bytes, ancestors: tuple[Node, ...]
+) -> Mapping[str, Node]:
+    """Tree-sitter mirror of ``_sibling_methods_by_name``."""
+    enclosing_type = ts_nearest_enclosing_type(ancestors)
+    if enclosing_type is None:
+        return {}
+    body = ts_child_by_field(enclosing_type, "body")
+    if body is None:
+        return {}
+    return {
+        ts_declaration_name(source, member): member
+        for member in body.named_children
+        if member.type == "method_declaration"
+    }
+
+
+def _tree_sitter_bails_out_via_helper_call(
+    source: bytes,
+    condition: Node,
+    header_params: frozenset[str],
+    sibling_methods_by_name: Mapping[str, Node],
+) -> bool:
+    """Tree-sitter mirror of ``_bails_out_via_helper_call``."""
+    for node in ts_walk(condition):
+        if node.type != "method_invocation":
+            continue
+        object_node = ts_child_by_field(node, "object")
+        if object_node is not None and not (
+            object_node.type == "this" or ts_node_text(source, object_node) == "this"
+        ):
+            continue
+        name_node = ts_child_by_field(node, "name")
+        if name_node is None:
+            continue
+        helper = sibling_methods_by_name.get(ts_node_text(source, name_node))
+        if helper is None:
+            continue
+        arguments_node = ts_child_by_field(node, "arguments")
+        helper_parameters_node = ts_child_by_field(helper, "parameters")
+        if arguments_node is None or helper_parameters_node is None:
+            continue
+        helper_parameters = [
+            child
+            for child in helper_parameters_node.named_children
+            if child.type == "formal_parameter"
+        ]
+        for index, arg in enumerate(arguments_node.named_children):
+            if index >= len(helper_parameters):
+                continue
+            if not _tree_sitter_argument_references_header(source, arg, header_params):
+                continue
+            helper_param_name = ts_declaration_name(source, helper_parameters[index])
+            if _tree_sitter_references_header_comparison(
+                source, helper, frozenset({helper_param_name})
+            ):
+                return True
+    return False
+
+
 def _hand_rolled_guard_methods_tree_sitter(parsed_file: ParsedFile) -> frozenset[tuple[str, int]]:
     parsed = parsed_file.tree_sitter
     if parsed is None:
         return frozenset()
     guarded: set[tuple[str, int]] = set()
-    for node in ts_walk(parsed.tree.root_node):
+    for ancestors, node in ts_walk_with_ancestors(parsed.tree.root_node):
         if node.type != "method_declaration":
             continue
         header_params = _tree_sitter_header_param_names(parsed.source, node)
         if not header_params:
             continue
+        sibling_methods_by_name = _tree_sitter_sibling_methods_by_name(parsed.source, ancestors)
         for if_node in ts_walk(node):
             if if_node.type != "if_statement":
                 continue
@@ -666,6 +798,11 @@ def _hand_rolled_guard_methods_tree_sitter(parsed_file: ParsedFile) -> frozenset
             if not _tree_sitter_bails_out(consequence):
                 continue
             if _tree_sitter_references_header_comparison(parsed.source, condition, header_params):
+                guarded.add((ts_declaration_name(parsed.source, node), ts_node_line(node)))
+                break
+            if _tree_sitter_bails_out_via_helper_call(
+                parsed.source, condition, header_params, sibling_methods_by_name
+            ):
                 guarded.add((ts_declaration_name(parsed.source, node), ts_node_line(node)))
                 break
     return frozenset(guarded)

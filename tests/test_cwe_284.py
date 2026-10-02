@@ -971,3 +971,143 @@ def test_build_interface_method_index_is_order_independent_on_colliding_simple_n
     # The ambiguous name is excluded entirely (degrading to pre-feature
     # behavior), not resolved to either candidate's annotations.
     assert findings_a_first == ()
+
+
+# -- Hand-rolled guard delegated through a same-class helper method ---------
+#
+# Mirrors the real ai-card-storage-service shape: the comparison isn't
+# inline in the endpoint method, it's delegated one hop to a private
+# helper - previously a known, deliberately deferred scope limit (see
+# IMPLEMENTATION_LOG.md's 2026-09-10 entry).
+
+_HELPER_INDIRECTION_JAVA = (
+    "import org.springframework.web.bind.annotation.*;\n"
+    "@RestController\n"
+    "public class VaultController {\n"
+    '    @Value("${VAULT_KEY:}") private String vaultKey;\n'
+    "    @PostMapping\n"
+    '    public String store(@RequestHeader("X-Vault-Key") String key) {\n'
+    "        if (!allowed(key)) {\n"
+    '            return "denied";\n'
+    "        }\n"
+    '        return "ok";\n'
+    "    }\n"
+    "    private boolean allowed(String suppliedKey) {\n"
+    "        return vaultKey.equals(suppliedKey);\n"
+    "    }\n"
+    "}\n"
+)
+
+
+def test_has_inline_header_guard_detects_helper_call_indirection() -> None:
+    tree = javalang.parse.parse(_HELPER_INDIRECTION_JAVA)
+    method = _first_method(tree, "store")
+    siblings = {"allowed": _first_method(tree, "allowed")}
+
+    assert has_inline_header_guard(method, siblings) is True
+
+
+def test_has_inline_header_guard_does_not_follow_helper_call_without_sibling_context() -> None:
+    """Backward compatibility: a caller with no class context (the default
+    empty mapping) must see only the inline case, exactly as before this
+    extension existed."""
+    tree = javalang.parse.parse(_HELPER_INDIRECTION_JAVA)
+    method = _first_method(tree, "store")
+
+    assert has_inline_header_guard(method) is False
+
+
+def test_has_inline_header_guard_follows_this_qualified_helper_call() -> None:
+    """``this.allowed(key)`` must be recognized the same as a bare
+    ``allowed(key)`` call - javalang represents a this-qualified call
+    differently, and this project has been burned by that exact
+    representational variation before (see cwe_287.py's history)."""
+    java = _HELPER_INDIRECTION_JAVA.replace("!allowed(key)", "!this.allowed(key)")
+    tree = javalang.parse.parse(java)
+    method = _first_method(tree, "store")
+    siblings = {"allowed": _first_method(tree, "allowed")}
+
+    assert has_inline_header_guard(method, siblings) is True
+
+
+def test_has_inline_header_guard_does_not_follow_a_call_on_another_object() -> None:
+    """A call through a different qualifier (``other.allowed(key)``) is a
+    different object's method, not this class's own helper - must not be
+    followed, even if a same-named method happens to exist in this class."""
+    java = _HELPER_INDIRECTION_JAVA.replace("!allowed(key)", "!other.allowed(key)")
+    tree = javalang.parse.parse(java)
+    method = _first_method(tree, "store")
+    siblings = {"allowed": _first_method(tree, "allowed")}
+
+    assert has_inline_header_guard(method, siblings) is False
+
+
+def test_has_inline_header_guard_does_not_match_an_unrelated_helper() -> None:
+    """A called helper that doesn't compare the forwarded header parameter
+    at all must not be mistaken for a guard."""
+    java = _HELPER_INDIRECTION_JAVA.replace(
+        "return vaultKey.equals(suppliedKey);", "return suppliedKey != null;"
+    )
+    tree = javalang.parse.parse(java)
+    method = _first_method(tree, "store")
+    siblings = {"allowed": _first_method(tree, "allowed")}
+
+    assert has_inline_header_guard(method, siblings) is False
+
+
+def test_detect_in_java_and_apply_hand_rolled_guard_context_cover_helper_indirection(
+    tmp_path: Path,
+) -> None:
+    """End-to-end through the real per-file wiring (_hand_rolled_guard_methods
+    builds the sibling map itself), not just the inner function with a
+    hand-built mapping."""
+    java_file = tmp_path / "VaultController.java"
+    java_file.write_text(_HELPER_INDIRECTION_JAVA)
+
+    result = parse_file(java_file)
+    findings = detect_in_java(result)
+    assert {f.identifier for f in findings} == {"store"}
+
+    annotated = apply_hand_rolled_guard_context(findings, (result,))
+
+    assert "hand-rolled authorization check" in annotated[0].message
+
+
+def test_has_inline_header_guard_helper_indirection_tree_sitter_fallback(
+    tmp_path: Path,
+) -> None:
+    """The same helper-indirection resolution must hold on the Tree-sitter
+    fallback path."""
+    java_file = tmp_path / "VaultController.java"
+    java_file.write_text(
+        "import org.springframework.web.bind.annotation.*;\n"
+        "@RestController\n"
+        "public class VaultController {\n"
+        '    @Value("${VAULT_KEY:}") private String vaultKey;\n'
+        "    int helper(int level) {\n"
+        "        return switch (level) {\n"
+        "            case 1 -> 1;\n"
+        "            default -> 0;\n"
+        "        };\n"
+        "    }\n"
+        "    @PostMapping\n"
+        '    public String store(@RequestHeader("X-Vault-Key") String key) {\n'
+        "        if (!allowed(key)) {\n"
+        '            return "denied";\n'
+        "        }\n"
+        '        return "ok";\n'
+        "    }\n"
+        "    private boolean allowed(String suppliedKey) {\n"
+        "        return vaultKey.equals(suppliedKey);\n"
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+    assert result.tree_sitter is not None
+    findings = detect_in_java(result)
+    assert {f.identifier for f in findings} == {"store"}
+
+    annotated = apply_hand_rolled_guard_context(findings, (result,))
+
+    assert "hand-rolled authorization check" in annotated[0].message
