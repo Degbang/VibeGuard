@@ -27,7 +27,6 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import TypeAlias
 
 import javalang
 from tree_sitter import Node
@@ -73,6 +72,7 @@ from vibeguard.layer1_static.rules._interface_annotations import (
     EMPTY_INTERFACE_INDEX,
     InterfaceMethodAnnotations,
     interface_annotations_for_method,
+    nearest_enclosing_type,
     resolve_effective_annotations,
     top_level_interfaces_by_type_name,
 )
@@ -147,8 +147,6 @@ _INTERFACE_AUTHORIZATION_CAVEAT = (
     "method-security annotation; CGLIB class proxies, Spring Boot's default, "
     "typically do not), which is not visible to static analysis."
 )
-
-_TypeDeclaration: TypeAlias = javalang.tree.ClassDeclaration | javalang.tree.InterfaceDeclaration
 
 _HTTP_CLIENT_TYPE_ANNOTATIONS = frozenset(
     {
@@ -290,7 +288,7 @@ def _check_method(
 ) -> Finding | None:
     """Build a Finding if this method is an unprotected endpoint."""
     own_method_annotations = tuple(a.name for a in method.annotations)
-    enclosing_type = _nearest_enclosing_type(path)
+    enclosing_type = nearest_enclosing_type(path)
     implemented_interfaces = (
         interfaces_by_type_name.get(enclosing_type.name, ()) if enclosing_type is not None else ()
     )
@@ -328,22 +326,6 @@ def _check_method(
         identifier=method.name,
         message=message,
     )
-
-
-def _nearest_enclosing_type(path: tuple[object, ...]) -> _TypeDeclaration | None:
-    """Find the closest enclosing class/interface declaration in a filter() path.
-
-    javalang's ``.filter()`` returns the full ancestor chain from the
-    ``CompilationUnit`` down; walking it in reverse finds the nearest
-    (innermost) enclosing type first, which is what "the method's own
-    class" means for a nested/inner class.
-    """
-    for ancestor in reversed(path):
-        if isinstance(
-            ancestor, javalang.tree.ClassDeclaration | javalang.tree.InterfaceDeclaration
-        ):
-            return ancestor
-    return None
 
 
 def _is_http_client_type(annotations: tuple[str, ...]) -> bool:

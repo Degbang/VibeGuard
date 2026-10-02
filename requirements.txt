@@ -3,6 +3,7 @@ tree-sitter==0.26.0
 tree-sitter-java==0.23.5
 pyyaml==6.0.1
 shap==0.44.1
+pandas==2.3.3
 scikit-learn==1.5.0
 numpy==1.26.3
 rich==13.7.0

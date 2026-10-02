@@ -15,6 +15,19 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+**If `import scipy` (or anything importing `scikit-learn`/`shap`) fails with a
+`dlopen` error mentioning `_propack`/`__DATA/__thread_bss`:** this is a known
+incompatibility between PyPI's prebuilt `scipy` wheel and very new macOS
+builds — confirmed reproducible on a fresh venv, not specific to one checkout.
+Fix by building `scipy` from source against Homebrew's toolchain:
+
+```bash
+brew install gcc openblas
+PKG_CONFIG_PATH="/opt/homebrew/opt/openblas/lib/pkgconfig" \
+  pip install --no-binary scipy --force-reinstall "scipy==1.15.3"
+pip install --no-deps --force-reinstall "numpy==1.26.3"  # restore the pinned version
+```
+
 ## Run
 
 From the repository root, scan a Java project through all five layers:

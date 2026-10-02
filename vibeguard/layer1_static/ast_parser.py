@@ -83,6 +83,7 @@ class ParsedParameter:
 
     name: str
     type_name: str
+    annotations: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -402,6 +403,7 @@ def _tree_sitter_method(parsed: TreeSitterJavaFile, node: Node) -> ParsedMethod:
                     ParsedParameter(
                         name=ts_declaration_name(parsed.source, child),
                         type_name=ts_type_name(parsed.source, ts_child_by_field(child, "type")),
+                        annotations=ts_annotation_names(parsed.source, child),
                     )
                 )
     return ParsedMethod(
@@ -482,7 +484,11 @@ def _build_fields(decl: FieldDeclaration) -> tuple[ParsedField, ...]:
 def _build_method(node: MethodDeclaration) -> ParsedMethod:
     """Convert a javalang MethodDeclaration into a ParsedMethod."""
     parameters = tuple(
-        ParsedParameter(name=parameter.name, type_name=_type_name(parameter.type))
+        ParsedParameter(
+            name=parameter.name,
+            type_name=_type_name(parameter.type),
+            annotations=tuple(annotation.name for annotation in parameter.annotations),
+        )
         for parameter in node.parameters
     )
     return ParsedMethod(

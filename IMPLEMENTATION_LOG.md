@@ -6735,3 +6735,297 @@ against its own regression test rather than only reading the code. This
 entry was drafted by the same session that built the feature, at the
 student's explicit request - per Section 9, do not treat it as settled
 project history until the student confirms it.
+
+---
+
+## [2026-09-14] - CWE-20 extended to recognize @RequestBody/@Valid inherited from an implemented interface's parameters
+
+**Status: DRAFT, pending student review** (see note at end).
+
+**What the plan said:** The CWE-284 interface-annotation entry immediately
+above deliberately scoped CWE-20 out: "the annotations that matter for
+CWE-20 (`@RequestBody`, `@Valid`) live at *parameter* level, and Layer 1's
+`ParsedParameter` does not capture parameter annotations at all today -
+extending this same approach to CWE-20 needs that additional AST
+capability first." Asked directly whether to build that missing piece
+now that the method-level half existed and was independently QA'd,
+student said yes.
+
+**What we actually did:**
+
+1. **`ParsedParameter` gained an `annotations: tuple[str, ...] = ()`
+   field**, populated on both parser paths (javalang's `_build_method`,
+   Tree-sitter's `_tree_sitter_method`) - the exact missing AST capability
+   the deferral named. Default-valued for backward compatibility; no
+   existing call site constructs `ParsedParameter` directly (confirmed by
+   grep before changing the dataclass).
+
+2. **`_interface_annotations.py` gained `build_interface_parameter_index()`**,
+   keyed by `(type_name, method_name, parameter_index)` - matched by
+   *position*, not parameter name, since an overriding method may legally
+   rename its parameters relative to the interface (parameter names are
+   not part of the method contract in Java). Reuses the same ambiguous-
+   simple-type-name exclusion as the method-level index, refactored into
+   a shared `_collect_ambiguous_type_names()` both index builders now
+   call, rather than duplicating that logic a second time. Also extracted
+   `nearest_enclosing_type()` (a javalang AST-traversal helper) out of
+   `cwe_284.py`'s private copy into this shared module, since `cwe_20.py`
+   needed the identical thing - `cwe_284.py` updated to import and reuse
+   it instead of keeping its own copy.
+
+3. **A deliberate asymmetry, more conservative than CWE-284's own
+   method-level treatment.** Method-level routing-annotation inheritance
+   (reused unchanged from `cwe_284.py`'s `resolve_effective_annotations`)
+   widens freely - Spring MVC's route registration is a documented,
+   proxy-independent framework feature. Parameter-level inheritance is
+   treated more cautiously on *both* sides, not just the authorization
+   side the way CWE-284 split it: an interface-inherited `@RequestBody`
+   still widens which parameters get checked at all (the same
+   fail-toward-more-scrutiny direction), but an interface-inherited
+   `@Valid`/`@Validated` never silently suppresses a finding - it adds an
+   explicit caveat (`_INTERFACE_VALIDATION_CAVEAT`) instead, because
+   whether Spring's `HandlerMethod`/argument-resolution machinery actually
+   honors a parameter annotation declared only on the interface (rather
+   than the concrete override's own parameter) depends on which `Method`
+   object gets resolved at runtime - not visible to static analysis, and
+   not established as a proxy-independent guarantee the way method-level
+   routing annotations are.
+
+4. **`main.py`'s `_run_rules()` and `evaluation/human_baseline.py`'s
+   `_run_all_rules()`** both updated to build the new parameter index
+   once per scan (alongside the existing method index) and pass both into
+   `cwe_20.detect_in_java()`.
+
+**Tests/adversarial checks run:**
+- 5 new tests in `tests/test_cwe_20.py`: the real motivating shape
+  (interface has `@RequestBody`, concrete override has neither annotation
+  - now correctly found, was previously invisible); the interface-
+  validation caveat case (interface also has `@Valid` - still found, with
+  caveat, never suppressed); the own-parameter-validation case (own
+  `@Valid` on the override - fully suppressed, no caveat, since that
+  coverage is not proxy-dependent); position-based matching when the
+  override renames its parameters; Tree-sitter fallback parity.
+- Full `pytest -q`: 350 passed (was 345), all four static gates clean.
+- Verified live end-to-end against a real two-file reproduction of the
+  codegen-controller pattern through the actual `main.py` CLI, not just
+  unit tests.
+- Independent QA (fresh session, no memory of the build): traced and
+  confirmed the asymmetric caveat logic directly (both directions);
+  confirmed position-based matching including an out-of-range-index probe
+  (returns `()` safely, no crash) and a 3-parameter case where only the
+  middle position carries an annotation; confirmed `cwe_284.py`'s
+  behavior and its 42-test suite are unaffected by the
+  `nearest_enclosing_type` extraction; confirmed the `_NOT_VALIDATABLE_TYPES`
+  exclusion still works when the triggering annotation is interface-
+  inherited; ran the real CLI against all four `.qa-repos` with no
+  crashes. **Found and reproduced a real bug in the new parameter index's
+  collision handling before confirming the shipped code prevents it**:
+  disabled the ambiguous-name filter in `build_interface_parameter_index`,
+  reproduced a genuine order-dependent false positive (two files
+  declaring distinct `PaymentApi` interfaces sharing a simple name - a
+  controller implementing the unannotated one still incorrectly inherited
+  `@RequestBody` from the unrelated annotated one, purely depending on
+  file-processing order), then restored the filter and confirmed all 4
+  orderings correctly yield zero findings. No bugs found in the shipped
+  code itself.
+- One incident during this QA pass, disclosed for completeness: the QA
+  agent accidentally ran `git checkout` on `_interface_annotations.py`
+  mid-review, discarding its uncommitted diff, and reconstructed it from
+  a previously-captured diff. This session independently re-read the
+  reconstructed file in full against what was actually authored, and
+  independently re-ran the full suite and all four gates - both confirm
+  the reconstruction is correct, not merely the QA agent's own claim.
+
+**Real-world effect, measured not assumed:** Like its CWE-284 sibling,
+this currently has **zero measurable effect** against the real
+`.qa-repos` corpus (CWE-20 counts: 0, 0, 0, 5 across the four repos,
+unchanged; no "interface" mentions in any report). None of the four
+repos commits a non-generated interface declaring `@RequestBody` - the
+same `target/generated-sources/` ceiling already logged for CWE-284.
+Real and correct, currently dormant until it meets a project that commits
+its generated interface source.
+
+**Remaining limitations:** Name-only (not full-signature) matching
+between an interface method and its override is the same coarse
+precision every heuristic in this codebase already accepts - confirmed
+by QA to fail only in the safe direction (an unrelated same-named
+overload can produce an over-broad false positive, never a suppression).
+JAX-RS's body-parameter equivalent remains out of scope, unchanged from
+before this entry.
+
+**Why:** The parameter-level asymmetry was made more conservative than
+CWE-284's method-level split (caveat on *both* `@RequestBody` recognition
+and `@Valid` suppression, not just suppression) because the mechanism
+Spring actually uses to resolve a parameter annotation at argument-
+binding time is less clearly documented as proxy-independent than route
+registration is - erring toward "flag and caveat" rather than "silently
+trust" on both counts was judged the safer default for a tool whose
+stated priority is false negatives over false positives for exactly this
+kind of candidate.
+
+**Effect on thesis chapters:** Chapter 4 should describe
+`build_interface_parameter_index` and its position-based (not name-based)
+matching rationale, and the collision-safety mechanism as reused,
+independently-tested infrastructure, not a one-off. Chapter 5's CWE-20
+evaluation should report the same honest zero-effect-on-`.qa-repos`
+finding as CWE-284's, for the same underlying reason, and should
+highlight the asymmetric caveat design (endpoint-recognition widens
+freely, parameter-level annotations never silently suppress) as a
+deliberate methodology choice, citable as evidence of a considered,
+not reflexive, extension of the CWE-284 pattern.
+
+**Freeze / handoff:** This reopens frozen Layer 1 on the same "a bounded,
+well-scoped extension of an already-established, already-QA'd pattern"
+grounds as its CWE-284 sibling. One independent QA pass has run and found
+no bugs in the shipped parameter-matching/caveat logic (it did find and
+confirm the fix for a collision-handling bug, the same class already
+fixed once for the method-level index). This entry was drafted by the
+same session that built the feature, at the student's explicit request -
+per Section 9, do not treat it as settled project history until the
+student confirms it.
+
+---
+
+## [2026-10-02] - Local environment repaired; a real `requirements.txt` bug found and fixed (missing `pandas`); dependency audit re-verified clean
+
+**What the plan said:** N/A - this entry starts from a broken local dev
+environment found at the start of a session, not a planned task. The
+machine's macOS build had changed (Darwin 25.6.0 -> 27.0.0, i.e. a major
+OS update) between sessions with no corresponding code change in the
+repository.
+
+**What we actually did / found:**
+
+1. **A real, reproducible local breakage, root-caused rather than
+   papered over.** `pytest -q` failed to even collect 8 test modules:
+   anything importing `vibeguard.layer4_ml` (and therefore `main.py`,
+   `evaluation/*`) failed with `ImportError: dlopen(...): section
+   '__DATA/__thread_bss' has a zero-fill section type, but offset field
+   is not zero` inside `scipy.sparse.linalg._propack._spropack` - a
+   compiled extension three imports deep inside `scikit-learn`'s own
+   `import scipy.linalg`, not anything VibeGuard's code touches directly.
+   Force-reinstalling the same pinned versions (`scipy`, then `numpy`)
+   did not fix it; no newer `scipy` wheel exists for Python 3.10. Built a
+   completely fresh scratch venv from `requirements.txt` alone and
+   reproduced the identical failure there too - confirmed this is not
+   specific to one checkout's venv state, but a genuine incompatibility
+   between PyPI's prebuilt `scipy` 1.15.3 wheel and this particular macOS
+   build. Anyone cloning this repo on the same OS build hits this.
+
+2. **Fixed by building `scipy` from source against the local toolchain**,
+   not by chasing a wheel that doesn't exist: installed `gcc` (bundles
+   `gfortran`) and `openblas` via Homebrew, then
+   `pip install --no-binary scipy --force-reinstall scipy==1.15.3` with
+   `PKG_CONFIG_PATH` pointed at the Homebrew OpenBLAS - produced a wheel
+   tagged `macosx_27_0_arm64` (built natively for the installed OS,
+   unlike the stale PyPI wheel) that imports correctly. Restored the
+   pinned `numpy==1.26.3` afterward (the source build's own dependency
+   resolution had drifted it to 2.2.6). Documented the fix in README.md's
+   Setup section so a future session (or the student, on the same
+   machine) doesn't have to re-diagnose this from scratch.
+
+3. **A real, previously-undetected bug in `requirements.txt` found as a
+   direct consequence of rebuilding the environment: `pandas` is missing,
+   and it is not dead weight.** The 2026-09-02 dependency-cleanup entry
+   removed `pandas` as "pinned early on but never actually used anywhere
+   in the codebase" - true of VibeGuard's own direct imports, but that
+   check missed that `shap` imports `pandas` unconditionally at its own
+   top level (`shap/_explanation.py`). This had silently worked until now
+   only because the venvs in use already had a stale `pandas` installed
+   from before the 2026-09-02 removal; `pip install -r requirements.txt`
+   never re-installs a package that isn't listed, so the gap was invisible
+   unless something forced a fresh environment. Confirmed directly: a
+   genuinely fresh venv built from the current `requirements.txt` fails
+   `import shap` outright with `ModuleNotFoundError: No module named
+   'pandas'`. Restored `pandas` (pinned to `2.3.3`, the current release,
+   verified compatible with the pinned `numpy==1.26.3`) to
+   `requirements.txt` and to `CLAUDE.md`/`AGENTS.md`'s Section 6
+   dependency list and its explanatory note, which both repeated the
+   incorrect "dead weight" characterization. Also added `pytest-cov`
+   (already correctly pinned in `requirements.txt` and used in CI, but
+   missing from that same illustrative Section 6 list) so the two don't
+   drift again.
+
+4. **Dependency audit re-run and found genuinely clean for the first time
+   since this was last checked.** `CLAUDE.md`/`AGENTS.md` carried an
+   explicit, precise caveat since 2026-09-10 that the audit was *not*
+   clean (2 CVEs, both via `safety`'s own transitive chain, with no
+   available upgrade path at the time). Re-running `safety check` against
+   the full installed environment today found that picture had changed:
+   6 CVEs now (5 in `nltk`, 1 in `cryptography` - both still pulled in
+   only by `safety` itself, specifically `nltk>=3.9` and Authlib/joserfc's
+   `cryptography` pin; confirmed via `pipdeptree --reverse`, neither is
+   imported by VibeGuard's own runtime code). Checked for an upgrade path
+   before re-documenting this as a permanent limitation, per this
+   project's own stated practice: both `nltk` and `cryptography` had
+   newer releases available on PyPI. Upgraded both
+   (`pip install --upgrade nltk cryptography`), confirmed `safety` itself
+   still functions correctly afterward, and re-ran the audit: **0
+   vulnerabilities reported**, across the full installed environment, not
+   just the subset `requirements.txt` pins directly. Corrected
+   `CLAUDE.md`/`AGENTS.md`'s claim accordingly, while keeping the prior
+   finding's history visible (append-only) rather than quietly replacing
+   it - this list has now moved in both directions (clean -> not clean ->
+   clean again) as upstream packages shipped and un-shipped fixes, which
+   is itself worth stating plainly rather than treating either snapshot
+   as permanent.
+
+**Tests/adversarial checks run:**
+- Full `pytest -q`: 350 passed, clean exit, both before touching
+  `requirements.txt` (confirming the scipy fix alone was sufficient) and
+  after (confirming the `pandas`/`nltk`/`cryptography` changes introduced
+  no regression).
+- `black --check .`, `ruff check .`, `mypy .`, `git diff --check`: all
+  clean.
+- The `requirements.txt` gap was verified by actually building a fresh
+  venv from it end to end (not inferred from reading the file) - the
+  failure reproduced exactly as described, confirming this was a real,
+  not hypothetical, gap for anyone starting from a clean checkout.
+- `safety check` re-run against the full installed environment (not just
+  `requirements.txt`'s own pins) before and after the `nltk`/`cryptography`
+  upgrade, confirming the before-count (6) and after-count (0) directly
+  rather than assuming the upgrade worked.
+
+**Remaining limitations:** The underlying `scipy`/macOS incompatibility
+is a real upstream packaging gap on Apple's side (or at least outside
+this project's control) for very new macOS builds specifically - the fix
+documented here (build from source against Homebrew's toolchain) is a
+workaround, not something VibeGuard's own `requirements.txt` can pin
+around, since no alternative prebuilt wheel exists. A different machine
+on an older, more common macOS release (or Linux, which is what CI
+actually runs on) would likely never hit this at all. The dependency
+audit's clean state is a snapshot, not a guarantee - restated explicitly
+in `CLAUDE.md`/`AGENTS.md` this time, after already being wrong once in
+each direction.
+
+**Why:** The scipy failure was diagnosed to a real root cause (a stale
+prebuilt wheel incompatible with a newer OS) rather than worked around
+with an unrelated dependency downgrade, because downgrading `numpy`/
+`scikit-learn` to dodge it would have drifted further from the project's
+own pinned, audited dependency set for a problem that isn't actually
+caused by those pins. The `pandas` gap was fixed at the source
+(`requirements.txt` and the two architecture docs) rather than only in
+the local venv, specifically because the local venv's accidental
+staleness is exactly what let this real bug go undetected for a month -
+fixing only the symptom here would have left the same trap for the next
+fresh clone.
+
+**Effect on thesis chapters:** Chapter 4/5's dependency-hygiene discussion
+should cite the corrected, current audit result (0 vulnerabilities) and
+the honest history of how that number has moved, rather than only the
+snapshot from whichever entry is read. Chapter 4 should note `pandas` as
+a genuine transitive runtime dependency (via `shap`), not incidental
+bloat - the 2026-09-02 dead-weight removal pass's methodology (checking
+only direct imports) should itself be named as a limitation of that
+audit technique, since it is exactly what let a real dependency go
+missing from `requirements.txt` for over a month without being caught by
+CI (which had never run against a connection cold enough, or an OS
+combination unusual enough, to force a truly from-scratch install that
+would have caught it immediately).
+
+**Freeze / handoff:** Not a reopening of any frozen Layer 1-5 behavior -
+purely environment/dependency hygiene. No code in `vibeguard/`,
+`evaluation/`, or `main.py` changed in this entry. Safe to treat as
+settled: the fix was verified by reconstructing the exact failure from a
+genuinely fresh environment, not merely patching the one venv already in
+use.

@@ -31,23 +31,101 @@ gap for projects that do commit the interface source; it does not close
 it universally, and that ceiling is a property of what source is
 available to scan, not a limitation of this indexing approach.
 
-Scoped to CWE-284 only for now: the annotations that matter for CWE-20
-(``@RequestBody``, ``@Valid``) live at *parameter* level, and Layer 1's
-``ParsedParameter`` does not capture parameter annotations at all today -
-extending this same approach to CWE-20 needs that additional AST
-capability first, on both parser paths, and is deliberately deferred
-rather than half-built here (see IMPLEMENTATION_LOG.md).
+Also indexes *parameter*-level annotations (``build_interface_parameter_index``),
+for CWE-20's equivalent gap: ``@RequestBody``/``@Valid`` live on a
+method's parameters, not the method itself, so a concrete override's
+parameter can inherit them from an implemented interface's matching
+parameter the same way a method inherits routing/authorization
+annotations. Unlike method-level routing annotations, whether Spring
+actually binds/validates a parameter using an interface-only annotation
+is not established the same way - ``cwe_20.py`` treats this with the
+same caveat-not-suppress discipline already applied to authorization
+annotations, not the same free-widening treatment given to routing
+annotations.
+
+Deliberately scoped to top-level types only for both indexes, same
+reasoning as above.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from typing import TypeAlias
+
+import javalang
 
 from vibeguard.layer1_static.ast_parser import ParsedFile
 
 InterfaceMethodAnnotations = Mapping[tuple[str, str], tuple[str, ...]]
+InterfaceParameterAnnotations = Mapping[tuple[str, str, int], tuple[str, ...]]
+
+# Extracted from cwe_284.py once cwe_20.py needed the identical "find this
+# method's nearest enclosing class/interface in a javalang .filter() path"
+# question - both rules need it to look up what a method's enclosing type
+# implements, same extract-on-second-real-need pattern used throughout
+# this codebase.
+JavalangTypeDeclaration: TypeAlias = (
+    javalang.tree.ClassDeclaration | javalang.tree.InterfaceDeclaration
+)
+
+
+def nearest_enclosing_type(path: tuple[object, ...]) -> JavalangTypeDeclaration | None:
+    """Find the closest enclosing class/interface declaration in a filter() path.
+
+    javalang's ``.filter()`` returns the full ancestor chain from the
+    ``CompilationUnit`` down; walking it in reverse finds the nearest
+    (innermost) enclosing type first, which is what "the method's own
+    class" means for a nested/inner class.
+    """
+    for ancestor in reversed(path):
+        if isinstance(
+            ancestor, javalang.tree.ClassDeclaration | javalang.tree.InterfaceDeclaration
+        ):
+            return ancestor
+    return None
+
 
 EMPTY_INTERFACE_INDEX: InterfaceMethodAnnotations = {}
+EMPTY_INTERFACE_PARAMETER_INDEX: InterfaceParameterAnnotations = {}
+
+
+def _collect_ambiguous_type_names(
+    parsed_files: Iterable[ParsedFile],
+) -> tuple[set[str], list[ParsedFile]]:
+    """Detect which top-level type names are declared more than once.
+
+    If two *distinct* top-level type declarations anywhere in the scan
+    share the same simple name (confirmed to actually happen in real,
+    independently-maintained repositories, not just a theoretical edge
+    case - a QA pass found 14 colliding simple names across this
+    project's own ``.qa-repos`` test corpus, e.g. four separate
+    ``UserService`` interfaces/classes in different packages), any index
+    keyed by that simple name must refuse to resolve it rather than
+    guess - see ``build_interface_method_index``'s docstring for the real
+    false-negative bug this replaced ("last one scanned wins").
+
+    Args:
+        parsed_files: Every successfully-parsed Java file from one scan.
+            Consumed into a list here (an ``Iterable`` may only support a
+            single pass) so callers can safely iterate it again afterward.
+
+    Returns:
+        The set of ambiguous simple type names, and the materialized list
+        of ``parsed_files`` for the caller to reuse without re-consuming
+        the original iterable.
+    """
+    materialized = list(parsed_files)
+    declared_at: dict[str, tuple[object, int | None]] = {}
+    ambiguous_type_names: set[str] = set()
+    for parsed_file in materialized:
+        for parsed_class in parsed_file.classes:
+            identity = (parsed_file.path, parsed_class.line)
+            previous_identity = declared_at.get(parsed_class.name)
+            if previous_identity is None:
+                declared_at[parsed_class.name] = identity
+            elif previous_identity != identity:
+                ambiguous_type_names.add(parsed_class.name)
+    return ambiguous_type_names, materialized
 
 
 def build_interface_method_index(parsed_files: Iterable[ParsedFile]) -> InterfaceMethodAnnotations:
@@ -65,39 +143,28 @@ def build_interface_method_index(parsed_files: Iterable[ParsedFile]) -> Interfac
         can only ever name an interface anyway, so a lookup against it
         never queries an unrelated class's methods by accident.
 
-        If two *distinct* top-level type declarations anywhere in the
-        scan share the same simple name (confirmed to actually happen in
-        real, independently-maintained repositories, not just a
-        theoretical edge case - a QA pass found 14 colliding simple
-        names across this project's own ``.qa-repos`` test corpus, e.g.
-        four separate ``UserService`` interfaces/classes in different
-        packages), that name is excluded from the index entirely rather
-        than resolved to whichever declaration happened to be scanned
-        last. An earlier version of this function let the last-scanned
-        declaration silently win, which meant the exact same source code
-        could either correctly find or silently miss the same
-        unprotected endpoint purely depending on file-processing order -
-        a real, reproduced false-negative risk for CWE-284, the one CWE
-        in this project where a false negative is explicitly treated as
-        the worse failure mode. Excluding an ambiguous name degrades
-        that lookup back to exactly the pre-this-feature behavior
-        (annotation simply not found, same as before this module
-        existed) rather than a non-deterministic wrong answer - the same
-        "when genuinely unresolvable, admit it rather than guess"
-        principle already used elsewhere in this codebase (e.g. CWE-1035
-        never flagging a dependency with an unresolved version).
+        A simple type name declared more than once anywhere in the scan
+        (see ``_collect_ambiguous_type_names``) is excluded from the
+        index entirely rather than resolved to whichever declaration
+        happened to be scanned last. An earlier version of this function
+        let the last-scanned declaration silently win, which meant the
+        exact same source code could either correctly find or silently
+        miss the same unprotected endpoint purely depending on
+        file-processing order - a real, reproduced false-negative risk
+        for CWE-284, the one CWE in this project where a false negative
+        is explicitly treated as the worse failure mode. Excluding an
+        ambiguous name degrades that lookup back to exactly the
+        pre-this-feature behavior (annotation simply not found, same as
+        before this module existed) rather than a non-deterministic
+        wrong answer - the same "when genuinely unresolvable, admit it
+        rather than guess" principle already used elsewhere in this
+        codebase (e.g. CWE-1035 never flagging a dependency with an
+        unresolved version).
     """
+    ambiguous_type_names, materialized = _collect_ambiguous_type_names(parsed_files)
     methods_by_type: dict[str, dict[str, tuple[str, ...]]] = {}
-    declared_at: dict[str, tuple[object, int | None]] = {}
-    ambiguous_type_names: set[str] = set()
-    for parsed_file in parsed_files:
+    for parsed_file in materialized:
         for parsed_class in parsed_file.classes:
-            identity = (parsed_file.path, parsed_class.line)
-            previous_identity = declared_at.get(parsed_class.name)
-            if previous_identity is None:
-                declared_at[parsed_class.name] = identity
-            elif previous_identity != identity:
-                ambiguous_type_names.add(parsed_class.name)
             type_methods = methods_by_type.setdefault(parsed_class.name, {})
             for method in parsed_class.methods:
                 type_methods[method.name] = method.annotations
@@ -107,6 +174,48 @@ def build_interface_method_index(parsed_files: Iterable[ParsedFile]) -> Interfac
         for type_name, type_methods in methods_by_type.items()
         if type_name not in ambiguous_type_names
         for method_name, annotations in type_methods.items()
+    }
+
+
+def build_interface_parameter_index(
+    parsed_files: Iterable[ParsedFile],
+) -> InterfaceParameterAnnotations:
+    """Index every top-level type's method parameters by
+    ``(type_name, method_name, parameter_index)``.
+
+    Matched by *position*, not parameter name: an overriding method is
+    free to rename its parameters relative to the interface it
+    implements (parameter names are not part of the method contract in
+    Java), so name-based matching would be simply wrong here, not merely
+    coarse.
+
+    Args:
+        parsed_files: Every successfully-parsed Java file from one scan.
+
+    Returns:
+        A mapping usable to look up a specific interface method
+        parameter's annotations by position. Subject to the same
+        ambiguous-simple-type-name exclusion as
+        ``build_interface_method_index``, computed independently (a name
+        ambiguous for method-level lookups is equally ambiguous here,
+        for the same reason).
+    """
+    ambiguous_type_names, materialized = _collect_ambiguous_type_names(parsed_files)
+    parameters_by_type: dict[str, dict[str, tuple[tuple[str, ...], ...]]] = {}
+    for parsed_file in materialized:
+        for parsed_class in parsed_file.classes:
+            type_methods = parameters_by_type.setdefault(parsed_class.name, {})
+            for method in parsed_class.methods:
+                type_methods[method.name] = tuple(
+                    parameter.annotations for parameter in method.parameters
+                )
+
+    return {
+        (type_name, method_name, index): annotations
+        for type_name, type_methods in parameters_by_type.items()
+        if type_name not in ambiguous_type_names
+        for method_name, parameter_annotations in type_methods.items()
+        for index, annotations in enumerate(parameter_annotations)
     }
 
 
@@ -199,3 +308,45 @@ def resolve_effective_annotations(
             seen.add(annotation)
             combined.append(annotation)
     return tuple(combined)
+
+
+def interface_annotations_for_parameter(
+    implemented_interfaces: tuple[str, ...],
+    method_name: str,
+    parameter_index: int,
+    index: InterfaceParameterAnnotations,
+) -> tuple[str, ...]:
+    """Just the interface-contributed annotations for one method parameter,
+    by position.
+
+    Unlike ``interface_annotations_for_method``, this has no matching
+    ``resolve_effective_annotations``-style unconditional-widening
+    sibling: whether Spring MVC actually binds/validates a parameter
+    using an annotation declared only on an implemented interface's
+    matching parameter (rather than the concrete override's own
+    parameter) is not established as a proxy-independent framework
+    guarantee the way method-level routing annotations are - callers
+    (``cwe_20.py``) must treat *both* an inherited ``@RequestBody`` and an
+    inherited ``@Valid``/``@Validated`` as caveat-worthy, not silently
+    authoritative either way.
+
+    Args:
+        implemented_interfaces: The enclosing top-level type's declared
+            ``implements``/``extends`` list, as Layer 1 already resolves it.
+        method_name: The method's own name - matched by name only against
+            each implemented interface, the same coarse precision this
+            module's own docstring already states.
+        parameter_index: The parameter's position within the method's
+            parameter list - matched by position, not name, since an
+            override may rename its parameters relative to the interface.
+        index: The project-wide index from ``build_interface_parameter_index``.
+
+    Returns:
+        Every annotation found on the same-position parameter of a
+        same-named method on any type listed in ``implemented_interfaces``.
+    """
+    return tuple(
+        annotation
+        for interface_name in implemented_interfaces
+        for annotation in index.get((interface_name, method_name, parameter_index), ())
+    )

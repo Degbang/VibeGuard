@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from vibeguard.layer1_static.ast_parser import parse_file
+from vibeguard.layer1_static.ast_parser import ParsedFile, parse_file
+from vibeguard.layer1_static.rules._interface_annotations import (
+    InterfaceMethodAnnotations,
+    InterfaceParameterAnnotations,
+    build_interface_method_index,
+    build_interface_parameter_index,
+)
 from vibeguard.layer1_static.rules.cwe_20 import CWE_ID, detect_in_java
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -158,3 +164,174 @@ def test_detect_in_java_finds_unvalidated_body_with_modern_switch(tmp_path: Path
     assert result.tree_sitter is not None
     findings = detect_in_java(result)
     assert [(f.identifier, f.line) for f in findings] == [("dto", 4)]
+
+
+# -- Interface-inherited annotation resolution -------------------------------
+#
+# Mirrors cwe_284.py's equivalent gap one level down: a concrete class
+# implementing a codegen-style interface can carry the real routing/body/
+# validation annotations only on the interface's method/parameters, with
+# the @Override carrying none of its own.
+
+_OWNERS_API_NO_VALID_JAVA = (
+    "import org.springframework.web.bind.annotation.PutMapping;\n"
+    "import org.springframework.web.bind.annotation.RequestBody;\n"
+    "public interface OwnersApi {\n"
+    '    @PutMapping("/owners/{id}")\n'
+    "    void updateOwner(int id, @RequestBody Owner owner);\n"
+    "}\n"
+)
+
+_OWNERS_API_WITH_VALID_JAVA = (
+    "import org.springframework.web.bind.annotation.PutMapping;\n"
+    "import org.springframework.web.bind.annotation.RequestBody;\n"
+    "import javax.validation.Valid;\n"
+    "public interface OwnersApi {\n"
+    '    @PutMapping("/owners/{id}")\n'
+    "    void updateOwner(int id, @Valid @RequestBody Owner owner);\n"
+    "}\n"
+)
+
+
+def _build_indexes(
+    *parsed_files: ParsedFile,
+) -> tuple[InterfaceMethodAnnotations, InterfaceParameterAnnotations]:
+    return (
+        build_interface_method_index(parsed_files),
+        build_interface_parameter_index(parsed_files),
+    )
+
+
+def test_detect_in_java_finds_unvalidated_body_inherited_from_interface(
+    tmp_path: Path,
+) -> None:
+    """A concrete @Override with no annotations of its own must still be
+    checked when the interface it implements declares @RequestBody on the
+    matching parameter - the exact real-world codegen-controller shape
+    this was built for, one level down from cwe_284.py's method-level fix."""
+    (tmp_path / "OwnersApi.java").write_text(_OWNERS_API_NO_VALID_JAVA)
+    controller_file = tmp_path / "OwnerController.java"
+    controller_file.write_text(
+        "public class OwnerController implements OwnersApi {\n"
+        "    @Override\n"
+        "    public void updateOwner(int id, Owner owner) {}\n"
+        "}\n"
+    )
+    interface_result = parse_file(tmp_path / "OwnersApi.java")
+    controller_result = parse_file(controller_file)
+    method_index, param_index = _build_indexes(interface_result, controller_result)
+
+    # Without the indexes, the gap this fix targets reproduces exactly:
+    # the method is invisible as an endpoint, so nothing is checked at all.
+    assert detect_in_java(controller_result) == ()
+
+    findings = detect_in_java(controller_result, method_index, param_index)
+
+    assert len(findings) == 1
+    assert findings[0].identifier == "owner"
+    assert "interface" not in findings[0].message  # no caveat: interface has no @Valid either
+
+
+def test_detect_in_java_adds_caveat_when_interface_parameter_has_validation(
+    tmp_path: Path,
+) -> None:
+    """An interface-declared @Valid on the matching parameter must NOT
+    silently suppress the finding - whether Spring's argument resolvers
+    actually see it depends on which Method object gets resolved, which
+    is not visible to static analysis. The finding must still fire, with
+    an honest caveat attached."""
+    (tmp_path / "OwnersApi.java").write_text(_OWNERS_API_WITH_VALID_JAVA)
+    controller_file = tmp_path / "OwnerController.java"
+    controller_file.write_text(
+        "public class OwnerController implements OwnersApi {\n"
+        "    @Override\n"
+        "    public void updateOwner(int id, Owner owner) {}\n"
+        "}\n"
+    )
+    interface_result = parse_file(tmp_path / "OwnersApi.java")
+    controller_result = parse_file(controller_file)
+    method_index, param_index = _build_indexes(interface_result, controller_result)
+
+    findings = detect_in_java(controller_result, method_index, param_index)
+
+    assert len(findings) == 1
+    assert "not visible to static analysis" in findings[0].message
+    assert "@Valid" in findings[0].message
+
+
+def test_detect_in_java_does_not_add_caveat_when_own_parameter_is_validated(
+    tmp_path: Path,
+) -> None:
+    """Coverage from the concrete method/parameter's own annotations must
+    still fully suppress the finding, with no interface-validation
+    caveat attached, even when the interface separately also declares
+    @RequestBody (without @Valid) on the same parameter."""
+    (tmp_path / "OwnersApi.java").write_text(_OWNERS_API_NO_VALID_JAVA)
+    controller_file = tmp_path / "OwnerController.java"
+    controller_file.write_text(
+        "import org.springframework.web.bind.annotation.RequestBody;\n"
+        "import javax.validation.Valid;\n"
+        "public class OwnerController implements OwnersApi {\n"
+        "    @Override\n"
+        "    public void updateOwner(int id, @Valid @RequestBody Owner owner) {}\n"
+        "}\n"
+    )
+    interface_result = parse_file(tmp_path / "OwnersApi.java")
+    controller_result = parse_file(controller_file)
+    method_index, param_index = _build_indexes(interface_result, controller_result)
+
+    assert detect_in_java(controller_result, method_index, param_index) == ()
+
+
+def test_detect_in_java_matches_interface_parameters_by_position_not_name(
+    tmp_path: Path,
+) -> None:
+    """An overriding method may rename its parameters relative to the
+    interface (parameter names aren't part of the method contract) -
+    resolution must still work by position."""
+    (tmp_path / "OwnersApi.java").write_text(_OWNERS_API_NO_VALID_JAVA)
+    controller_file = tmp_path / "OwnerController.java"
+    controller_file.write_text(
+        "public class OwnerController implements OwnersApi {\n"
+        "    @Override\n"
+        "    public void updateOwner(int ownerId, Owner payload) {}\n"
+        "}\n"
+    )
+    interface_result = parse_file(tmp_path / "OwnersApi.java")
+    controller_result = parse_file(controller_file)
+    method_index, param_index = _build_indexes(interface_result, controller_result)
+
+    findings = detect_in_java(controller_result, method_index, param_index)
+
+    assert len(findings) == 1
+    assert findings[0].identifier == "payload"
+
+
+def test_detect_in_java_finds_unvalidated_body_inherited_from_interface_tree_sitter_fallback(
+    tmp_path: Path,
+) -> None:
+    """The same interface-inherited resolution must hold when the
+    concrete file takes the Tree-sitter fallback path."""
+    (tmp_path / "OwnersApi.java").write_text(_OWNERS_API_NO_VALID_JAVA)
+    controller_file = tmp_path / "OwnerController.java"
+    controller_file.write_text(
+        "public class OwnerController implements OwnersApi {\n"
+        "    @Override\n"
+        "    public void updateOwner(int id, Owner owner) {\n"
+        "        int x = switch (id) {\n"
+        "            case 1 -> 1;\n"
+        "            default -> 0;\n"
+        "        };\n"
+        "    }\n"
+        "}\n"
+    )
+    interface_result = parse_file(tmp_path / "OwnersApi.java")
+    controller_result = parse_file(controller_file)
+    assert controller_result.tree_sitter is not None
+    method_index, param_index = _build_indexes(interface_result, controller_result)
+
+    assert detect_in_java(controller_result) == ()
+    findings = detect_in_java(controller_result, method_index, param_index)
+
+    assert len(findings) == 1
+    assert findings[0].identifier == "owner"
