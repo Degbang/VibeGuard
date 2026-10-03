@@ -110,7 +110,16 @@ class MavenParentReference:
 
 @dataclass(frozen=True)
 class ParsedPomFile:
-    """Structured result of parsing one ``pom.xml`` file."""
+    """Structured result of parsing one ``pom.xml`` file.
+
+    ``group_id``/``artifact_id``/``version`` are this POM's own literal
+    ``<project>``-level self-declaration, used by ``resolve_inherited_versions``
+    to confirm a POM found at a resolved ``<relativePath>`` is genuinely the
+    declared parent, not just whatever file happens to sit at that path.
+    ``artifact_id`` is always present on a well-formed POM (Maven never lets
+    it be inherited); ``group_id``/``version`` may be ``None`` on a child POM
+    that inherits them from its own parent.
+    """
 
     path: Path
     status: ParseStatus
@@ -118,6 +127,9 @@ class ParsedPomFile:
     dependency_management: tuple[MavenDependency, ...] = ()
     parent: MavenParentReference | None = None
     properties: Mapping[str, str] = field(default_factory=dict)
+    group_id: str | None = None
+    artifact_id: str | None = None
+    version: str | None = None
     error_message: str | None = None
 
 
@@ -178,6 +190,9 @@ def parse_pom_file(
         dependency_management=dependency_management,
         parent=parent,
         properties=properties,
+        group_id=_child_text(root, "groupId"),
+        artifact_id=_child_text(root, "artifactId"),
+        version=_child_text(root, "version"),
     )
 
 
@@ -399,7 +414,9 @@ def _walk_parent_chain(
     Stops at the first ancestor not present in the same scan (the common
     case - a parent resolved from Maven Central or ``~/.m2``, not a
     sibling file), an explicitly empty ``<relativePath>`` (Maven's own
-    "never resolve this parent locally" marker), a cycle, or
+    "never resolve this parent locally" marker), a ``<relativePath>`` whose
+    resolved file does not actually match the declared ``<parent>``
+    coordinates (see ``_parent_identity_matches``), a cycle, or
     ``_MAX_PARENT_CHAIN_DEPTH`` hops, whichever comes first. Never raises
     and never guesses past what is actually available in this scan.
     """
@@ -415,10 +432,36 @@ def _walk_parent_chain(
         parent_pom = by_path.get(candidate_path)
         if parent_pom is None or parent_pom.path in visited:
             break
+        if not _parent_identity_matches(current.parent, parent_pom):
+            break
         chain.append(parent_pom)
         visited.add(parent_pom.path)
         current = parent_pom
     return chain
+
+
+def _parent_identity_matches(parent_ref: MavenParentReference, candidate: ParsedPomFile) -> bool:
+    """Confirm the POM found at a resolved ``<relativePath>`` is genuinely
+    the declared ``<parent>``, not merely whatever file happens to sit at
+    that path.
+
+    A ``<relativePath>`` is a file-position hint, not an identity
+    guarantee - Maven itself falls back to repository resolution when the
+    coordinates don't match, and this parser must do the same rather than
+    trusting position alone. ``artifact_id`` is the one Maven coordinate
+    every POM must declare for itself (it is never inherited), so a
+    mismatch there is conclusive. ``group_id``/``version`` are compared
+    only when the candidate declares them itself; a child POM is allowed
+    to omit both and inherit them from its own parent, so their absence is
+    never treated as a mismatch.
+    """
+    if candidate.artifact_id != parent_ref.artifact_id:
+        return False
+    if candidate.group_id is not None and candidate.group_id != parent_ref.group_id:
+        return False
+    if candidate.version is not None and candidate.version != parent_ref.version:
+        return False
+    return True
 
 
 def _resolve_from_chain(

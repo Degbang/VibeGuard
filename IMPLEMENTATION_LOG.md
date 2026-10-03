@@ -7182,6 +7182,65 @@ same session that built the feature, at the student's explicit request -
 per Section 9, do not treat it as settled project history until the
 student confirms it.
 
+**2026-10-03 independent QA follow-up:** A fresh subagent QA'd this commit
+in an isolated worktree, executing (not just reading) every item above -
+gates, the 3-POM cycle, the 15-hop-vs-depth-cap guard, a directory-form
+`<relativePath>`, both directions of the nearest-vs-resolved precedence
+rule, `raw_version` immutability, all three wiring call sites via their
+real entry points, and the `quarkus-super-heroes` zero-effect measurement
+- and confirmed all of it genuinely correct. It also found one real,
+reproduced bug outside the original checklist: **`_walk_parent_chain`
+never verified that the POM found at a resolved `<relativePath>` actually
+matched the `<parent>` element's declared coordinates - it trusted file
+position alone.** Reproduced concretely: a child declaring
+`<parent><artifactId>parent</artifactId>...</parent>` with the resolved
+`../pom.xml` location instead holding a completely unrelated
+`org.unrelated:unrelated-project:9.9.9` POM - the old code happily used
+that unrelated POM's `dependencyManagement` to resolve the child's
+`log4j-core` version anyway. The QA agent assessed real-world exposure as
+low (all three production call sites scan one project root at a time, so
+cross-project collisions can't happen under current usage) but genuine: a
+typo'd or restructured `relativePath` in untrusted, AI-generated input -
+exactly this tool's actual target - would silently produce a *wrong
+resolved version* rather than the honestly-unresolved fallback this
+feature's own design philosophy is built around, which is a worse outcome
+than the pre-fix behavior, not just a missed opportunity.
+
+**Fix applied the same day:** `ParsedPomFile` gained three new fields
+(`group_id`, `artifact_id`, `version`) capturing a POM's own literal
+`<project>`-level self-declaration. `_walk_parent_chain` now calls a new
+`_parent_identity_matches()` before accepting any candidate found at a
+resolved `relativePath`: `artifact_id` must match exactly (it is the one
+Maven coordinate every POM must declare for itself - never inherited, so
+a mismatch is conclusive); `group_id`/`version` are compared only when the
+candidate itself declares them, since a legitimate child POM is allowed to
+omit both and inherit them from its own parent. This mirrors real Maven's
+own behavior (falling back to repository resolution when a `relativePath`
+POM's coordinates don't match the declared parent) rather than inventing
+new semantics. One existing test
+(`test_resolve_inherited_versions_walks_a_multi_level_chain`) turned out
+to itself rely on the trust-by-position bug - its "middle" module's own
+`<parent>` block declared artifactId `"parent"` while the file actually
+sitting at that `relativePath` was named `"middle"`, which only "worked"
+because identity was never checked. Fixed the fixture to be a genuine,
+Maven-valid 3-level chain (`service-a` → `middle` → `parent`, each hop's
+declared coordinates matching the POM actually found there). Added 3 new
+regression tests: the exact wrong-POM-identity scenario QA reproduced
+(resolution now correctly stays unresolved rather than borrowing the
+unrelated POM's version - reproduced live via direct module execution,
+not just through pytest), a soft-match case confirming a legitimately
+matching candidate that itself omits `groupId`/`version` is still
+accepted, and a direct test of the new `group_id`/`artifact_id`/`version`
+extraction. Full suite: 387 passed (was 384); all four gates clean.
+
+**Effect on thesis chapters:** strengthens Chapter 4/5's account of this
+feature with a second, build-then-QA-then-fix cycle - worth noting
+explicitly as evidence the project's "separate build and QA sessions"
+discipline (Section 11) is catching real bugs a same-session review would
+likely have missed, not just a procedural formality. Still pending a
+fresh independent QA pass confirming this specific fix before the feature
+is treated as settled.
+
 ---
 
 ## [2026-10-02] - CWE-284's hand-rolled guard detection follows a one-hop helper-method delegation

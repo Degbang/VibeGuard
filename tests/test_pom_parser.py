@@ -324,7 +324,12 @@ def test_resolve_inherited_versions_respects_explicitly_empty_relative_path(
 
 def test_resolve_inherited_versions_walks_a_multi_level_chain(tmp_path: Path) -> None:
     """A grandparent's <dependencyManagement> must be reachable through an
-    intermediate parent that declares no matching entry of its own."""
+    intermediate parent that declares no matching entry of its own.
+
+    ``service-a``'s own <parent> block declares its genuine immediate
+    parent ("middle"), not the grandparent directly - each hop's declared
+    coordinates must match the POM actually found at that hop's
+    <relativePath>, exactly as real Maven itself requires."""
     _write_parent_pom(tmp_path / "pom.xml")  # grandparent: declares log4j-core
     (tmp_path / "middle").mkdir()
     (tmp_path / "middle" / "pom.xml").write_text(
@@ -339,7 +344,23 @@ def test_resolve_inherited_versions_walks_a_multi_level_chain(tmp_path: Path) ->
         "</project>\n"
     )
     (tmp_path / "middle" / "service-a").mkdir()
-    _write_child_pom(tmp_path / "middle" / "service-a" / "pom.xml", relative_path="../pom.xml")
+    (tmp_path / "middle" / "service-a" / "pom.xml").write_text(
+        "<project>\n"
+        "  <parent>\n"
+        "    <groupId>com.example</groupId>\n"
+        "    <artifactId>middle</artifactId>\n"
+        "    <version>1.0.0</version>\n"
+        "    <relativePath>../pom.xml</relativePath>\n"
+        "  </parent>\n"
+        "  <artifactId>service-a</artifactId>\n"
+        "  <dependencies>\n"
+        "    <dependency>\n"
+        "      <groupId>org.apache.logging.log4j</groupId>\n"
+        "      <artifactId>log4j-core</artifactId>\n"
+        "    </dependency>\n"
+        "  </dependencies>\n"
+        "</project>\n"
+    )
 
     poms = (
         parse_pom_file(tmp_path / "pom.xml"),
@@ -444,3 +465,114 @@ def test_resolve_inherited_versions_prefers_a_resolved_version_over_the_nearest_
     resolved_child = next(pom for pom in resolved if "service-a" in pom.path.parts)
 
     assert resolved_child.dependencies[0].version == "2.14.1"
+
+
+# -- Parent identity verification --------------------------------------------
+#
+# Found by independent QA of the reactor-POM fix: _walk_parent_chain used to
+# trust whatever POM sat at the resolved <relativePath>, without checking it
+# actually matched the declared <parent> coordinates. A typo'd or
+# restructured relativePath in untrusted, AI-generated input could then
+# silently borrow an unrelated module's managed version - functionally
+# worse than staying honestly unresolved, since this feature's whole design
+# philosophy is "never guess past what's genuinely present in the scan."
+
+
+def test_resolve_inherited_versions_rejects_a_relative_path_pointing_at_the_wrong_module(
+    tmp_path: Path,
+) -> None:
+    """A <relativePath> that resolves to a POM with different coordinates
+    than the declared <parent> must not be trusted, even though a file does
+    exist at that position - real Maven itself falls back to repository
+    resolution in this situation rather than using the mismatched file."""
+    (tmp_path / "pom.xml").write_text(
+        "<project>\n"
+        "  <groupId>org.unrelated</groupId>\n"
+        "  <artifactId>unrelated-project</artifactId>\n"
+        "  <version>9.9.9</version>\n"
+        "  <dependencyManagement>\n"
+        "    <dependencies>\n"
+        "      <dependency>\n"
+        "        <groupId>org.apache.logging.log4j</groupId>\n"
+        "        <artifactId>log4j-core</artifactId>\n"
+        "        <version>2.14.1</version>\n"
+        "      </dependency>\n"
+        "    </dependencies>\n"
+        "  </dependencyManagement>\n"
+        "</project>\n"
+    )
+    (tmp_path / "service-a").mkdir()
+    _write_child_pom(tmp_path / "service-a" / "pom.xml")  # declares parent "com.example:parent"
+
+    poms = (
+        parse_pom_file(tmp_path / "pom.xml"),
+        parse_pom_file(tmp_path / "service-a" / "pom.xml"),
+    )
+    resolved = resolve_inherited_versions(poms)
+    resolved_child = next(pom for pom in resolved if "service-a" in pom.path.parts)
+
+    assert resolved_child.dependencies[0].version is None
+
+
+def test_resolve_inherited_versions_accepts_a_candidate_that_inherits_its_own_group_id(
+    tmp_path: Path,
+) -> None:
+    """A candidate parent POM that itself omits <groupId>/<version> (legal
+    Maven - inherited from its own parent) must still be accepted when its
+    <artifactId> matches, rather than rejected for merely lacking fields
+    the child's <parent> block happens to also (redundantly) restate."""
+    _write_parent_pom(tmp_path / "pom.xml")  # grandparent: declares log4j-core
+    (tmp_path / "middle").mkdir()
+    (tmp_path / "middle" / "pom.xml").write_text(
+        "<project>\n"
+        "  <parent>\n"
+        "    <groupId>com.example</groupId>\n"
+        "    <artifactId>parent</artifactId>\n"
+        "    <version>1.0.0</version>\n"
+        "  </parent>\n"
+        "  <artifactId>middle</artifactId>\n"  # own groupId/version inherited, not restated
+        "  <packaging>pom</packaging>\n"
+        "</project>\n"
+    )
+    (tmp_path / "middle" / "service-a").mkdir()
+    (tmp_path / "middle" / "service-a" / "pom.xml").write_text(
+        "<project>\n"
+        "  <parent>\n"
+        "    <groupId>com.example</groupId>\n"
+        "    <artifactId>middle</artifactId>\n"
+        "    <version>1.0.0</version>\n"
+        "    <relativePath>../pom.xml</relativePath>\n"
+        "  </parent>\n"
+        "  <artifactId>service-a</artifactId>\n"
+        "  <dependencies>\n"
+        "    <dependency>\n"
+        "      <groupId>org.apache.logging.log4j</groupId>\n"
+        "      <artifactId>log4j-core</artifactId>\n"
+        "    </dependency>\n"
+        "  </dependencies>\n"
+        "</project>\n"
+    )
+
+    poms = (
+        parse_pom_file(tmp_path / "pom.xml"),
+        parse_pom_file(tmp_path / "middle" / "pom.xml"),
+        parse_pom_file(tmp_path / "middle" / "service-a" / "pom.xml"),
+    )
+    resolved = resolve_inherited_versions(poms)
+    resolved_child = next(pom for pom in resolved if "service-a" in pom.path.parts)
+
+    # Resolution reaches past "middle" (which itself omits groupId/version)
+    # to the grandparent's managed version - the soft group_id/version check
+    # doesn't block a legitimately-matching but identity-omitting candidate.
+    assert resolved_child.dependencies[0].version == "2.14.1"
+
+
+def test_parse_extracts_the_pom_s_own_project_identity(tmp_path: Path) -> None:
+    pom = tmp_path / "pom.xml"
+    _write_parent_pom(pom)
+
+    result = parse_pom_file(pom)
+
+    assert result.group_id == "com.example"
+    assert result.artifact_id == "parent"
+    assert result.version == "1.0.0"
