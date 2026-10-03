@@ -7571,6 +7571,37 @@ more time (e.g. a three-way collision, or a collision combined with the
 one-hop helper-delegation check itself) before this feature is treated as
 fully settled.
 
+**2026-10-03 third independent QA pass: clean, nothing new found.**
+Specifically re-attacked the two scenarios the second pass's handoff
+named: a three-way same-arity collision (`allowed(String)`/`allowed(int)`/
+`allowed(Object)`, all arity 1) correctly excludes the key regardless of
+collision count, on both parser paths; and the exclusion's scoping was
+confirmed precise, not name-wide - an endpoint calling a *different*,
+non-colliding arity (`allowed(key, "other")`, arity 2) still correctly
+finds and attaches the caveat even while `("allowed", 1)` stays excluded
+elsewhere in the same class. Also found and closed a gap in this
+feature's own test coverage not previously exercised by any pass: a
+varargs-vs-fixed-arity collision (`allowed(String a)` vs
+`allowed(String... a)`, both arity 1 by the existing parameter-count
+measure) is correctly caught by the same mechanism, confirmed live.
+Confirmed no interaction bug between this fix and the first pass's
+chained-call rejection (`getHelper().allowed(key)` combined with a
+same-arity collision elsewhere: still no caveat, for either/both reasons
+independently). Re-ran the full suite (404 passed) and all four gates
+clean. Re-verified the real `.qa-repos` corpus by replicating `main.py`'s
+own `_run_rules` pipeline directly and inspecting `Finding.message`
+objects programmatically (not the console table): 253 scored findings,
+0 with a hand-rolled-guard caveat - exact match, confirmed precisely
+rather than assumed from a potentially-wrapped table.
+
+**Freeze / handoff:** This closes the three-pass QA cycle this feature
+family needed (original build -> chained-call/overload-by-name bugs ->
+same-arity-collision bug -> clean). The CWE-284 helper-indirection
+mechanism (one-hop delegation, chained-call rejection, overload-by-arity,
+same-arity-collision exclusion) is treated as frozen as of this entry -
+reopen only if a later layer or a future real-repo QA pass surfaces a
+genuinely new, reproduced gap, per Section 8's freeze discipline.
+
 ## [2026-10-03] - Layer 5 explainer.py test coverage closed from 69% to 100%
 **What the plan said:** no explicit prior plan targeted this file; it surfaced
 as an item in a full-project gap analysis as the lowest-covered module in the

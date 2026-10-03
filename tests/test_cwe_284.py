@@ -1526,3 +1526,23 @@ def test_tree_sitter_sibling_methods_by_name_excludes_a_same_arity_overload_coll
     annotated = apply_hand_rolled_guard_context(findings, (result,))
 
     assert "hand-rolled authorization check" not in annotated[0].message
+
+
+def test_sibling_methods_by_name_excludes_a_varargs_vs_fixed_arity_collision() -> None:
+    """A varargs overload (``allowed(String... a)``) and a fixed-arity
+    overload of the same name count as the same arity (both are measured
+    by ``len(member.parameters)``, which is 1 for each) - the identical
+    collision mechanism as two fixed-arity overloads, found by a third
+    independent QA pass to be a real but previously-untested shape."""
+    java = (
+        "public class VaultController {\n"
+        "    private boolean allowed(String a) { return true; }\n"
+        "    private boolean allowed(String... a) { return false; }\n"
+        "}\n"
+    )
+    tree = javalang.parse.parse(java)
+    class_path = next(path + (node,) for path, node in tree.filter(javalang.tree.ClassDeclaration))
+
+    siblings = _sibling_methods_by_name(class_path)
+
+    assert ("allowed", 1) not in siblings
