@@ -7255,6 +7255,49 @@ likely have missed, not just a procedural formality. Still pending a
 fresh independent QA pass confirming this specific fix before the feature
 is treated as settled.
 
+**2026-10-03 second independent QA pass (fresh session, specifically
+re-attacking the identity-verification fix itself): confirmed correct,
+no bug found.** Reproduced the original bug's fix live; confirmed the
+soft-match forgiveness is not over-applied (a legitimate ancestor
+omitting its own `groupId`/`version` still resolves correctly);
+deliberately probed case-sensitivity, empty vs. missing `artifactId`,
+whitespace-only values, and leading/trailing whitespace - all handled
+correctly via the pre-existing `_child_text` stripping. Specifically
+checked for an ambiguity risk analogous to `_interface_annotations.py`'s
+simple-name collision handling (two POMs sharing identical coordinates
+elsewhere in a scan) and confirmed by construction that it cannot arise
+here: `_walk_parent_chain` resolves a candidate by file *position*
+(`by_path`, keyed on resolved absolute `Path`) and only then runs the
+identity check as a confirming filter on that one positionally-resolved
+file - it never performs a scan-wide coordinate search the way the
+interface-annotation index does, so a duplicate-coordinate decoy
+elsewhere in the scan is structurally unreachable. Found one
+non-blocking asymmetry (now documented in `_parent_identity_matches`'s
+docstring): a child's own `<parent>` block omitting `<version>` (itself
+non-compliant with real Maven) fails the match even when `artifactId`
+genuinely agrees, because the soft-match forgiveness only applies to the
+*candidate's* missing fields, not the child's declared ones - confirmed
+this fails in the safe direction (honest "unresolved," never a wrong
+version) and is not a defect. Also flagged that no permanent regression
+test existed for `_MAX_PARENT_CHAIN_DEPTH` (10) despite having been
+manually verified in two separate ad hoc QA sessions now - added as a
+same-day follow-up: `test_resolve_inherited_versions_resolves_at_exactly_the_depth_cap`
+and `test_resolve_inherited_versions_stays_unresolved_past_the_depth_cap`,
+locating the cap's boundary precisely (a chain of exactly 10 hops
+resolves; 11 hops stays honestly unresolved, confirmed to terminate
+promptly rather than hang). Full suite: 401 passed (was 399, before
+these 2 new tests). All four gates clean. Re-verified against the real
+`.qa-repos` corpus
+with a direct dependency-count comparison (not just the console
+summary): 223/274 total dependencies unresolved across all four repos,
+0 newly resolved anywhere - byte-for-byte identical before and after
+this fix, confirming zero real-world regression risk from the identity
+check on real data.
+
+**Freeze / handoff:** With this second QA pass clean and the two
+follow-up items addressed same-day, this fix is ready to be treated as
+settled.
+
 ---
 
 ## [2026-10-02] - CWE-284's hand-rolled guard detection follows a one-hop helper-method delegation
@@ -7609,3 +7652,41 @@ independent QA pass - recommend a fresh session QA this specifically
 (the cycle/depth guard and the three-call-site wiring are the two places
 most likely to hide a subtle bug, the same pattern as every other
 bounded-walk feature in this codebase) before treating it as settled.
+
+**2026-10-03 independent QA pass (fresh session): confirmed correct, no
+bug found.** Reproduced the motivating 2-hop case for both CWE-284 and
+CWE-20 on both parser paths. Went further than the original build
+session tested: confirmed the walk genuinely handles arbitrary depth
+(not just exactly 2 hops) via 3- and 5-level chains; precisely located
+the depth-cap boundary (a chain of exactly 10 interfaces resolves, 11
+does not, terminating gracefully either way) and clarified its exact
+semantics for Chapter 5 - `_MAX_INTERFACE_HIERARCHY_DEPTH = 10` means
+"10 interface names in the closure, direct interface counted as the
+first," not "10 hops past the direct interface." Pushed cycle-safety
+testing further than the existing regression test: confirmed a 3-node
+cycle terminates; confirmed a cycle elsewhere in the graph doesn't poison
+resolution of a real annotation found before the cycle closes, including
+when the annotation sits on a cycle member itself; and - by deliberately
+and temporarily removing each of the two termination guards (the
+`seen`-set dedup and the fixed iteration bound) separately, confirming
+the mechanism still terminated either way for a simple pairwise cycle,
+then removing both together and reproducing a genuine hang via a 5-second
+timeout - demonstrated that the existing shipped regression test proves
+overall termination but doesn't by itself isolate which guard is doing
+the work for a simple cycle; separately confirmed `seen` is independently
+load-bearing for a branching/converging cyclic graph, which the existing
+test doesn't cover. All experimental edits reverted and md5-verified
+byte-identical to the original. Confirmed the ambiguous-intermediate-
+interface case holds: an intermediate interface in a chain colliding on
+simple name with an unrelated interface elsewhere is correctly excluded
+from the hierarchy index, and resolution through it correctly stops
+rather than guessing. Verified the "only two call sites" wiring claim by
+reading the actual call sites, not just grepping. Full suite (399 at the
+time), all four gates, and the real `.qa-repos` corpus (253 findings,
+unchanged) all reconfirmed independently. No defects found; two
+precision notes only (the depth-cap semantics wording above, and that a
+future refactor of the depth bound would need a branching-cycle test to
+keep catching a `seen`-removal regression) - both informational, not
+blocking.
+
+This commit is ready to be treated as settled/frozen.

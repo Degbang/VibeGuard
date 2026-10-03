@@ -410,6 +410,91 @@ def test_resolve_inherited_versions_detects_a_parent_cycle_without_hanging(
     assert len(resolved) == 2
 
 
+def _write_parent_chain(root: Path, depth: int) -> Path:
+    """Build a nested chain of ``depth`` + 1 POMs (``level0`` at ``root``
+    down to ``level{depth}``, each a subdirectory of the previous), where
+    only ``level0`` declares the real ``dependencyManagement`` entry and
+    ``level{depth}`` is the leaf with the unresolved dependency. Returns
+    the leaf POM's path. Reaching ``level0`` from the leaf takes exactly
+    ``depth`` hops - the same measure ``_MAX_PARENT_CHAIN_DEPTH`` bounds.
+    """
+    current = root
+    current.mkdir(parents=True, exist_ok=True)
+    (current / "pom.xml").write_text(
+        "<project>\n"
+        "  <groupId>com.example</groupId>\n"
+        "  <artifactId>level0</artifactId>\n"
+        "  <version>1.0.0</version>\n"
+        "  <dependencyManagement>\n"
+        "    <dependencies>\n"
+        "      <dependency>\n"
+        "        <groupId>org.apache.logging.log4j</groupId>\n"
+        "        <artifactId>log4j-core</artifactId>\n"
+        "        <version>2.14.1</version>\n"
+        "      </dependency>\n"
+        "    </dependencies>\n"
+        "  </dependencyManagement>\n"
+        "</project>\n"
+    )
+    for level in range(1, depth + 1):
+        current = current / f"level{level}"
+        current.mkdir()
+        is_leaf = level == depth
+        body = (
+            "  <dependencies>\n"
+            "    <dependency>\n"
+            "      <groupId>org.apache.logging.log4j</groupId>\n"
+            "      <artifactId>log4j-core</artifactId>\n"
+            "    </dependency>\n"
+            "  </dependencies>\n"
+            if is_leaf
+            else ""
+        )
+        current_artifact_id = f"level{level}"
+        parent_artifact_id = f"level{level - 1}"
+        (current / "pom.xml").write_text(
+            "<project>\n"
+            "  <parent>\n"
+            "    <groupId>com.example</groupId>\n"
+            f"    <artifactId>{parent_artifact_id}</artifactId>\n"
+            "    <version>1.0.0</version>\n"
+            "    <relativePath>../pom.xml</relativePath>\n"
+            "  </parent>\n"
+            f"  <artifactId>{current_artifact_id}</artifactId>\n"
+            f"{body}"
+            "</project>\n"
+        )
+    return current / "pom.xml"
+
+
+def test_resolve_inherited_versions_resolves_at_exactly_the_depth_cap(tmp_path: Path) -> None:
+    """A chain exactly ``_MAX_PARENT_CHAIN_DEPTH`` (10) hops deep must
+    still resolve - confirms the cap's boundary is inclusive, not
+    off-by-one in the restrictive direction."""
+    leaf_path = _write_parent_chain(tmp_path / "chain10", depth=10)
+    poms = tuple(parse_pom_file(p) for p in sorted((tmp_path / "chain10").glob("**/pom.xml")))
+
+    resolved = resolve_inherited_versions(poms)
+    resolved_leaf = next(pom for pom in resolved if pom.path == leaf_path.resolve())
+
+    assert resolved_leaf.dependencies[0].version == "2.14.1"
+
+
+def test_resolve_inherited_versions_stays_unresolved_past_the_depth_cap(tmp_path: Path) -> None:
+    """A chain one hop past ``_MAX_PARENT_CHAIN_DEPTH`` must stay honestly
+    unresolved rather than walking arbitrarily far, and must still
+    terminate promptly rather than hang - this indexes untrusted,
+    AI-generated monorepo structures that could plausibly nest this
+    deep by accident."""
+    leaf_path = _write_parent_chain(tmp_path / "chain11", depth=11)
+    poms = tuple(parse_pom_file(p) for p in sorted((tmp_path / "chain11").glob("**/pom.xml")))
+
+    resolved = resolve_inherited_versions(poms)
+    resolved_leaf = next(pom for pom in resolved if pom.path == leaf_path.resolve())
+
+    assert resolved_leaf.dependencies[0].version is None
+
+
 def test_resolve_inherited_versions_prefers_a_resolved_version_over_the_nearest_match(
     tmp_path: Path,
 ) -> None:

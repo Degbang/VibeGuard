@@ -454,6 +454,15 @@ def _parent_identity_matches(parent_ref: MavenParentReference, candidate: Parsed
     only when the candidate declares them itself; a child POM is allowed
     to omit both and inherit them from its own parent, so their absence is
     never treated as a mismatch.
+
+    Note the asymmetry this implies: a *child's own* ``<parent>`` block
+    omitting ``<version>`` (non-compliant with real Maven, which requires
+    all three sub-elements there) is not given the same forgiveness - it
+    compares the candidate's real, present version against ``None`` and
+    fails the match. This is intentional, not an oversight: it fails
+    toward the safe "unresolved" direction (a recall miss) rather than
+    toward silently accepting a parent this parser cannot actually
+    confirm, consistent with this function's whole purpose.
     """
     if candidate.artifact_id != parent_ref.artifact_id:
         return False
