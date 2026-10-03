@@ -1002,7 +1002,7 @@ _HELPER_INDIRECTION_JAVA = (
 def test_has_inline_header_guard_detects_helper_call_indirection() -> None:
     tree = javalang.parse.parse(_HELPER_INDIRECTION_JAVA)
     method = _first_method(tree, "store")
-    siblings = {"allowed": _first_method(tree, "allowed")}
+    siblings = {("allowed", 1): _first_method(tree, "allowed")}
 
     assert has_inline_header_guard(method, siblings) is True
 
@@ -1025,7 +1025,7 @@ def test_has_inline_header_guard_follows_this_qualified_helper_call() -> None:
     java = _HELPER_INDIRECTION_JAVA.replace("!allowed(key)", "!this.allowed(key)")
     tree = javalang.parse.parse(java)
     method = _first_method(tree, "store")
-    siblings = {"allowed": _first_method(tree, "allowed")}
+    siblings = {("allowed", 1): _first_method(tree, "allowed")}
 
     assert has_inline_header_guard(method, siblings) is True
 
@@ -1037,7 +1037,7 @@ def test_has_inline_header_guard_does_not_follow_a_call_on_another_object() -> N
     java = _HELPER_INDIRECTION_JAVA.replace("!allowed(key)", "!other.allowed(key)")
     tree = javalang.parse.parse(java)
     method = _first_method(tree, "store")
-    siblings = {"allowed": _first_method(tree, "allowed")}
+    siblings = {("allowed", 1): _first_method(tree, "allowed")}
 
     assert has_inline_header_guard(method, siblings) is False
 
@@ -1050,7 +1050,7 @@ def test_has_inline_header_guard_does_not_match_an_unrelated_helper() -> None:
     )
     tree = javalang.parse.parse(java)
     method = _first_method(tree, "store")
-    siblings = {"allowed": _first_method(tree, "allowed")}
+    siblings = {("allowed", 1): _first_method(tree, "allowed")}
 
     assert has_inline_header_guard(method, siblings) is False
 
@@ -1111,3 +1111,200 @@ def test_has_inline_header_guard_helper_indirection_tree_sitter_fallback(
     annotated = apply_hand_rolled_guard_context(findings, (result,))
 
     assert "hand-rolled authorization check" in annotated[0].message
+
+
+# -- Chained-call and overload false positives -------------------------------
+#
+# Found by independent QA of the helper-indirection feature above: both bugs
+# reproduced here are false positives in the caveat text only (never a
+# suppression, never a scoring/ML change - the underlying CWE-284 finding is
+# always still raised), but they violate the feature's own stated "must not
+# be followed" guarantees.
+
+
+def _method_with_arity(
+    tree: javalang.tree.CompilationUnit, name: str, parameter_count: int
+) -> javalang.tree.MethodDeclaration:
+    for _path, method in tree.filter(javalang.tree.MethodDeclaration):
+        if method.name == name and len(method.parameters) == parameter_count:
+            return method
+    raise AssertionError(f"no method named {name!r} with {parameter_count} parameter(s)")
+
+
+def test_has_inline_header_guard_does_not_follow_a_call_chained_off_another_call() -> None:
+    """``getHelper().allowed(key)`` must not be mistaken for a same-class
+    ``allowed(key)`` call - javalang gives the chained call's own
+    ``qualifier`` the same ``None`` value as a genuinely bare call; the
+    chain information lives only in ``getHelper()``'s own ``selectors``
+    list. ``Helper.allowed`` (the method actually invoked) performs no
+    real check at all; ``VaultController.allowed`` (the same-named
+    same-class method) is never actually called here."""
+    java = (
+        "import org.springframework.web.bind.annotation.*;\n"
+        "@RestController\n"
+        "public class VaultController {\n"
+        '    @Value("${VAULT_KEY:}") private String vaultKey;\n'
+        "    @PostMapping\n"
+        '    public String store(@RequestHeader("X-Key") String key) {\n'
+        "        if (!getHelper().allowed(key)) {\n"
+        '            return "denied";\n'
+        "        }\n"
+        '        return "ok";\n'
+        "    }\n"
+        "    private Helper getHelper() { return new Helper(); }\n"
+        "    private boolean allowed(String suppliedKey) {\n"
+        "        return vaultKey.equals(suppliedKey);\n"
+        "    }\n"
+        "}\n"
+    )
+    tree = javalang.parse.parse(java)
+    method = _first_method(tree, "store")
+    siblings = {
+        ("getHelper", 0): _method_with_arity(tree, "getHelper", 0),
+        ("allowed", 1): _method_with_arity(tree, "allowed", 1),
+    }
+
+    assert has_inline_header_guard(method, siblings) is False
+
+
+def test_has_inline_header_guard_does_not_follow_a_this_qualified_chained_call() -> None:
+    """``this.getHelper().allowed(key)`` must likewise not be followed -
+    ``allowed`` here is invoked on ``getHelper()``'s return value, not
+    directly on ``this``, even though both calls share the same flattened
+    ``This.selectors`` list."""
+    java = (
+        "import org.springframework.web.bind.annotation.*;\n"
+        "@RestController\n"
+        "public class VaultController {\n"
+        '    @Value("${VAULT_KEY:}") private String vaultKey;\n'
+        "    @PostMapping\n"
+        '    public String store(@RequestHeader("X-Key") String key) {\n'
+        "        if (!this.getHelper().allowed(key)) {\n"
+        '            return "denied";\n'
+        "        }\n"
+        '        return "ok";\n'
+        "    }\n"
+        "    private Helper getHelper() { return new Helper(); }\n"
+        "    private boolean allowed(String suppliedKey) {\n"
+        "        return vaultKey.equals(suppliedKey);\n"
+        "    }\n"
+        "}\n"
+    )
+    tree = javalang.parse.parse(java)
+    method = _first_method(tree, "store")
+    siblings = {
+        ("getHelper", 0): _method_with_arity(tree, "getHelper", 0),
+        ("allowed", 1): _method_with_arity(tree, "allowed", 1),
+    }
+
+    assert has_inline_header_guard(method, siblings) is False
+
+
+def test_detect_in_java_does_not_raise_a_hand_rolled_guard_caveat_for_a_chained_helper_call(
+    tmp_path: Path,
+) -> None:
+    """End-to-end through the real per-file wiring, matching QA's exact
+    reproduction: the finding is still raised (CWE-284 never suppresses),
+    but it must carry no false "hand-rolled authorization check" caveat."""
+    java_file = tmp_path / "VaultController.java"
+    java_file.write_text(
+        "import org.springframework.web.bind.annotation.*;\n"
+        "@RestController\n"
+        "public class VaultController {\n"
+        '    @Value("${VAULT_KEY:}") private String vaultKey;\n'
+        "    @PostMapping\n"
+        '    public String store(@RequestHeader("X-Key") String key) {\n'
+        "        if (!getHelper().allowed(key)) {\n"
+        '            return "denied";\n'
+        "        }\n"
+        '        return "ok";\n'
+        "    }\n"
+        "    private Helper getHelper() { return new Helper(); }\n"
+        "    private boolean allowed(String suppliedKey) {\n"
+        "        return vaultKey.equals(suppliedKey);\n"
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+    findings = detect_in_java(result)
+    assert {f.identifier for f in findings} == {"store"}
+
+    annotated = apply_hand_rolled_guard_context(findings, (result,))
+
+    assert "hand-rolled authorization check" not in annotated[0].message
+
+
+def test_has_inline_header_guard_resolves_the_overload_actually_invoked() -> None:
+    """A one-argument call to ``allowed(key)`` must resolve to the
+    one-argument overload actually invoked, not a same-named two-argument
+    overload declared later in the file. The one-argument overload here
+    performs no real check at all; only the (uninvoked) two-argument
+    overload does."""
+    java = (
+        "import org.springframework.web.bind.annotation.*;\n"
+        "@RestController\n"
+        "public class VaultController {\n"
+        '    @Value("${VAULT_KEY:}") private String vaultKey;\n'
+        "    @PostMapping\n"
+        '    public String store(@RequestHeader("X-Key") String key) {\n'
+        "        if (!allowed(key)) {\n"
+        '            return "denied";\n'
+        "        }\n"
+        '        return "ok";\n'
+        "    }\n"
+        "    private boolean allowed(String suppliedKey) { return true; }\n"
+        "    private boolean allowed(String a, String b) {\n"
+        "        return vaultKey.equals(a);\n"
+        "    }\n"
+        "}\n"
+    )
+    tree = javalang.parse.parse(java)
+    method = _first_method(tree, "store")
+    siblings = {
+        ("allowed", 1): _method_with_arity(tree, "allowed", 1),
+        ("allowed", 2): _method_with_arity(tree, "allowed", 2),
+    }
+
+    assert has_inline_header_guard(method, siblings) is False
+
+
+def test_has_inline_header_guard_overload_resolution_tree_sitter_fallback(
+    tmp_path: Path,
+) -> None:
+    """The same overload-by-arity resolution must hold on the Tree-sitter
+    fallback path."""
+    java_file = tmp_path / "VaultController.java"
+    java_file.write_text(
+        "import org.springframework.web.bind.annotation.*;\n"
+        "@RestController\n"
+        "public class VaultController {\n"
+        '    @Value("${VAULT_KEY:}") private String vaultKey;\n'
+        "    int helper(int level) {\n"
+        "        return switch (level) {\n"
+        "            case 1 -> 1;\n"
+        "            default -> 0;\n"
+        "        };\n"
+        "    }\n"
+        "    @PostMapping\n"
+        '    public String store(@RequestHeader("X-Key") String key) {\n'
+        "        if (!allowed(key)) {\n"
+        '            return "denied";\n'
+        "        }\n"
+        '        return "ok";\n'
+        "    }\n"
+        "    private boolean allowed(String suppliedKey) { return true; }\n"
+        "    private boolean allowed(String a, String b) {\n"
+        "        return vaultKey.equals(a);\n"
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+    assert result.tree_sitter is not None
+    findings = detect_in_java(result)
+    assert {f.identifier for f in findings} == {"store"}
+
+    annotated = apply_hand_rolled_guard_context(findings, (result,))
+
+    assert "hand-rolled authorization check" not in annotated[0].message

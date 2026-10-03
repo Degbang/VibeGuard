@@ -7372,6 +7372,86 @@ that built the feature, at the student's explicit request - per Section
 9, do not treat it as settled project history until the student confirms
 it.
 
+**2026-10-03 independent QA follow-up:** A fresh subagent QA'd this
+commit in an isolated worktree, executing (not reading) every item on
+its own checklist - gates (363 passed), the real wiring at the actual
+call site, backward compatibility with the 6 pre-extension tests,
+argument-position matching in both directions, the documented one-hop
+limit, and the real `.qa-repos` zero-effect claim (253 scored findings,
+zero hand-rolled-guard caveats, matched exactly) - and confirmed all of
+it correct. It also found two real, reproduced false positives outside
+the checklist, both confined to the caveat sentence text only (verified
+by grepping Layer 2/3/4: `Finding.message` is never parsed for
+features/severity/ML input, so neither bug changes a score or a
+prediction - but both violate this feature's own stated "must not be
+followed" guarantees):
+
+1. **Chained-call qualifier mis-resolved as same-class, javalang path
+   only.** `getHelper().allowed(key)` - where `Helper.allowed` (the
+   method actually invoked) performs no real check, and
+   `VaultController.allowed` (a same-named same-class method) is never
+   actually called - was treated as a genuine same-class helper call.
+   Root cause: javalang gives a chained call's own `qualifier` the same
+   `None` value as a genuinely bare call; the chain information lives
+   only in the *owning* node's `selectors` list (which flattens an
+   entire fluent chain into siblings of one list, confirmed by direct
+   AST inspection), not on the chained call's own attributes. The
+   Tree-sitter fallback path does not have this bug - its grammar keeps
+   an explicit `object` field on a chained call, so it already correctly
+   rejected this shape.
+2. **Overloaded helper names silently clobber, on both parser paths.** A
+   plain `name -> MethodDeclaration` dict kept whichever overload was
+   declared last; a one-argument call could resolve to a same-named
+   two-argument overload that is never actually invoked at that call
+   site, producing a false "may be guarded" caveat for an endpoint whose
+   real (one-argument) overload performs no check at all. This is a
+   different failure mode than this project's own documented precedent
+   for the interface-annotation name collision (2026-09 entry), which
+   explicitly fails only in the safe direction - this one does not.
+
+**Fix applied the same day:** `_sibling_methods_by_name` (both the
+javalang version and its Tree-sitter mirror,
+`_tree_sitter_sibling_methods_by_name`) now key by `(name,
+parameter_count)` instead of name alone, and `_bails_out_via_helper_call`
+look up a candidate helper by `(invocation.member, len(invocation.arguments))`
+- resolving overloads by the arity actually used at the call site, not
+"whichever was declared last." For the chained-call bug, a new
+`_is_bare_or_this_invocation(node, path)` replaces the old
+`qualifier not in (None, "", "this")` check (which QA also separately
+noted was partly dead code - `qualifier` is never literally the string
+`"this"`, confirmed by direct AST inspection) on the javalang path only.
+It inspects `path[-2]` (the node whose `.selectors` list the candidate,
+if any, is an element of): a node not inside anyone's `selectors` list at
+all is a true bare call; a node that is the *first* element of a `This`
+node's `selectors` is a direct `this.foo()` call; every other case
+(chained off a non-`This` node's return value, or not the first element
+of a `This` chain, e.g. `this.getHelper().allowed(key)`) is correctly
+rejected. Verified directly against all seven call-qualifier shapes QA's
+checklist and this fix's own docstring describe
+(`allowed(key)`, `this.allowed(key)`, `other.allowed(key)`,
+`VaultController.allowed(key)`, `helperField.allowed(key)`,
+`getHelper().allowed(key)`, `this.getHelper().allowed(key)`) via direct
+script execution, not just pytest. Added 5 regression tests to
+`tests/test_cwe_284.py`: the chained-call false positive at both the
+`has_inline_header_guard` unit level and end-to-end through
+`detect_in_java`/`apply_hand_rolled_guard_context`, the
+`this`-then-chained variant, the overload-resolution fix at the unit
+level, and its Tree-sitter mirror. The 4 pre-existing tests that
+hand-built a sibling dict with plain string keys were updated to the new
+`(name, arity)` key shape - a mechanical update, not a behavior change,
+since arity was always 1 in those fixtures. Re-ran the real `.qa-repos`
+scan after the fix: still 253 scored findings, still zero hand-rolled
+caveats - no regression. Full suite: 392 passed (was 387); all four
+gates clean.
+
+**Effect on thesis chapters:** a third build-then-QA-then-fix cycle this
+session (alongside the CWE-1035 reactor-POM fix above), each catching a
+real, reproduced bug a same-session review plausibly would have missed -
+worth citing together in Chapter 4/5 as concrete evidence for why
+Section 11's "build and QA sessions should be separate" rule exists, not
+as a procedural formality. Still pending a fresh independent QA pass
+confirming this specific fix before the feature is treated as settled.
+
 ## [2026-10-03] - Layer 5 explainer.py test coverage closed from 69% to 100%
 **What the plan said:** no explicit prior plan targeted this file; it surfaced
 as an item in a full-project gap analysis as the lowest-covered module in the

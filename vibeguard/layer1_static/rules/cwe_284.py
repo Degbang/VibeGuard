@@ -479,12 +479,14 @@ def apply_centralized_authorization_context(
     )
 
 
-_EMPTY_SIBLING_METHODS: Mapping[str, javalang.tree.MethodDeclaration] = {}
+_EMPTY_SIBLING_METHODS: Mapping[tuple[str, int], javalang.tree.MethodDeclaration] = {}
 
 
 def has_inline_header_guard(
     method: javalang.tree.MethodDeclaration,
-    sibling_methods_by_name: Mapping[str, javalang.tree.MethodDeclaration] = _EMPTY_SIBLING_METHODS,
+    sibling_methods_by_name: Mapping[
+        tuple[str, int], javalang.tree.MethodDeclaration
+    ] = _EMPTY_SIBLING_METHODS,
 ) -> bool:
     """Whether this method itself compares an ``@RequestHeader`` parameter
     against another value via ``.equals()``/``.contentEquals()``/
@@ -533,26 +535,67 @@ def has_inline_header_guard(
 
 def _sibling_methods_by_name(
     path: tuple[object, ...],
-) -> Mapping[str, javalang.tree.MethodDeclaration]:
+) -> Mapping[tuple[str, int], javalang.tree.MethodDeclaration]:
     """Other methods declared directly in this method's nearest enclosing
     class - its own direct members only, not inherited or nested further,
     the same bounded scope as the rest of this module's hand-rolled-guard
     detection. Used to resolve a one-hop helper-method call; see
-    ``_bails_out_via_helper_call``."""
+    ``_bails_out_via_helper_call``.
+
+    Keyed by ``(name, parameter_count)``, not name alone: a plain
+    name-keyed dict silently clobbers same-named overloads (whichever is
+    declared last wins), which can resolve a call to an overload that
+    isn't actually the one invoked at the call site - found by independent
+    QA, confirmed to manufacture a false "may be guarded" caveat for an
+    endpoint whose actually-invoked overload performs no check at all.
+    """
     enclosing_type = nearest_enclosing_type(path)
     if enclosing_type is None:
         return {}
     return {
-        member.name: member
+        (member.name, len(member.parameters)): member
         for member in enclosing_type.body
         if isinstance(member, javalang.tree.MethodDeclaration)
     }
 
 
+def _is_bare_or_this_invocation(
+    node: javalang.tree.MethodInvocation, path: tuple[object, ...]
+) -> bool:
+    """Whether ``node`` is called with no explicit receiver (``allowed(key)``)
+    or directly on ``this`` (``this.allowed(key)``), as opposed to being
+    chained onto some other expression's return value
+    (``getHelper().allowed(key)``).
+
+    javalang gives a chained call's own ``qualifier`` field the same
+    ``None`` value as a genuinely bare call - the chain information lives
+    only in the *owning* node's ``selectors`` list, which flattens an
+    entire fluent chain (``a().b().c()``) into siblings of a single list
+    rather than nesting each call inside the previous one's own
+    ``selectors``. So only the first element of a ``This`` node's
+    ``selectors`` is actually invoked on ``this`` itself; every other
+    element - and every element of any other node's ``selectors`` - is
+    invoked on whatever the previous call in the chain returned. Found by
+    independent QA: the previous version of this check only looked at
+    ``qualifier`` and so treated ``getHelper().allowed(key)`` exactly like
+    a genuine same-class ``allowed(key)`` call.
+    """
+    if node.qualifier not in (None, ""):
+        return False
+    if len(path) < 2:
+        return True
+    owner, container = path[-2], path[-1]
+    if container is not getattr(owner, "selectors", None):
+        return True  # not chained at all - a true bare call
+    if not isinstance(owner, javalang.tree.This):
+        return False  # chained off some other call's return value, not `this`
+    return bool(owner.selectors) and owner.selectors[0] is node
+
+
 def _bails_out_via_helper_call(
     condition: object,
     header_params: frozenset[str],
-    sibling_methods_by_name: Mapping[str, javalang.tree.MethodDeclaration],
+    sibling_methods_by_name: Mapping[tuple[str, int], javalang.tree.MethodDeclaration],
 ) -> bool:
     """Whether ``condition`` calls a same-class helper method with a header
     parameter as an argument, where that helper itself compares its own
@@ -561,16 +604,19 @@ def _bails_out_via_helper_call(
 
     Only a bare (``allowed(key)``) or ``this``-qualified (``this.allowed(key)``)
     call counts - a call through any other qualifier
-    (``other.allowed(key)``, a static import, a different instance) is a
-    different class's method, not this one's own helper, and is correctly
-    not followed.
+    (``other.allowed(key)``), or chained onto another call's return value
+    (``getHelper().allowed(key)``), is not this class's own direct helper
+    call and is correctly not followed (see ``_is_bare_or_this_invocation``).
+    The helper is resolved by ``(name, argument count)``, not name alone,
+    so a same-named overload that isn't actually the one being called is
+    never mistaken for it.
     """
     if not hasattr(condition, "filter"):
         return False
-    for _path, invocation in condition.filter(javalang.tree.MethodInvocation):
-        if invocation.qualifier not in (None, "", "this"):
+    for path, invocation in condition.filter(javalang.tree.MethodInvocation):
+        if not _is_bare_or_this_invocation(invocation, path):
             continue
-        helper = sibling_methods_by_name.get(invocation.member)
+        helper = sibling_methods_by_name.get((invocation.member, len(invocation.arguments)))
         if helper is None:
             continue
         for index, arg in enumerate(invocation.arguments):
@@ -716,10 +762,23 @@ def _tree_sitter_argument_references_header(
     return False
 
 
+def _tree_sitter_parameter_count(method: Node) -> int:
+    parameters_node = ts_child_by_field(method, "parameters")
+    if parameters_node is None:
+        return 0
+    return sum(1 for child in parameters_node.named_children if child.type == "formal_parameter")
+
+
 def _tree_sitter_sibling_methods_by_name(
     source: bytes, ancestors: tuple[Node, ...]
-) -> Mapping[str, Node]:
-    """Tree-sitter mirror of ``_sibling_methods_by_name``."""
+) -> Mapping[tuple[str, int], Node]:
+    """Tree-sitter mirror of ``_sibling_methods_by_name``.
+
+    Keyed by ``(name, parameter_count)`` for the same reason as the
+    javalang version: a plain name-keyed dict silently clobbers same-named
+    overloads, which can resolve a call to an overload that isn't actually
+    the one invoked at the call site.
+    """
     enclosing_type = ts_nearest_enclosing_type(ancestors)
     if enclosing_type is None:
         return {}
@@ -727,7 +786,7 @@ def _tree_sitter_sibling_methods_by_name(
     if body is None:
         return {}
     return {
-        ts_declaration_name(source, member): member
+        (ts_declaration_name(source, member), _tree_sitter_parameter_count(member)): member
         for member in body.named_children
         if member.type == "method_declaration"
     }
@@ -737,7 +796,7 @@ def _tree_sitter_bails_out_via_helper_call(
     source: bytes,
     condition: Node,
     header_params: frozenset[str],
-    sibling_methods_by_name: Mapping[str, Node],
+    sibling_methods_by_name: Mapping[tuple[str, int], Node],
 ) -> bool:
     """Tree-sitter mirror of ``_bails_out_via_helper_call``."""
     for node in ts_walk(condition):
@@ -751,12 +810,15 @@ def _tree_sitter_bails_out_via_helper_call(
         name_node = ts_child_by_field(node, "name")
         if name_node is None:
             continue
-        helper = sibling_methods_by_name.get(ts_node_text(source, name_node))
+        arguments_node = ts_child_by_field(node, "arguments")
+        if arguments_node is None:
+            continue
+        argument_count = len(arguments_node.named_children)
+        helper = sibling_methods_by_name.get((ts_node_text(source, name_node), argument_count))
         if helper is None:
             continue
-        arguments_node = ts_child_by_field(node, "arguments")
         helper_parameters_node = ts_child_by_field(helper, "parameters")
-        if arguments_node is None or helper_parameters_node is None:
+        if helper_parameters_node is None:
             continue
         helper_parameters = [
             child
