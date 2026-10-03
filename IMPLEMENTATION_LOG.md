@@ -7783,3 +7783,126 @@ keep catching a `seen`-removal regression) - both informational, not
 blocking.
 
 This commit is ready to be treated as settled/frozen.
+
+---
+
+## [2026-10-03] - Fifth real-world repository added: spring-petclinic-microservices - first non-zero real-world effect for the CWE-1035 reactor-POM fix
+**Status: DRAFT, pending student review.**
+
+**What the plan said:** Section 7's build order and this file's own
+recurring pattern (CWE-1035's reactor-POM fix, CWE-284/CWE-20's
+interface-widening and its multi-level extension, all logged this week)
+had each shown "zero measured real-world effect" on the existing four
+`.qa-repos` entries, every time for a precisely diagnosed, repo-specific
+structural reason. The standing, repeatedly-stated argument was that a
+fifth, structurally different real repository was the highest-value
+remaining evaluation step - this entry is that step.
+
+**What we actually did:** Selected and added
+`.qa-repos/spring-petclinic-microservices-20261003`
+(`spring-petclinic/spring-petclinic-microservices`, the official Spring
+Cloud microservices variant of PetClinic - distinct from the
+already-present `spring-petclinic-rest`), a shallow clone matching the
+existing four repos' naming/depth convention. Verified its structure
+before cloning (via its public GitHub source, read-only) specifically
+because it was expected to differ from all four existing repos in the one
+way that mattered: a genuine local Maven reactor, with each of its 8
+service modules' own `<parent>` pointing at the repo's own root `pom.xml`
+(no external parent, no explicit `<relativePath>` - defaults to Maven's
+own `../pom.xml` convention), and that root POM declaring real,
+non-import-scope `<dependencyManagement>` entries
+(`org.jolokia:jolokia-core:1.7.1`,
+`de.codecentric:chaos-monkey-spring-boot:4.0.0`,
+`net.ttddyy.observation:datasource-micrometer-spring-boot:2.0.1`) -
+exactly the shape the reactor-POM fix was built for, and exactly the
+shape none of the four existing repos happen to have.
+
+**Result, measured precisely, not assumed:**
+- **The reactor-POM fix engaged for the first time with a non-zero
+  effect.** Direct before/after comparison via `resolve_inherited_versions`
+  on this repo alone: 125 total declared dependencies, 116 unresolved
+  before the fix, 101 unresolved after - **15 newly resolved**, across 7 of
+  the 8 service modules, all three of the root POM's own managed entries
+  accounted for. None of the three resolved dependency/version pairs
+  happen to be present in CWE-1035's own known-vulnerability list, so
+  this did not itself surface a new vulnerability finding - but it is a
+  real, measured, positive effect on recall-readiness (three dependencies
+  moved from "unchecked" to "checked and correctly not flagged," which is
+  the mechanism doing its stated job, not a null result). This finally
+  breaks the four-times-repeated "zero effect" pattern logged for this
+  feature and its CWE-284/CWE-20 siblings.
+- **Scanned cleanly**: 53/53 Java files, 8/8 config files, 9/9 pom.xml
+  files all parsed OK, zero crashes, zero rejections.
+- **17 scored findings (15 CWE-284, 2 CWE-20), reviewed for plausibility,
+  not just counted.** Confirmed by direct grep across the whole repo:
+  zero occurrences of `spring-boot-starter-security`,
+  `SecurityFilterChain`, `WebSecurityConfigurerAdapter`, `@PreAuthorize`,
+  or `@RolesAllowed` anywhere - this reference application genuinely
+  implements no access control mechanism at all, so all 15 CWE-284
+  findings (every REST endpoint lacking an authorization annotation) are
+  plausible true positives, not false positives from a missed framework
+  pattern. The 2 CWE-20 findings (`PetResource.processCreationForm`/
+  `processUpdateForm`, both taking an `@RequestBody PetRequest` with no
+  `@Valid`/`@Validated`) were read directly in source and are also
+  genuine true positives.
+- **No interface-widening data point.** Checked directly: the only
+  `implements` relationship in the whole repo is a generic
+  `Mapper<OwnerRequest, Owner>` interface, unrelated to HTTP endpoints -
+  this repo is hand-written, not OpenAPI-codegen'd, so it does not
+  exercise the CWE-284/CWE-20 interface-annotation features either way.
+  An honest null result, not a gap in this repo or in VibeGuard.
+- **No new Layer 1 gap found.** Unlike each of the previous four
+  additions, this one did not surface a bug to fix - a different, equally
+  honest outcome worth stating plainly rather than searching for a defect
+  to justify the addition.
+
+**Updated aggregate `.qa-repos` numbers (5 repos now)**: 579/579 Java
+files, 25/25 config files, 21/21 pom.xml files all parsed OK; 324/399
+declared dependencies unchecked after the fix (was 223/274 across the
+four existing repos alone, where the fix has always had zero effect;
+this new repo alone contributes 125 dependencies, 116 unresolved before
+the fix and 101 after - the 15-dependency difference accounts for the
+entire corpus-wide change, consistent with the four other repos
+continuing to show zero effect); **270 scored findings** (was 253 across
+four repos; this repo
+contributes exactly 17, confirmed consistent).
+
+**Remaining limitations:** This repo does not exercise BOM-`<scope>import</scope>`
+resolution (the root POM imports `spring-cloud-dependencies` this way,
+a different Maven mechanism this project has already investigated and
+deliberately left out of scope) or the interface-widening features. The
+standing argument for a sixth repo specifically targeting committed
+(not generated-at-build-time) interface-based endpoint definitions -
+Spring OpenAPI-codegen style or JAX-RS resource-interface style - remains
+open; this addition closes the CWE-1035 gap specifically, not every
+remaining honest-zero-effect finding.
+
+**Why:** A real, measured non-zero effect for a feature that had shown
+zero effect four times running is a materially stronger piece of
+evaluation evidence than a fifth repo chosen without first checking its
+structure would have been - the repo was selected specifically because
+its public source was verified (read-only, via GitHub) to have the exact
+shape this feature targets, before cloning it, rather than cloning first
+and hoping.
+
+**Effect on thesis chapters:** Chapter 5's CWE-1035 evaluation can now
+report a genuine positive real-world result for the reactor-POM
+mechanism, not only the four-times-repeated "zero effect, each for a
+diagnosed reason" finding - worth presenting as "the fix worked exactly
+as designed the first time it met a project with the matching structure,"
+which is itself evidence the four prior zero-effect findings were a
+property of those repos, not a hidden flaw in the fix. Chapter 4 should
+note this repo was selected via a deliberate, verified structural-fit
+process (reading the target's public source before cloning), not
+arbitrarily.
+
+**Freeze/handoff:** No code changed in this entry - evaluation-only. No
+QA pass needed in the "build then QA" sense, since nothing was built; the
+precise dependency-resolution count (15 newly resolved) was independently
+recomputed via a direct script against the real cloned repo as part of
+this same entry, not merely read from the console summary, so the numbers
+above are already verified, not asserted. Next evaluation step per the
+"remaining limitations" note above: a sixth repo specifically targeting
+committed interface-based endpoint definitions, if the student wants to
+continue closing the interface-widening features' honest-zero-effect gap
+next.
