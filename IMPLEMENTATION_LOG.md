@@ -6375,10 +6375,24 @@ SHAP table, not replacing either.
   sensible, correctly-directed prose without crashing.
 
 **Remaining limitations:** Purely a presentation layer; does not change
-what SHAP computes or which features it attributes. The low-risk/all-zero
-case's prose reads slightly awkwardly ("the total number of issues found
-in the project pushed the rating toward low" at value 0) but is accurate
-and was judged acceptable rather than over-engineered for a first pass.
+what SHAP computes or which features it attributes.
+
+**2026-10-03 follow-up (student-requested fix, during log review):** The
+zero-value phrasing flagged above as a known rough edge was fixed, not
+left as-is. "With a value of 0, the total number of issues found in the
+project pushed the rating toward low" read as a contradiction - a reader
+expects "zero" to mean nothing happened, when here the absence itself is
+the informative signal. `_describe_contribution()` now branches on
+whether a feature's value is exactly zero, and separately on whether the
+feature is one of Layer 4's boolean composite features (identified by
+`predictor.py`'s own `has_`/`same_file_` naming convention, not new
+metadata): a zero-valued count reads "X was zero, which pushed..."; a
+false boolean reads "X did not apply, which pushed..."; a true boolean
+drops the "with a value of 1" framing entirely ("X pushed..."), since a
+raw 0/1 value adds nothing readable for a boolean. Verified live against
+the `CleanService.java` fixture (an all-zero low-risk scan) - the panel
+now reads naturally end to end. Added 3 regression tests locking in each
+new branch. Full suite: 395 passed (was 392); all four gates clean.
 
 **Why:** The student's own feedback mid-session was that the raw SHAP
 table was "too technical" to read without translation. Keeping SHAP

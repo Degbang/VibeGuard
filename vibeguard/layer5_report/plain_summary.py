@@ -15,6 +15,13 @@ from vibeguard.layer5_report.explainer import ProjectRiskExplanation, SHAPContri
 
 _NEGLIGIBLE_SHAP_VALUE = 1e-6
 
+# Layer 4's own naming convention (predictor.py's _feature_names()) prefixes
+# every boolean composite feature this way; count/score features never use
+# these prefixes. Used only to pick natural zero-value phrasing below - a
+# count reading "was zero" and a boolean reading "did not apply" avoids the
+# "with a value of 0, X pushed..." phrasing reading as a contradiction.
+_BOOLEAN_FEATURE_PREFIXES = ("has_", "same_file_")
+
 
 def build_plain_summary(
     explanation: ProjectRiskExplanation,
@@ -68,11 +75,36 @@ def build_plain_summary(
 
 
 def _describe_contribution(contribution: SHAPContribution, label: str) -> str:
-    """Render one SHAP contribution as a plain-language sentence."""
+    """Render one SHAP contribution as a plain-language sentence.
+
+    A value of exactly zero gets its own phrasing rather than "with a value
+    of 0, X pushed..." - which reads as a contradiction, since a reader
+    expects "zero of something" to mean nothing happened, when here the
+    absence itself is the informative signal (e.g. a clean scan's zero
+    findings supporting a low-risk rating).
+    """
     direction = "toward" if contribution.shap_value >= 0 else "away from"
     value = contribution.feature_value
-    formatted_value = str(int(value)) if value == int(value) else f"{value:.1f}"
     description = describe_feature(contribution.feature_name)
+    is_boolean = contribution.feature_name.startswith(_BOOLEAN_FEATURE_PREFIXES)
+
+    if value == 0:
+        if is_boolean:
+            return (
+                f"{_capitalize(description)} did not apply, "
+                f"which pushed the rating {direction} {label}."
+            )
+        return f"{_capitalize(description)} was zero, which pushed the rating {direction} {label}."
+
+    if is_boolean:
+        return f"{_capitalize(description)} pushed the rating {direction} {label}."
+
+    formatted_value = str(int(value)) if value == int(value) else f"{value:.1f}"
     return (
         f"With a value of {formatted_value}, {description} pushed the rating {direction} {label}."
     )
+
+
+def _capitalize(text: str) -> str:
+    """Capitalize only the first character, preserving the rest as-is."""
+    return text[0].upper() + text[1:] if text else text

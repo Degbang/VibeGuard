@@ -77,6 +77,60 @@ def test_build_plain_summary_describes_top_features_with_direction() -> None:
     assert "pushed the rating away from critical" in summary
 
 
+def test_build_plain_summary_phrases_a_zero_count_feature_without_contradiction() -> None:
+    """A count feature at exactly zero must not read as "with a value of 0,
+    X pushed..." - a contradiction to a reader expecting "zero" to mean
+    "nothing happened," when the absence itself is the informative signal
+    (e.g. a clean scan's zero findings supporting a low-risk rating)."""
+    explanation = _explanation(
+        label=MLRiskLabel.LOW,
+        confidence=0.89,
+        contributions=(
+            SHAPContribution(feature_name="finding_count", feature_value=0.0, shap_value=0.08),
+        ),
+    )
+
+    summary = build_plain_summary(explanation)
+
+    assert "The total number of issues found in the project was zero" in summary
+    assert "with a value of 0" not in summary.lower()
+
+
+def test_build_plain_summary_phrases_a_false_boolean_feature_as_did_not_apply() -> None:
+    explanation = _explanation(
+        label=MLRiskLabel.LOW,
+        confidence=0.89,
+        contributions=(
+            SHAPContribution(
+                feature_name="has_sensitive_domain_signal", feature_value=0.0, shap_value=0.05
+            ),
+        ),
+    )
+
+    summary = build_plain_summary(explanation)
+
+    assert "did not apply, which pushed the rating toward low" in summary
+    assert "with a value of 0" not in summary.lower()
+
+
+def test_build_plain_summary_phrases_a_true_boolean_feature_without_a_raw_value() -> None:
+    """A boolean feature that's true (1.0) reads naturally as a plain
+    statement - "with a value of 1" adds nothing a reader can use."""
+    explanation = _explanation(
+        contributions=(
+            SHAPContribution(
+                feature_name="has_sensitive_domain_signal", feature_value=1.0, shap_value=0.05
+            ),
+        )
+    )
+
+    summary = build_plain_summary(explanation)
+
+    assert "with a value of 1" not in summary.lower()
+    assert "sensitive functionality" in summary
+    assert "pushed the rating toward critical" in summary
+
+
 def test_build_plain_summary_respects_max_features() -> None:
     explanation = _explanation(
         contributions=(
