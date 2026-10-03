@@ -7312,3 +7312,48 @@ likely to hide a subtle bug. This entry was drafted by the same session
 that built the feature, at the student's explicit request - per Section
 9, do not treat it as settled project history until the student confirms
 it.
+
+## [2026-10-03] - Layer 5 explainer.py test coverage closed from 69% to 100%
+**What the plan said:** no explicit prior plan targeted this file; it surfaced
+as an item in a full-project gap analysis as the lowest-covered module in the
+codebase, on the part of the pipeline that is itself a thesis claim (Layer 5
+explainability).
+**What we actually did / found:** `vibeguard/layer5_report/explainer.py` was
+at 69% coverage (26 of 84 statements uncovered), almost entirely the
+fail-closed `ValueError` shape-validation branches inside
+`_select_predicted_feature_values()` (ndim==3/2/1 SHAP value arrays) and
+`_select_predicted_base_value()` (ndim==2/1/0 baseline arrays), plus one
+defense-in-depth check at the top of `_explain_row()`. Added 21 new tests to
+`tests/test_layer5_report.py`, each constructing a hand-built numpy array of
+a specific wrong shape and asserting the correct `ValueError` message, for
+every branch identified: all three 3D rejection branches (wrong sample
+count, wrong class axis, out-of-range index), the 2D single-output valid
+path, both 2D rejection branches, both 1D branches (reject-for-multiclass
+and valid-for-single-output), the unexpected-ndim catch-all, and the
+equivalent set for `_select_predicted_base_value` including the previously
+untested 1-element-1D case (genuinely distinct from the already-covered
+0-dimensional scalar case). `_explain_row`'s own line 106-107 defense-in-depth
+check — unreachable via real numpy indexing given the exhaustive validation
+already inside `_select_predicted_feature_values` — was exercised by
+monkeypatching `_select_predicted_feature_values` directly to return a
+non-1D array, bypassing its own internal validation, confirming the second
+guard independently catches what the first guard's contract is supposed to
+rule out.
+**Why:** this file validates the exact SHAP shape-handling logic the 2026-07-30
+independent QA pass hardened; the previously-uncovered branches were the
+fail-closed guards protecting against SHAP ever returning a shape this
+project's own code doesn't expect. Closing coverage here means a future
+change to this file that breaks one of these guards will be caught by a
+failing test, not discovered later against a real multiclass model.
+**Tests/adversarial checks run:** `pytest tests/test_layer5_report.py
+tests/test_layer5_plain_summary.py --cov=vibeguard.layer5_report
+--cov-report=term-missing` → 100% coverage across all five files in
+`layer5_report/` (was 69% on `explainer.py` specifically). Full suite:
+`pytest -q` → 384 passed. All four gates (`black --check`, `ruff check`,
+`mypy`, `git diff --check`) clean.
+**Effect on thesis chapters:** Chapter 4/5 - strengthens the "Layer 5 is
+independently verified, not just QA'd once" claim with a concrete coverage
+number (100%, up from 69%) for the module doing the actual SHAP output
+interpretation. No behavioral change to the tool; test-only addition.
+
+Status: DRAFT, pending student review.

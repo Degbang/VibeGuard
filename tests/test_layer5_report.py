@@ -21,6 +21,7 @@ from vibeguard.layer5_report import (
     render_console_report,
 )
 from vibeguard.layer5_report.explainer import (
+    _explain_row,
     _select_predicted_base_value,
     _select_predicted_feature_values,
 )
@@ -222,3 +223,197 @@ def test_render_console_report_rejects_negative_max_summary_features(tmp_path: P
 
     with pytest.raises(ValueError, match="max_summary_features must be non-negative"):
         render_console_report(report, console=Console(file=StringIO()), max_summary_features=-1)
+
+
+# -- Exhaustive shape-validation coverage for _select_predicted_feature_values
+# and _select_predicted_base_value -------------------------------------------
+#
+# These are the fail-closed guards the 2026-07-30 independent QA pass added
+# so an unexpected SHAP output shape is rejected outright rather than
+# silently misread - exactly the kind of judgment-adjacent logic CLAUDE.md's
+# coverage priority calls out (detection/explanation logic over glue code).
+# Each branch is exercised directly, by calling these private functions with
+# hand-built arrays, the same style the pre-existing tests for this file
+# already use - not only through the full explain_project_risk() pipeline,
+# which cannot easily reach every shape (a real trained classifier's own
+# SHAP output shape is consistent across calls, so most of these inconsistent
+# shapes can only arise from a genuinely different classifier/environment,
+# not from this project's own code paths).
+
+
+def test_select_predicted_feature_values_3d_rejects_wrong_sample_count() -> None:
+    values = np.zeros((2, 5, 3), dtype=float)
+
+    with pytest.raises(ValueError, match="exactly one sample"):
+        _select_predicted_feature_values(values, predicted_index=0, expected_class_count=3)
+
+
+def test_select_predicted_feature_values_3d_rejects_wrong_class_axis() -> None:
+    values = np.zeros((1, 5, 3), dtype=float)
+
+    with pytest.raises(ValueError, match="class axis did not match"):
+        _select_predicted_feature_values(values, predicted_index=0, expected_class_count=4)
+
+
+def test_select_predicted_feature_values_3d_rejects_out_of_range_index() -> None:
+    values = np.zeros((1, 5, 3), dtype=float)
+
+    with pytest.raises(ValueError, match="out of range"):
+        _select_predicted_feature_values(values, predicted_index=3, expected_class_count=3)
+
+
+def test_select_predicted_feature_values_2d_single_row_valid_for_single_output() -> None:
+    values = np.array([[0.1, 0.2, 0.3]], dtype=float)
+
+    result = _select_predicted_feature_values(values, predicted_index=0, expected_class_count=1)
+
+    assert np.array_equal(result, np.array([0.1, 0.2, 0.3]))
+
+
+def test_select_predicted_feature_values_2d_rejects_wrong_class_axis() -> None:
+    values = np.zeros((5, 3), dtype=float)
+
+    with pytest.raises(ValueError, match="one column per classifier output class"):
+        _select_predicted_feature_values(values, predicted_index=0, expected_class_count=4)
+
+
+def test_select_predicted_feature_values_2d_rejects_out_of_range_index() -> None:
+    values = np.zeros((5, 3), dtype=float)
+
+    with pytest.raises(ValueError, match="out of range"):
+        _select_predicted_feature_values(values, predicted_index=3, expected_class_count=3)
+
+
+def test_select_predicted_feature_values_1d_rejects_multiclass() -> None:
+    values = np.array([0.1, 0.2, 0.3], dtype=float)
+
+    with pytest.raises(ValueError, match="only valid for single-output models"):
+        _select_predicted_feature_values(values, predicted_index=0, expected_class_count=2)
+
+
+def test_select_predicted_feature_values_1d_valid_for_single_output() -> None:
+    values = np.array([0.1, 0.2, 0.3], dtype=float)
+
+    result = _select_predicted_feature_values(values, predicted_index=0, expected_class_count=1)
+
+    assert np.array_equal(result, values)
+
+
+def test_select_predicted_feature_values_rejects_unexpected_ndim() -> None:
+    values = np.zeros((2, 2, 2, 2), dtype=float)
+
+    with pytest.raises(ValueError, match="unexpected shape"):
+        _select_predicted_feature_values(values, predicted_index=0, expected_class_count=1)
+
+
+def test_select_predicted_base_value_2d_rejects_wrong_sample_count() -> None:
+    base_values = np.zeros((2, 3), dtype=float)
+
+    with pytest.raises(ValueError, match="exactly one sample"):
+        _select_predicted_base_value(base_values, predicted_index=0, expected_class_count=3)
+
+
+def test_select_predicted_base_value_2d_rejects_wrong_class_axis() -> None:
+    base_values = np.zeros((1, 3), dtype=float)
+
+    with pytest.raises(ValueError, match="class axis did not match"):
+        _select_predicted_base_value(base_values, predicted_index=0, expected_class_count=4)
+
+
+def test_select_predicted_base_value_2d_rejects_out_of_range_index() -> None:
+    base_values = np.zeros((1, 3), dtype=float)
+
+    with pytest.raises(ValueError, match="out of range"):
+        _select_predicted_base_value(base_values, predicted_index=3, expected_class_count=3)
+
+
+def test_select_predicted_base_value_2d_valid() -> None:
+    base_values = np.array([[0.1, 0.2, 0.3]], dtype=float)
+
+    result = _select_predicted_base_value(base_values, predicted_index=1, expected_class_count=3)
+
+    assert result == pytest.approx(0.2)
+
+
+def test_select_predicted_base_value_1d_size_one_rejects_multiclass() -> None:
+    """A 1-element 1D array is a different shape from the scalar (ndim=0)
+    case the pre-existing rejection test already covers - both must be
+    rejected for a multiclass model, but they exercise different branches."""
+    base_values = np.array([0.123], dtype=float)
+
+    with pytest.raises(ValueError, match="only valid for single-output models"):
+        _select_predicted_base_value(base_values, predicted_index=0, expected_class_count=4)
+
+
+def test_select_predicted_base_value_1d_size_one_valid_for_single_output() -> None:
+    base_values = np.array([0.123], dtype=float)
+
+    result = _select_predicted_base_value(base_values, predicted_index=0, expected_class_count=1)
+
+    assert result == pytest.approx(0.123)
+
+
+def test_select_predicted_base_value_1d_rejects_wrong_size() -> None:
+    base_values = np.array([0.1, 0.2, 0.3], dtype=float)
+
+    with pytest.raises(ValueError, match="one value per classifier output class"):
+        _select_predicted_base_value(base_values, predicted_index=0, expected_class_count=4)
+
+
+def test_select_predicted_base_value_1d_rejects_out_of_range_index() -> None:
+    base_values = np.array([0.1, 0.2, 0.3], dtype=float)
+
+    with pytest.raises(ValueError, match="out of range"):
+        _select_predicted_base_value(base_values, predicted_index=3, expected_class_count=3)
+
+
+def test_select_predicted_base_value_1d_valid() -> None:
+    base_values = np.array([0.1, 0.2, 0.3], dtype=float)
+
+    result = _select_predicted_base_value(base_values, predicted_index=2, expected_class_count=3)
+
+    assert result == pytest.approx(0.3)
+
+
+def test_select_predicted_base_value_scalar_valid_for_single_output() -> None:
+    base_values = np.array(0.123, dtype=float)
+
+    result = _select_predicted_base_value(base_values, predicted_index=0, expected_class_count=1)
+
+    assert result == pytest.approx(0.123)
+
+
+def test_select_predicted_base_value_rejects_unexpected_ndim() -> None:
+    base_values = np.zeros((2, 2, 2), dtype=float)
+
+    with pytest.raises(ValueError, match="unexpected shape"):
+        _select_predicted_base_value(base_values, predicted_index=0, expected_class_count=1)
+
+
+def test_explain_row_rejects_a_collapsed_shape_that_is_not_1d() -> None:
+    """Defense in depth: even if the two shape-selection helpers above were
+    somehow fooled, _explain_row's own final ndim check must still catch a
+    non-1D result rather than pass it on."""
+
+    class BadShapeExplanation:
+        def __init__(self) -> None:
+            self.values = np.zeros((1, 3), dtype=float)
+            self.base_values = np.array([0.5], dtype=float)
+
+    class BadShapeExplainer:
+        def __call__(self, row: np.ndarray, check_additivity: bool = False) -> Any:
+            del row, check_additivity
+            return BadShapeExplanation()
+
+    with patch(
+        "vibeguard.layer5_report.explainer._select_predicted_feature_values",
+        return_value=np.zeros((2, 2), dtype=float),
+    ):
+        with patch("shap.TreeExplainer", return_value=BadShapeExplainer()):
+            with pytest.raises(ValueError, match="must collapse to a 1D feature vector"):
+                _explain_row(
+                    classifier=object(),
+                    row=np.zeros((1, 3), dtype=float),
+                    predicted_index=0,
+                    expected_class_count=1,
+                )
