@@ -7,7 +7,10 @@ from pathlib import Path
 import javalang
 
 from vibeguard.layer1_static.ast_parser import parse_file
-from vibeguard.layer1_static.rules._interface_annotations import build_interface_method_index
+from vibeguard.layer1_static.rules._interface_annotations import (
+    build_interface_hierarchy_index,
+    build_interface_method_index,
+)
 from vibeguard.layer1_static.rules.cwe_284 import (
     CWE_ID,
     apply_centralized_authorization_context,
@@ -915,6 +918,115 @@ def test_detect_in_java_finds_endpoint_inherited_from_interface_tree_sitter_fall
 
     assert len(findings) == 1
     assert findings[0].identifier == "getOwner"
+
+
+# -- Multi-level interface-extends chains ------------------------------------
+#
+# Found during log review, not by a QA pass: the interface-widening feature
+# above only ever checked the single directly-implemented interface. If that
+# interface itself extends a further interface (common for a shared base API
+# interface, e.g. generated PetsApi extends BaseApi), the real annotation -
+# declared on the grand-interface - was invisible entirely. Reproduced
+# directly before fixing: a controller implementing PetsApi, where PetsApi
+# extends BaseApi and @GetMapping lives only on BaseApi, produced zero
+# findings. This is a false negative, the worst-case failure direction this
+# project treats CWE-284 as having.
+
+_BASE_API_JAVA = (
+    "import org.springframework.web.bind.annotation.GetMapping;\n"
+    "public interface BaseApi {\n"
+    '    @GetMapping("/pets")\n'
+    "    String getPets();\n"
+    "}\n"
+)
+
+_PETS_API_EXTENDS_BASE_JAVA = "public interface PetsApi extends BaseApi {\n}\n"
+
+
+def test_detect_in_java_finds_endpoint_inherited_through_a_two_level_interface_chain(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "BaseApi.java").write_text(_BASE_API_JAVA)
+    (tmp_path / "PetsApi.java").write_text(_PETS_API_EXTENDS_BASE_JAVA)
+    controller_file = tmp_path / "PetsController.java"
+    controller_file.write_text(
+        "public class PetsController implements PetsApi {\n"
+        "    @Override\n"
+        '    public String getPets() { return "pets"; }\n'
+        "}\n"
+    )
+    parsed = (
+        parse_file(tmp_path / "BaseApi.java"),
+        parse_file(tmp_path / "PetsApi.java"),
+        parse_file(controller_file),
+    )
+    controller_result = parsed[2]
+    index = build_interface_method_index(parsed)
+    hierarchy = build_interface_hierarchy_index(parsed)
+
+    # Without the hierarchy index, only the single directly-implemented
+    # interface (PetsApi, which declares no annotations of its own) is
+    # checked - the real gap this fix closes.
+    assert detect_in_java(controller_result, index) == ()
+
+    findings = detect_in_java(controller_result, index, hierarchy)
+
+    assert len(findings) == 1
+    assert findings[0].identifier == "getPets"
+
+
+def test_detect_in_java_finds_endpoint_inherited_through_interface_chain_tree_sitter_fallback(
+    tmp_path: Path,
+) -> None:
+    """The same two-hop resolution must hold on the Tree-sitter fallback path."""
+    (tmp_path / "BaseApi.java").write_text(_BASE_API_JAVA)
+    (tmp_path / "PetsApi.java").write_text(_PETS_API_EXTENDS_BASE_JAVA)
+    controller_file = tmp_path / "PetsController.java"
+    controller_file.write_text(
+        "public class PetsController implements PetsApi {\n"
+        "    @Override\n"
+        "    public String getPets() {\n"
+        "        return switch (1) {\n"
+        '            case 1 -> "pets";\n'
+        '            default -> "none";\n'
+        "        };\n"
+        "    }\n"
+        "}\n"
+    )
+    parsed = (
+        parse_file(tmp_path / "BaseApi.java"),
+        parse_file(tmp_path / "PetsApi.java"),
+        parse_file(controller_file),
+    )
+    controller_result = parsed[2]
+    assert controller_result.tree_sitter is not None
+    index = build_interface_method_index(parsed)
+    hierarchy = build_interface_hierarchy_index(parsed)
+
+    findings = detect_in_java(controller_result, index, hierarchy)
+
+    assert len(findings) == 1
+    assert findings[0].identifier == "getPets"
+
+
+def test_build_interface_hierarchy_index_terminates_on_a_cycle(tmp_path: Path) -> None:
+    """Not valid Java (javac rejects a cyclic interface extends chain as a
+    compile error), but this indexes untrusted, AI-generated source, which
+    must never be assumed well-formed - must terminate, not hang."""
+    (tmp_path / "A.java").write_text("public interface A extends B {\n}\n")
+    (tmp_path / "B.java").write_text("public interface B extends A {\n}\n")
+    parsed = (parse_file(tmp_path / "A.java"), parse_file(tmp_path / "B.java"))
+
+    hierarchy = build_interface_hierarchy_index(parsed)
+
+    assert hierarchy == {"A": ("B",), "B": ("A",)}
+    # The resolved closure must still terminate and contain each name once.
+    controller_file = tmp_path / "C.java"
+    controller_file.write_text("public class C implements A {\n    void m() {}\n}\n")
+    c_result = parse_file(controller_file)
+    index = build_interface_method_index((*parsed, c_result))
+
+    assert detect_in_java(c_result, index, hierarchy) == ()
 
 
 def test_build_interface_method_index_is_order_independent_on_colliding_simple_names(

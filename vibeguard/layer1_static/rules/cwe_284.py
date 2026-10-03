@@ -69,7 +69,9 @@ from vibeguard.layer1_static.rules._endpoint_annotations import (
 )
 from vibeguard.layer1_static.rules._finding import Finding
 from vibeguard.layer1_static.rules._interface_annotations import (
+    EMPTY_INTERFACE_HIERARCHY,
     EMPTY_INTERFACE_INDEX,
+    InterfaceHierarchy,
     InterfaceMethodAnnotations,
     interface_annotations_for_method,
     nearest_enclosing_type,
@@ -159,6 +161,7 @@ _HTTP_CLIENT_TYPE_ANNOTATIONS = frozenset(
 def detect_in_java(
     parsed_file: ParsedFile,
     interface_annotations: InterfaceMethodAnnotations = EMPTY_INTERFACE_INDEX,
+    interface_hierarchy: InterfaceHierarchy = EMPTY_INTERFACE_HIERARCHY,
 ) -> tuple[Finding, ...]:
     """Find endpoint methods with no authorization annotation anywhere in scope.
 
@@ -180,13 +183,20 @@ def detect_in_java(
             Defaults to an empty index, so a single-file call sees
             exactly the method/enclosing-class-only behavior described
             above with no cross-file information.
+        interface_hierarchy: A project-wide index (see
+            ``_interface_annotations.build_interface_hierarchy_index``)
+            used to walk past a directly-implemented interface to
+            whatever *that* interface itself extends, so an annotation
+            declared two or more interface hops away is still found.
+            Defaults to empty, so a single-file call sees only the
+            single directly-implemented interface.
     """
     if parsed_file.tree_sitter is not None:
-        return _detect_in_tree_sitter_java(parsed_file, interface_annotations)
+        return _detect_in_tree_sitter_java(parsed_file, interface_annotations, interface_hierarchy)
     if parsed_file.tree is None:
         return ()
 
-    interfaces_by_type_name = top_level_interfaces_by_type_name(parsed_file)
+    interfaces_by_type_name = top_level_interfaces_by_type_name(parsed_file, interface_hierarchy)
     findings = [
         finding
         for path, node in parsed_file.tree.filter(javalang.tree.MethodDeclaration)
@@ -201,13 +211,15 @@ def detect_in_java(
 
 
 def _detect_in_tree_sitter_java(
-    parsed_file: ParsedFile, interface_annotations: InterfaceMethodAnnotations
+    parsed_file: ParsedFile,
+    interface_annotations: InterfaceMethodAnnotations,
+    interface_hierarchy: InterfaceHierarchy = EMPTY_INTERFACE_HIERARCHY,
 ) -> tuple[Finding, ...]:
     """Find unprotected endpoints in a Tree-sitter fallback parse."""
     parsed = parsed_file.tree_sitter
     if parsed is None:
         return ()
-    interfaces_by_type_name = top_level_interfaces_by_type_name(parsed_file)
+    interfaces_by_type_name = top_level_interfaces_by_type_name(parsed_file, interface_hierarchy)
     findings = [
         finding
         for ancestors, node in ts_walk_with_ancestors(parsed.tree.root_node)

@@ -45,6 +45,18 @@ annotations.
 
 Deliberately scoped to top-level types only for both indexes, same
 reasoning as above.
+
+Also indexes each type's own direct interface-``extends`` chain
+(``build_interface_hierarchy_index``), so a class implementing an
+interface that itself extends a further interface (e.g. a generated
+``PetsApi extends BaseApi``, with the real annotation declared on
+``BaseApi``) is resolved through both hops, not just the single
+directly-implemented interface - found by direct reproduction to be a
+real, silent false negative otherwise, the worst-case failure direction
+this project treats CWE-284 as having. Bounded and cycle-safe (see
+``_resolve_transitive_interfaces``), the same shape as CWE-1035's
+parent-POM chain walk, for the same reason: this indexes untrusted,
+AI-generated source.
 """
 
 from __future__ import annotations
@@ -58,6 +70,9 @@ from vibeguard.layer1_static.ast_parser import ParsedFile
 
 InterfaceMethodAnnotations = Mapping[tuple[str, str], tuple[str, ...]]
 InterfaceParameterAnnotations = Mapping[tuple[str, str, int], tuple[str, ...]]
+InterfaceHierarchy = Mapping[str, tuple[str, ...]]
+
+_MAX_INTERFACE_HIERARCHY_DEPTH = 10
 
 # Extracted from cwe_284.py once cwe_20.py needed the identical "find this
 # method's nearest enclosing class/interface in a javalang .filter() path"
@@ -87,6 +102,7 @@ def nearest_enclosing_type(path: tuple[object, ...]) -> JavalangTypeDeclaration 
 
 EMPTY_INTERFACE_INDEX: InterfaceMethodAnnotations = {}
 EMPTY_INTERFACE_PARAMETER_INDEX: InterfaceParameterAnnotations = {}
+EMPTY_INTERFACE_HIERARCHY: InterfaceHierarchy = {}
 
 
 def _collect_ambiguous_type_names(
@@ -219,17 +235,102 @@ def build_interface_parameter_index(
     }
 
 
-def top_level_interfaces_by_type_name(parsed_file: ParsedFile) -> Mapping[str, tuple[str, ...]]:
-    """Map this file's own top-level type names to their declared interfaces.
+def build_interface_hierarchy_index(parsed_files: Iterable[ParsedFile]) -> InterfaceHierarchy:
+    """Index every top-level type's own *direct* ``implements``/``extends`` list.
+
+    Used by ``top_level_interfaces_by_type_name`` to walk past a
+    directly-implemented interface to whatever *that* interface itself
+    extends - found necessary by direct reproduction: a concrete class
+    implementing ``PetsApi``, where ``PetsApi extends BaseApi`` and the
+    real ``@GetMapping`` lives on ``BaseApi``, was previously invisible
+    entirely, since only the single directly-implemented interface was
+    ever checked. This is a project-wide index (unlike
+    ``top_level_interfaces_by_type_name``, which is per-file) because the
+    interface being extended is very often declared in a different file
+    than the one implementing it.
+
+    Args:
+        parsed_files: Every successfully-parsed Java file from one scan.
+
+    Returns:
+        A mapping from each unambiguous top-level type name to its own
+        direct ``interfaces`` list, as ``ParsedClass`` already resolves
+        it. Subject to the same ambiguous-simple-type-name exclusion as
+        ``build_interface_method_index`` - an ambiguous name cannot be
+        walked past safely, since which type's own further ``extends``
+        list it would be referring to is not knowable, so the walk
+        correctly stops there rather than guessing.
+    """
+    ambiguous_type_names, materialized = _collect_ambiguous_type_names(parsed_files)
+    return {
+        parsed_class.name: parsed_class.interfaces
+        for parsed_file in materialized
+        for parsed_class in parsed_file.classes
+        if parsed_class.name not in ambiguous_type_names
+    }
+
+
+def _resolve_transitive_interfaces(
+    direct_interfaces: tuple[str, ...], hierarchy: InterfaceHierarchy
+) -> tuple[str, ...]:
+    """Expand a type's direct interfaces to the full ancestor closure.
+
+    A breadth-first walk from ``direct_interfaces``, following each
+    interface's own further ``extends`` list (via ``hierarchy``) up to
+    ``_MAX_INTERFACE_HIERARCHY_DEPTH`` hops - the same bounded,
+    cycle-safe shape as CWE-1035's parent-POM chain walk, for the same
+    reason: this indexes untrusted, AI-generated source, and a malformed
+    or adversarial mutual-``extends`` cycle (not valid Java, but not
+    assumed impossible either) must terminate rather than hang or recurse
+    without bound.
+    """
+    closure: list[str] = []
+    seen: set[str] = set()
+    frontier = list(direct_interfaces)
+    for _ in range(_MAX_INTERFACE_HIERARCHY_DEPTH):
+        if not frontier:
+            break
+        next_frontier: list[str] = []
+        for interface_name in frontier:
+            if interface_name in seen:
+                continue
+            seen.add(interface_name)
+            closure.append(interface_name)
+            next_frontier.extend(hierarchy.get(interface_name, ()))
+        frontier = next_frontier
+    return tuple(closure)
+
+
+def top_level_interfaces_by_type_name(
+    parsed_file: ParsedFile,
+    hierarchy: InterfaceHierarchy = EMPTY_INTERFACE_HIERARCHY,
+) -> Mapping[str, tuple[str, ...]]:
+    """Map this file's own top-level type names to their effective interfaces.
 
     Used to look up what a method's *top-level* enclosing type
     implements, using exactly the same resolution Layer 1's flattened
-    summary already performs (``ParsedClass.interfaces``). A nested
-    class's name is absent from this file's ``ParsedFile.classes`` by
-    design, so looking up a nested enclosing type's name here correctly
-    finds nothing rather than something wrong.
+    summary already performs (``ParsedClass.interfaces``), then expanded
+    transitively through ``hierarchy`` (see
+    ``_resolve_transitive_interfaces``) so a multi-level interface
+    ``extends`` chain is visible, not just the single directly-implemented
+    interface. A nested class's name is absent from this file's
+    ``ParsedFile.classes`` by design, so looking up a nested enclosing
+    type's name here correctly finds nothing rather than something wrong.
+
+    Args:
+        parsed_file: One successfully-parsed Java file.
+        hierarchy: A project-wide index (see
+            ``build_interface_hierarchy_index``) of every type's own
+            direct interfaces, used to walk past the directly-implemented
+            interface to whatever it itself extends. Defaults to empty,
+            so a caller with no project-wide context sees only the
+            direct, single-hop interfaces - the exact pre-existing
+            behavior, preserved for backward compatibility.
     """
-    return {parsed_class.name: parsed_class.interfaces for parsed_class in parsed_file.classes}
+    return {
+        parsed_class.name: _resolve_transitive_interfaces(parsed_class.interfaces, hierarchy)
+        for parsed_class in parsed_file.classes
+    }
 
 
 def interface_annotations_for_method(

@@ -7510,3 +7510,102 @@ number (100%, up from 69%) for the module doing the actual SHAP output
 interpretation. No behavioral change to the tool; test-only addition.
 
 Status: DRAFT, pending student review.
+
+## [2026-10-03] - CWE-284/CWE-20 interface-widening now walks a multi-level interface-extends chain
+**Status: DRAFT, pending student review.**
+
+**What the plan said:** The 2026-09-14 interface-widening fixes for
+CWE-284 and CWE-20 both resolved a method/parameter's annotations through
+the single directly-implemented interface only. Neither entry flagged a
+transitive case as a known limitation - it was not identified at the time.
+
+**What we actually found:** While reviewing the 2026-09-14 CWE-284 entry
+with the student (not during a dedicated QA pass), asked directly whether
+there was anything left to fix in it. Reproduced, by direct script
+execution before writing any fix: a class implementing an interface that
+itself extends a further interface - e.g. `PetsController implements
+PetsApi`, where `PetsApi extends BaseApi` and the real `@GetMapping`
+annotation is declared only on `BaseApi` - produced **zero findings**.
+`top_level_interfaces_by_type_name()` only ever returned a type's single
+directly-declared `implements`/`extends` list; nothing walked further up
+an interface's own `extends` chain. This is a silent false negative, the
+failure direction this project has repeatedly stated is worst for
+CWE-284, and CWE-20 shares the identical gap for `@RequestBody`/`@Valid`
+inherited through the same kind of chain, since both rules call the same
+underlying lookup.
+
+**What we actually did:**
+1. **New `build_interface_hierarchy_index()`** in
+   `_interface_annotations.py` - a project-wide index of every
+   unambiguous top-level type's own *direct* `implements`/`extends` list
+   (reusing the same ambiguous-simple-name exclusion as the existing
+   method/parameter indexes, for the same reason: an ambiguous name
+   cannot be walked past safely).
+2. **New `_resolve_transitive_interfaces()`** - a bounded (10 hops),
+   cycle-safe breadth-first walk from a type's direct interfaces through
+   `build_interface_hierarchy_index`'s edges, the same shape as
+   CWE-1035's parent-POM chain walk and for the same reason: this indexes
+   untrusted, AI-generated source, and a malformed mutual-`extends` cycle
+   (not valid Java, but not assumed impossible) must terminate rather
+   than hang.
+3. **`top_level_interfaces_by_type_name()` now takes an optional
+   `hierarchy` parameter** (default empty, preserving the exact
+   pre-existing single-hop behavior for any caller that doesn't pass
+   one) and returns each type's transitively-resolved interface closure
+   instead of just its direct list.
+4. **Wired into both rules and all three call sites**: `cwe_284.py`'s and
+   `cwe_20.py`'s `detect_in_java()` both gained an `interface_hierarchy`
+   parameter (default empty), threaded through to
+   `top_level_interfaces_by_type_name()`. `main.py`'s `_run_rules()` and
+   `evaluation/human_baseline.py`'s `_run_all_rules()` both now build
+   `build_interface_hierarchy_index(ok_java_files)` once per scan and
+   pass it to both rules. `evaluation/thesis_orchestrator.py` needed no
+   separate change - it calls `main.py`'s `_run_rules()` directly, so it
+   picked up the fix automatically; confirmed by grep that this is its
+   only path to either rule.
+
+**Tests/adversarial checks run:**
+- Reproduced the exact motivating gap live via direct script execution
+  (not just pytest) both before the fix (zero findings) and after (one
+  correct finding) for the `PetsController`/`PetsApi extends BaseApi`
+  shape.
+- 4 new tests: the two-level chain for CWE-284 (both parser paths) and
+  for CWE-20 (unit level), and a cycle-termination test (`A extends B`,
+  `B extends A`) confirming the walk returns rather than hanging, with
+  the resolved closure then run through a real `detect_in_java()` call
+  to prove it's usable, not just inert.
+- Full `pytest -q`: 399 passed (was 395); all four static gates clean.
+- Live re-verification against the real `.qa-repos` corpus: unchanged at
+  253 findings - honestly expected, not a red flag: the one real
+  interface in that corpus motivating this whole feature family
+  (`spring-petclinic-rest`'s `OwnersApi`) lives under
+  `target/generated-sources/`, already excluded as build output, so
+  neither the single-hop nor the transitive version of this mechanism
+  fires against it today (already stated in the 2026-09-14 entry).
+
+**Remaining limitations:** Same top-level-types-only and
+no-overload-resolution limitations already stated in the 2026-09-14
+entries, unchanged. The 10-hop depth cap is generous relative to any
+real interface hierarchy observed so far (every real example found in
+this project's evaluation work is 1-2 hops).
+
+**Why:** A false negative in CWE-284 is explicitly treated as the worst
+failure mode this project tracks; once the two-hop gap was demonstrated
+live rather than merely theorized, fixing it immediately was judged the
+right call rather than logging it as deferred future work, consistent
+with Section 8's "fix a real bug found in the current module" step.
+
+**Effect on thesis chapters:** Chapter 5's CWE-284/CWE-20 interface-
+widening discussion should state the mechanism now resolves a multi-level
+interface hierarchy, not just a single directly-implemented interface -
+still subject to the same real-world ceiling (requires the interface
+source to be committed, not generated at build time) already documented
+for the single-hop version.
+
+**Freeze / handoff:** This reopens frozen Layer 1 on the same "a real,
+reproduced false negative" grounds as this project's other real-bug-
+driven reopenings. Found during a student-led log review, not an
+independent QA pass - recommend a fresh session QA this specifically
+(the cycle/depth guard and the three-call-site wiring are the two places
+most likely to hide a subtle bug, the same pattern as every other
+bounded-walk feature in this codebase) before treating it as settled.

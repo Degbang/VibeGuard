@@ -8,6 +8,7 @@ from vibeguard.layer1_static.ast_parser import ParsedFile, parse_file
 from vibeguard.layer1_static.rules._interface_annotations import (
     InterfaceMethodAnnotations,
     InterfaceParameterAnnotations,
+    build_interface_hierarchy_index,
     build_interface_method_index,
     build_interface_parameter_index,
 )
@@ -230,6 +231,58 @@ def test_detect_in_java_finds_unvalidated_body_inherited_from_interface(
     assert len(findings) == 1
     assert findings[0].identifier == "owner"
     assert "interface" not in findings[0].message  # no caveat: interface has no @Valid either
+
+
+# -- Multi-level interface-extends chains ------------------------------------
+#
+# Mirrors cwe_284.py's equivalent fix exactly: the interface-widening
+# resolution above only ever checked the single directly-implemented
+# interface. If that interface itself extends a further interface, with the
+# real @RequestBody/@Valid declared on the grand-interface, it was invisible
+# entirely - the same false-negative shape, one level down (parameters
+# instead of methods).
+
+_BASE_OWNERS_API_JAVA = (
+    "import org.springframework.web.bind.annotation.PutMapping;\n"
+    "import org.springframework.web.bind.annotation.RequestBody;\n"
+    "public interface BaseOwnersApi {\n"
+    '    @PutMapping("/owners/{id}")\n'
+    "    void updateOwner(int id, @RequestBody Owner owner);\n"
+    "}\n"
+)
+
+_OWNERS_API_EXTENDS_BASE_JAVA = "public interface OwnersApi extends BaseOwnersApi {\n}\n"
+
+
+def test_detect_in_java_finds_unvalidated_body_inherited_through_a_two_level_interface_chain(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "BaseOwnersApi.java").write_text(_BASE_OWNERS_API_JAVA)
+    (tmp_path / "OwnersApi.java").write_text(_OWNERS_API_EXTENDS_BASE_JAVA)
+    controller_file = tmp_path / "OwnerController.java"
+    controller_file.write_text(
+        "public class OwnerController implements OwnersApi {\n"
+        "    @Override\n"
+        "    public void updateOwner(int id, Owner owner) {}\n"
+        "}\n"
+    )
+    parsed = (
+        parse_file(tmp_path / "BaseOwnersApi.java"),
+        parse_file(tmp_path / "OwnersApi.java"),
+        parse_file(controller_file),
+    )
+    controller_result = parsed[2]
+    method_index, param_index = _build_indexes(*parsed)
+    hierarchy = build_interface_hierarchy_index(parsed)
+
+    # Without the hierarchy index, only the directly-implemented interface
+    # (OwnersApi, which declares nothing of its own) is checked.
+    assert detect_in_java(controller_result, method_index, param_index) == ()
+
+    findings = detect_in_java(controller_result, method_index, param_index, hierarchy)
+
+    assert len(findings) == 1
+    assert findings[0].identifier == "owner"
 
 
 def test_detect_in_java_adds_caveat_when_interface_parameter_has_validation(
