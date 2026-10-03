@@ -13,6 +13,7 @@ from vibeguard.layer1_static.rules._interface_annotations import (
 )
 from vibeguard.layer1_static.rules.cwe_284 import (
     CWE_ID,
+    _sibling_methods_by_name,
     apply_centralized_authorization_context,
     apply_hand_rolled_guard_context,
     detect_in_java,
@@ -1408,6 +1409,111 @@ def test_has_inline_header_guard_overload_resolution_tree_sitter_fallback(
         "    private boolean allowed(String suppliedKey) { return true; }\n"
         "    private boolean allowed(String a, String b) {\n"
         "        return vaultKey.equals(a);\n"
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+    assert result.tree_sitter is not None
+    findings = detect_in_java(result)
+    assert {f.identifier for f in findings} == {"store"}
+
+    annotated = apply_hand_rolled_guard_context(findings, (result,))
+
+    assert "hand-rolled authorization check" not in annotated[0].message
+
+
+# -- Same-arity, different-type overload collision ---------------------------
+#
+# Found by a second independent QA pass on the arity-based overload fix
+# above: resolving by (name, parameter_count) alone still clobbers when two
+# overloads share both name AND arity, differing only by parameter type -
+# the identical failure mechanism the arity fix was meant to eliminate,
+# just triggered by a narrower condition. Unlike the interface-annotation
+# collision (which fails only in the safe, over-broad-false-positive
+# direction), this one fails in the *unsafe* direction: it can attach a
+# false "may be guarded" caveat to an endpoint whose actually-invoked
+# overload performs no check at all.
+
+_SAME_ARITY_OVERLOAD_JAVA = (
+    "import org.springframework.web.bind.annotation.*;\n"
+    "@RestController\n"
+    "public class VaultController {\n"
+    '    @Value("${VAULT_KEY:}") private String vaultKey;\n'
+    "    @PostMapping\n"
+    '    public String store(@RequestHeader("X-Key") String key) {\n'
+    "        if (!allowed(key)) {\n"
+    '            return "denied";\n'
+    "        }\n"
+    '        return "ok";\n'
+    "    }\n"
+    "    private boolean allowed(String suppliedKey) { return true; }\n"
+    "    private boolean allowed(int suppliedKey) {\n"
+    "        return vaultKey.equals(suppliedKey);\n"
+    "    }\n"
+    "}\n"
+)
+
+
+def test_sibling_methods_by_name_excludes_a_same_arity_overload_collision() -> None:
+    """Two overloads sharing both name and arity (``allowed(String)`` and
+    ``allowed(int)``) must be excluded from the index entirely, not
+    resolved to whichever was declared last."""
+    tree = javalang.parse.parse(_SAME_ARITY_OVERLOAD_JAVA)
+    class_path = next(path + (node,) for path, node in tree.filter(javalang.tree.ClassDeclaration))
+
+    siblings = _sibling_methods_by_name(class_path)
+
+    assert ("allowed", 1) not in siblings
+    assert ("store", 1) in siblings  # unambiguous names are still indexed
+
+
+def test_detect_in_java_does_not_raise_a_caveat_for_a_same_arity_overload_collision(
+    tmp_path: Path,
+) -> None:
+    """End-to-end through the real per-file wiring: the finding is still
+    raised (CWE-284 never suppresses), but it must carry no false
+    hand-rolled-guard caveat, since the real sibling index now excludes
+    this collision entirely."""
+    java_file = tmp_path / "VaultController.java"
+    java_file.write_text(_SAME_ARITY_OVERLOAD_JAVA)
+
+    result = parse_file(java_file)
+    findings = detect_in_java(result)
+    assert {f.identifier for f in findings} == {"store"}
+
+    annotated = apply_hand_rolled_guard_context(findings, (result,))
+
+    assert "hand-rolled authorization check" not in annotated[0].message
+
+
+def test_tree_sitter_sibling_methods_by_name_excludes_a_same_arity_overload_collision(
+    tmp_path: Path,
+) -> None:
+    """The same arity-collision exclusion must hold on the Tree-sitter
+    fallback path."""
+    java_file = tmp_path / "VaultController.java"
+    java_file.write_text(
+        "import org.springframework.web.bind.annotation.*;\n"
+        "@RestController\n"
+        "public class VaultController {\n"
+        '    @Value("${VAULT_KEY:}") private String vaultKey;\n'
+        "    int helper(int level) {\n"
+        "        return switch (level) {\n"
+        "            case 1 -> 1;\n"
+        "            default -> 0;\n"
+        "        };\n"
+        "    }\n"
+        "    @PostMapping\n"
+        '    public String store(@RequestHeader("X-Key") String key) {\n'
+        "        if (!allowed(key)) {\n"
+        '            return "denied";\n'
+        "        }\n"
+        '        return "ok";\n'
+        "    }\n"
+        "    private boolean allowed(String suppliedKey) { return true; }\n"
+        "    private boolean allowed(int suppliedKey) {\n"
+        "        return vaultKey.equals(suppliedKey);\n"
         "    }\n"
         "}\n"
     )

@@ -7509,6 +7509,68 @@ Section 11's "build and QA sessions should be separate" rule exists, not
 as a procedural formality. Still pending a fresh independent QA pass
 confirming this specific fix before the feature is treated as settled.
 
+**2026-10-03 second independent QA pass (fresh session, specifically
+re-attacking the two fixes above): found one real, reproduced residual
+bug.** Everything the fix claimed to resolve, it does resolve - confirmed
+by direct AST inspection across 15 constructed call-qualifier shapes
+(bare, this-qualified, other-object, static-style, field-qualified,
+chained, this-then-chained, plus a call as another call's argument, inside
+a ternary, inside a lambda body, inside an array initializer, as a varargs
+argument, and with a generic witness) and end-to-end through
+`detect_in_java`/`apply_hand_rolled_guard_context` on both parser paths.
+But the overload-resolution fix was incomplete: **`_sibling_methods_by_name`
+keyed by `(name, parameter_count)` still silently clobbers when two
+overloads share both name AND arity, differing only by parameter type** -
+the identical failure mechanism the arity fix was meant to eliminate,
+triggered by a narrower condition. Reproduced directly on both parser
+paths: a one-argument `allowed(String)` (the overload actually invoked,
+performing no check) declared before a one-argument `allowed(int)` (never
+invoked, but performs the real comparison) - the dict kept whichever was
+declared last, so `has_inline_header_guard` returned `True` even though
+the real call site's overload never checks anything; reversing declaration
+order flipped the result, confirming it is purely source-order-dependent.
+Unlike this project's existing precedent for the interface-annotation
+simple-name collision (explicitly stated to fail only in the safe,
+over-broad-false-positive direction), **this one fails in the unsafe
+direction** - a false "may be guarded" caveat on an endpoint that is
+actually unprotected. The commit's own new tests only exercised
+different-arity overloads, so this narrower collision wasn't caught by
+its own test suite.
+
+**Fix applied the same day:** `_sibling_methods_by_name` (javalang) and
+`_tree_sitter_sibling_methods_by_name` (Tree-sitter mirror) now detect a
+genuine `(name, parameter_count)` collision - two *distinct* method
+declarations mapping to the same key - and exclude that key from the
+result entirely, the same "admit the limit, don't guess" principle
+already used for the interface-annotation index's simple-name collisions,
+per the QA pass's own suggested direction. Verified live against the
+exact reproduction QA used: the lookup for `("allowed", 1)` now correctly
+finds nothing, and `has_inline_header_guard` correctly returns `False`.
+Added 3 new regression tests: a unit-level test confirming the colliding
+key is excluded from `_sibling_methods_by_name`'s output while an
+unambiguous name in the same class remains indexed, and end-to-end tests
+through the real per-file wiring on both parser paths confirming the
+finding is still raised (never suppressed) with no false caveat attached.
+Full suite: 404 passed (was 399); all four gates clean. Re-verified
+against the real `.qa-repos` corpus: still 253 scored findings, still
+zero hand-rolled-guard caveats - unchanged, as expected (this corpus
+doesn't currently exercise either overload-collision shape).
+
+**Effect on thesis chapters:** a fourth build-then-QA-then-fix cycle this
+session on this same feature family - worth stating plainly in Chapter 5
+that the helper-indirection mechanism required two separate independent
+QA passes to reach a settled state, not one, and that the second pass's
+finding was in the unsafe failure direction, unlike the project's other
+documented coarse-match limitations. This is a stronger, more specific
+piece of evidence for Section 11's build/QA separation discipline than a
+single clean pass would have been.
+
+**Freeze / handoff:** Not yet re-QA'd after this second fix. Recommend a
+third independent pass, specifically re-attacking overload resolution one
+more time (e.g. a three-way collision, or a collision combined with the
+one-hop helper-delegation check itself) before this feature is treated as
+fully settled.
+
 ## [2026-10-03] - Layer 5 explainer.py test coverage closed from 69% to 100%
 **What the plan said:** no explicit prior plan targeted this file; it surfaced
 as an item in a full-project gap analysis as the lowest-covered module in the

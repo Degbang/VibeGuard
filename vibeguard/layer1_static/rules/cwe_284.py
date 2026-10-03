@@ -560,15 +560,32 @@ def _sibling_methods_by_name(
     isn't actually the one invoked at the call site - found by independent
     QA, confirmed to manufacture a false "may be guarded" caveat for an
     endpoint whose actually-invoked overload performs no check at all.
+
+    A ``(name, parameter_count)`` collision - two distinct overloads
+    sharing both name and arity, differing only by parameter type - is
+    excluded from the result entirely rather than resolved to whichever
+    was declared last, the same "admit the limit, don't guess" principle
+    already used for the interface-annotation index's simple-name
+    collisions. Found by a second independent QA pass: arity-only keying
+    alone still let this narrower collision silently clobber, reproducing
+    the identical failure mechanism (a false "may be guarded" caveat for
+    an endpoint whose actually-invoked overload performs no check) this
+    keying change was meant to eliminate.
     """
     enclosing_type = nearest_enclosing_type(path)
     if enclosing_type is None:
         return {}
-    return {
-        (member.name, len(member.parameters)): member
-        for member in enclosing_type.body
-        if isinstance(member, javalang.tree.MethodDeclaration)
-    }
+    methods: dict[tuple[str, int], javalang.tree.MethodDeclaration] = {}
+    ambiguous: set[tuple[str, int]] = set()
+    for member in enclosing_type.body:
+        if not isinstance(member, javalang.tree.MethodDeclaration):
+            continue
+        key = (member.name, len(member.parameters))
+        if key in methods:
+            ambiguous.add(key)
+            continue
+        methods[key] = member
+    return {key: method for key, method in methods.items() if key not in ambiguous}
 
 
 def _is_bare_or_this_invocation(
@@ -789,7 +806,10 @@ def _tree_sitter_sibling_methods_by_name(
     Keyed by ``(name, parameter_count)`` for the same reason as the
     javalang version: a plain name-keyed dict silently clobbers same-named
     overloads, which can resolve a call to an overload that isn't actually
-    the one invoked at the call site.
+    the one invoked at the call site. A ``(name, parameter_count)``
+    collision (same name and arity, different parameter types) is excluded
+    entirely rather than resolved to whichever was declared last - see the
+    javalang version's docstring for why.
     """
     enclosing_type = ts_nearest_enclosing_type(ancestors)
     if enclosing_type is None:
@@ -797,11 +817,17 @@ def _tree_sitter_sibling_methods_by_name(
     body = ts_child_by_field(enclosing_type, "body")
     if body is None:
         return {}
-    return {
-        (ts_declaration_name(source, member), _tree_sitter_parameter_count(member)): member
-        for member in body.named_children
-        if member.type == "method_declaration"
-    }
+    methods: dict[tuple[str, int], Node] = {}
+    ambiguous: set[tuple[str, int]] = set()
+    for member in body.named_children:
+        if member.type != "method_declaration":
+            continue
+        key = (ts_declaration_name(source, member), _tree_sitter_parameter_count(member))
+        if key in methods:
+            ambiguous.add(key)
+            continue
+        methods[key] = member
+    return {key: method for key, method in methods.items() if key not in ambiguous}
 
 
 def _tree_sitter_bails_out_via_helper_call(
