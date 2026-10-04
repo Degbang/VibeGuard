@@ -115,6 +115,15 @@ class ParsedClass:
     Nested/inner types, enums, and annotation declarations are not
     flattened into ``ParsedClass`` in this version of the parser; see
     IMPLEMENTATION_LOG.md for the scope decision.
+
+    ``is_interface`` distinguishes an ``interface`` declaration from a
+    ``class``/``record`` one - needed because an interface is never
+    itself an instantiable, deployable type the way a class is; a rule
+    that needs to know "is this type actually concrete" (see
+    ``_interface_annotations.build_implementors_index``) cannot infer
+    that from ``interfaces``/``superclass`` alone, since both a class's
+    ``implements`` list and an interface's own ``extends`` list are
+    already flattened into the same ``interfaces`` field.
     """
 
     name: str
@@ -125,6 +134,7 @@ class ParsedClass:
     interfaces: tuple[str, ...]
     fields: tuple[ParsedField, ...]
     methods: tuple[ParsedMethod, ...]
+    is_interface: bool = False
 
 
 @dataclass(frozen=True)
@@ -335,6 +345,7 @@ def _build_tree_sitter_class(parsed: TreeSitterJavaFile, node: Node) -> ParsedCl
         interfaces=_tree_sitter_interfaces(parsed, node),
         fields=fields,
         methods=methods,
+        is_interface=node.type == "interface_declaration",
     )
 
 
@@ -467,6 +478,7 @@ def _build_class(node: _ClassOrInterfaceDeclaration) -> ParsedClass:
         interfaces=_interface_names(node),
         fields=fields,
         methods=methods,
+        is_interface=isinstance(node, InterfaceDeclaration),
     )
 
 

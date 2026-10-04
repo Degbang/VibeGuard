@@ -302,13 +302,28 @@ def build_implementors_index(parsed_files: Iterable[ParsedFile]) -> Mapping[str,
         type name whose resolved ``implements``/``extends`` closure
         includes it, subject to the same ambiguous-simple-type-name
         exclusion as the other indexes in this module.
+
+        Only a genuinely concrete type (``parsed_class.is_interface`` is
+        ``False``) is ever recorded as an implementor. An interface that
+        merely ``extends`` another interface is walked *through* when
+        resolving the hierarchy (so a concrete class further down the
+        chain is still correctly recorded against every ancestor
+        interface), but is never itself recorded as if it were a
+        deploying implementor - independent QA found a real bug in an
+        earlier version of this function that didn't distinguish the
+        two: two interfaces with no concrete implementor anywhere in the
+        scan (``interface B extends A``, nothing implementing either)
+        were incorrectly treated as implementing each other, silently
+        dropping a genuine, undeployed finding with no actual evidence
+        either interface is ever deployed - the opposite of this
+        feature's own stated fail-closed guarantee.
     """
     ambiguous_type_names, materialized = _collect_ambiguous_type_names(parsed_files)
     hierarchy = build_interface_hierarchy_index(materialized)
     implementors: dict[str, list[str]] = {}
     for parsed_file in materialized:
         for parsed_class in parsed_file.classes:
-            if parsed_class.name in ambiguous_type_names:
+            if parsed_class.name in ambiguous_type_names or parsed_class.is_interface:
                 continue
             for interface_name in _resolve_transitive_interfaces(
                 parsed_class.interfaces, hierarchy

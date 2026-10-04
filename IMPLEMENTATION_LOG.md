@@ -8123,3 +8123,82 @@ either is treated as settled, the same discipline already applied to
 every other fix this session. Finding 2 (the crash) needs no further
 build action, only the documentation correction above. Finding 1 needs
 no action - it is a confirmation, not a gap.
+
+**2026-10-04 independent QA pass on Findings 3 and 4: both found a real,
+reproduced bug, each exactly matching the risk flagged before the QA
+agents were even spawned.**
+
+**Finding 3's fix (commit `3e5b423`) had a real regression, now fixed
+(commit `8b573ab`).** `_is_self_referential_constant`'s original
+`name.lower() == value.lower()` check suppressed the canonical weak-
+default-credential anti-pattern too: `String password = "password";`,
+`secret = "secret"`, `token = "token"`, `apiKey = "apiKey"` - textbook
+CWE-798 material, not a permission-constant idiom - all silently
+disappeared under the same check meant only for
+`PASSWORD_MANAGEMENT_LIST`-shaped compounds. The commit's own new test
+(`test_detect_in_java_does_not_flag_a_case_insensitive_self_reference`)
+had baked this in as intended behavior rather than catching it. Fixed
+by additionally requiring the declaring name, once separators are
+stripped, not to be *exactly* one of `CREDENTIAL_KEYWORDS` itself -
+confirmed this correctly handles `apiKey` too (camelCase splits it into
+two word-parts, "api"/"Key", but together they spell out exactly the
+`apikey` keyword, not a genuinely different additional identifier the
+way "management"/"list" are for `PASSWORD_MANAGEMENT_LIST`). Re-verified
+against the real Syncope `common` module: still 11 findings (the 9
+compound self-references stay excluded, `password = "sa"` stays
+flagged), and the new weak-credential test construct now correctly
+produces 5 findings instead of 0. Two other pre-existing tests had
+independently picked "secretKey" as a "compound-looking" self-reference
+example without noticing `secretkey` is itself a literal
+`CREDENTIAL_KEYWORDS` entry - corrected to a genuinely compound
+identifier (`tokenType`). Full suite: 418 passed; all four gates clean.
+
+**Finding 4's fix (commit `ca1cdc5`) had a real bug, now fixed.**
+`build_implementors_index` treated *any* type whose resolved
+`implements`/`extends` closure included a given interface as that
+interface's "implementor" - including another interface that merely
+`extends` it. Reproduced: `interface B extends A` (both unprotected,
+neither implemented by any concrete class anywhere in the scan) - `B`
+independently qualifying for its own finding caused `A`'s finding to be
+incorrectly dropped, even though *nothing concrete deploys either*.
+This directly violated the feature's own stated guarantee ("an
+interface flagged with no implementing class anywhere in this scan
+keeps its finding") and is a silent false negative, the failure
+direction this project treats as worst for CWE-284. Root cause:
+`ParsedClass` had no field distinguishing an `interface` declaration
+from a `class`/`record` one at all - both a class's `implements` list
+and an interface's own `extends` list were already flattened into the
+same `interfaces` field, with nothing recording which kind of
+declaration originally held it.
+
+Fixed by adding `ParsedClass.is_interface: bool` (populated on both
+parser paths - javalang via `isinstance(node, InterfaceDeclaration)`,
+Tree-sitter via `node.type == "interface_declaration"` - confirmed both
+independently with a direct test, including one forcing the Tree-sitter
+fallback). `build_implementors_index` now only ever records a
+genuinely concrete type (`is_interface` is `False`) as an implementor;
+an interface is still walked *through* when resolving the transitive
+hierarchy (so a real concrete class further down a multi-level chain is
+still correctly recorded against every ancestor interface - the
+3-level `A`/`B extends A`/`class C implements B` case, confirmed to
+still correctly collapse to just `C`'s finding), but is never itself
+treated as a deploying implementor. Re-verified against the real
+Syncope `idrepo` measurement: still 314 raw findings, 159 after dedup -
+unchanged, confirming this module's own interfaces all have genuine
+concrete implementors in scope, so the bug's fix doesn't disturb the
+real-world number that motivated the feature. Added 4 new regression
+tests (`tests/test_ast_parser.py`: `is_interface` true for an
+interface, false for a class, true on the Tree-sitter path;
+`tests/test_cwe_284.py`: the exact 2-interface bug scenario now keeps
+both findings, and the 3-level concrete-implementor case still
+correctly collapses to one). Full suite: 422 passed; all four gates
+clean. Re-verified zero effect on the five pre-existing `.qa-repos`
+entries (still sum to 270).
+
+**Freeze/handoff:** Both fixes were built and fixed in the same session
+that received the QA reports - per Section 11, recommend a second,
+fresh independent QA pass on both before either is treated as settled,
+the same discipline this project has now applied twice to the same
+pair of fixes in a row (the helper-indirection feature needed three
+rounds before a pass came back clean; these two should get at least a
+second).

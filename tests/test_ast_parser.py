@@ -190,6 +190,42 @@ def test_interface_extends_are_captured(tmp_path: Path) -> None:
     iface = result.classes[0]
     assert iface.interfaces == ("Bar", "Baz")
     assert iface.superclass is None
+    assert iface.is_interface is True
+
+
+def test_class_is_not_marked_as_interface(tmp_path: Path) -> None:
+    """A class implementing an interface must be distinguishable from
+    the interface itself - needed by ``_interface_annotations.
+    build_implementors_index`` to tell a genuinely concrete, deployable
+    type apart from an interface that merely extends another."""
+    class_file = tmp_path / "Foo.java"
+    class_file.write_text("public class Foo implements Bar {\n    void doThing() {}\n}\n")
+
+    result = parse_file(class_file)
+
+    assert result.status == ParseStatus.OK
+    assert result.classes[0].is_interface is False
+
+
+def test_interface_is_marked_as_interface_tree_sitter_fallback(tmp_path: Path) -> None:
+    """The same ``is_interface`` distinction must hold on the Tree-sitter
+    fallback path, not just javalang."""
+    iface_file = tmp_path / "Foo.java"
+    iface_file.write_text(
+        "public interface Foo {\n"
+        "    default int helper(int level) {\n"
+        "        return switch (level) {\n"
+        "            case 1 -> 1;\n"
+        "            default -> 0;\n"
+        "        };\n"
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(iface_file)
+
+    assert result.tree_sitter is not None
+    assert result.classes[0].is_interface is True
 
 
 def test_parse_simple_java_record(tmp_path: Path) -> None:

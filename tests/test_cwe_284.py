@@ -955,6 +955,88 @@ def test_deduplicate_interface_implementation_findings_keeps_unimplemented_inter
     assert deduplicated == findings
 
 
+def test_deduplicate_interface_implementation_findings_keeps_both_when_unimplemented_chain(
+    tmp_path: Path,
+) -> None:
+    """Found by independent QA: a real bug where one interface extending
+    another, with NO concrete class implementing either anywhere in the
+    scan, incorrectly collapsed the base interface's finding against the
+    extending interface's own - even though neither is ever actually
+    deployed. Both findings must survive: an interface merely extending
+    another interface is never itself a license to drop a finding, only
+    a genuinely concrete implementing class is."""
+    (tmp_path / "BaseApi.java").write_text(
+        "import org.springframework.web.bind.annotation.GetMapping;\n"
+        "public interface BaseApi {\n"
+        '    @GetMapping("/foo")\n'
+        "    String foo(int id);\n"
+        "}\n"
+    )
+    (tmp_path / "ExtendedApi.java").write_text(
+        "public interface ExtendedApi extends BaseApi {\n" "    String foo(int id);\n" "}\n"
+    )
+    base_result = parse_file(tmp_path / "BaseApi.java")
+    extended_result = parse_file(tmp_path / "ExtendedApi.java")
+    index = build_interface_method_index((base_result, extended_result))
+    hierarchy = build_interface_hierarchy_index((base_result, extended_result))
+
+    findings = detect_in_java(base_result, index, hierarchy) + detect_in_java(
+        extended_result, index, hierarchy
+    )
+    assert {f.file_path.name for f in findings} == {"BaseApi.java", "ExtendedApi.java"}
+
+    deduplicated = deduplicate_interface_implementation_findings(
+        findings, (base_result, extended_result)
+    )
+
+    assert {f.file_path.name for f in deduplicated} == {"BaseApi.java", "ExtendedApi.java"}
+
+
+def test_deduplicate_interface_implementation_findings_still_collapses_through_an_interface_chain(
+    tmp_path: Path,
+) -> None:
+    """The fix for the bug above must not break the case it was always
+    meant to handle: once a genuinely concrete class implements the
+    extending interface, both ancestor interfaces' findings collapse
+    into the one concrete, deployable location."""
+    (tmp_path / "BaseApi.java").write_text(
+        "import org.springframework.web.bind.annotation.GetMapping;\n"
+        "public interface BaseApi {\n"
+        '    @GetMapping("/foo")\n'
+        "    String foo(int id);\n"
+        "}\n"
+    )
+    (tmp_path / "ExtendedApi.java").write_text(
+        "public interface ExtendedApi extends BaseApi {\n" "    String foo(int id);\n" "}\n"
+    )
+    controller_file = tmp_path / "FooController.java"
+    controller_file.write_text(
+        "public class FooController implements ExtendedApi {\n"
+        "    @Override\n"
+        '    public String foo(int id) { return "x"; }\n'
+        "}\n"
+    )
+    files = (
+        parse_file(tmp_path / "BaseApi.java"),
+        parse_file(tmp_path / "ExtendedApi.java"),
+        parse_file(controller_file),
+    )
+    index = build_interface_method_index(files)
+    hierarchy = build_interface_hierarchy_index(files)
+
+    findings = tuple(f for pf in files for f in detect_in_java(pf, index, hierarchy))
+    assert {f.file_path.name for f in findings} == {
+        "BaseApi.java",
+        "ExtendedApi.java",
+        "FooController.java",
+    }
+
+    deduplicated = deduplicate_interface_implementation_findings(findings, files)
+
+    assert len(deduplicated) == 1
+    assert deduplicated[0].file_path.name == "FooController.java"
+
+
 def test_deduplicate_interface_implementation_findings_leaves_other_cwes_untouched(
     tmp_path: Path,
 ) -> None:
