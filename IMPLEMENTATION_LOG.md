@@ -8202,3 +8202,121 @@ the same discipline this project has now applied twice to the same
 pair of fixes in a row (the helper-indirection feature needed three
 rounds before a pass came back clean; these two should get at least a
 second).
+
+**2026-10-04 second independent QA pass on both fixes: each found
+another real, reproduced bug - the same bug class as the first pass,
+one level further down.**
+
+**CWE-798 (commit `8b573ab`): fixed again in commit `8672478`.** The
+"not exactly one literal `CREDENTIAL_KEYWORDS` entry" check was still
+too narrow: a name concatenating multiple *different* credential-
+keyword fragments with no separator (`clientSecretKey`, `secretToken`,
+`tokenSecret`, `apiSecretKey`) normalizes to a string that isn't any
+single literal keyword-table entry, so it was still wrongly treated as
+a genuine compound/permission-label idiom - even as a plain, mutable
+*instance* field, the real weak-default-credential shape just arranged
+as two keyword fragments instead of one repeated keyword. A lexical
+fix (word-splitting, checking whether each word-part is itself
+"credential-related") was considered and rejected: there is no clean,
+robust answer - `PASSWORD_MANAGEMENT_LIST`'s extra words
+("MANAGEMENT"/"LIST") are unambiguously non-credential vocabulary, but
+a word like "key" or "client" is both completely ordinary English and
+can be part of a genuine secret's name, so no word-level rule reliably
+tells the two apart.
+
+Fixed instead via a structural signal already present in the AST,
+rather than a lexical one: the exclusion now also requires the
+declaring field to be `static final` - the literal shape of every one
+of the 9 real Syncope findings this exclusion was built from, and
+essentially never the shape of a genuine runtime-assigned secret.
+Required threading the enclosing `FieldDeclaration`'s modifiers through
+to `_check_declarator` (javalang, via the previously-discarded
+`.filter()` ancestor path) and `_check_tree_sitter_declarator`
+(switched that loop from `ts_walk` to `ts_walk_with_ancestors`).
+`_check_assignment`/`_check_tree_sitter_assignment` no longer attempt
+the self-reference exclusion *at all*: the enterprise permission-
+constant idiom is always a field declaration with an inline
+initializer, never a later reassignment, so a plain assignment
+restating its own target's name was never actually the idiom this
+exclusion was meant for - erring toward still flagging it is the safe
+direction. Verified directly: all of `clientSecretKey`/`secretToken`/
+`tokenSecret`/`apiSecretKey` as plain instance fields are now correctly
+flagged on both parser paths; the same names declared `static final`
+are still correctly excluded (the gate narrows *which declaration
+shapes* are eligible, not a renewed lexical judgement about which
+words "count"). Re-verified against the real Syncope `common` module:
+still 11 findings (unchanged - this fix closes a gap this specific
+sample didn't happen to exercise, not one that changes its own count).
+Three pre-existing tests corrected: two had unknowingly picked a bare
+keyword in disguise or a non-`static-final` field as their "compound"
+example, and the two assignment-based self-reference tests now assert
+the corrected, opposite outcome. Full suite: 429 passed; all four gates
+clean.
+
+**CWE-284 (commit `9ad1a01`): fixed again in commit `e667305`.** The
+identical bug class as the interface-extends-interface case, one level
+further down: `is_interface` distinguishes `interface` from `class`/
+`record`, but not a *concrete* class from an *abstract* one. An
+abstract class implementing an interface - also never instantiated on
+its own, structurally the same non-deployed shape - was still being
+recorded as a genuine implementor, reintroducing the exact silent-
+false-negative pattern via "abstract class implements interface,
+nothing concrete anywhere in the scan" instead of "interface extends
+interface, nothing concrete anywhere." Reproduced with both an abstract
+method left unimplemented and one given a concrete-but-unprotected
+body - both ways, the interface's finding was incorrectly dropped with
+zero evidence either type is ever deployed.
+
+Fixed by also excluding any type with `"abstract"` in its modifiers
+from `build_implementors_index`'s recorded implementors - the same
+"walked through when resolving the hierarchy, never itself recorded as
+a deploying implementor" treatment interfaces already get. Re-verified
+the 3-level case (`interface A` / `abstract class AbstractBase
+implements A` / `class RealController extends AbstractBase implements
+A`): `A`'s finding still correctly collapses against `RealController`'s.
+`AbstractBase`'s own finding does *not* also collapse in that case -
+confirmed directly, and left as-is rather than chased further: fully
+deduplicating it would require walking a *class's* `extends`/superclass
+chain (not just `implements`), which this same QA pass separately found
+is a pre-existing, previously-undocumented limitation of the whole
+interface-widening feature (`RealController extends AbstractBase`
+alone, without also explicitly restating `implements A`, never
+inherits `AbstractBase`'s own interface annotations at all - a
+different, broader gap than the one this entry fixes, not addressed
+here per Section 8's "fix only the issue found inside the current
+scope" discipline).
+
+Re-verified against the real Syncope `idrepo` measurement: raw findings
+unchanged at 314; the post-dedup count moved from 159 to 170 - the
+expected, correct direction, since this fix stops collapsing findings
+that were being dropped without concrete evidence, for a CWE this
+project treats false negatives as the worst failure mode for. The five
+pre-existing `.qa-repos` entries remain unaffected (still sum to 270).
+Added 2 new regression tests mirroring the interface-chain ones from
+the first fix (both findings survive with no concrete implementor
+anywhere; the real 3-level collapse still works). Full suite: 429
+passed; all four gates clean.
+
+**A separate, not-yet-logged scope boundary surfaced by this same QA
+pass, not fixed here:** the interface-widening mechanism
+(`top_level_interfaces_by_type_name`/`build_interface_hierarchy_index`)
+only ever reads a type's own `interfaces` field (its direct
+`implements`/interface-`extends` list) - it never walks a *class's*
+`superclass` (`extends`) chain. A concrete class extending an abstract
+base that itself implements an interface, without *also* explicitly
+re-declaring that `implements` itself, is invisible to the whole
+interface-widening feature family (CWE-284 and CWE-20 alike) - not
+just this dedup fix. This is a real, previously-uninvestigated
+limitation of the broader feature, not a regression introduced by
+anything in this session. Logged here per the QA pass's own
+recommendation; not yet scoped or fixed - a candidate for a future
+session if the student wants to close it.
+
+**Freeze/handoff:** Both regressions found by the second QA pass are
+now fixed, tested, and logged. This is the third time this session a
+fix has needed more than one QA round before stabilizing (after the
+CWE-284 helper-indirection feature's three rounds) - recommend a third,
+fresh independent QA pass on both before either is finally treated as
+settled, specifically re-attacking the two mechanisms just changed
+(the `static final` gate, and the abstract-class exclusion) rather than
+re-covering ground the first two passes already verified clean.
