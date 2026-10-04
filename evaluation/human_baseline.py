@@ -292,8 +292,11 @@ def _run_all_rules(result: ScanResult) -> tuple[Finding, ...]:
         if pom_file.status != ParseStatus.OK:
             continue
         findings.extend(cwe_1035.detect_in_pom(pom_file))
-    findings_with_centralized_context = cwe_284.apply_centralized_authorization_context(
+    deduplicated_findings = cwe_284.deduplicate_interface_implementation_findings(
         tuple(findings), ok_java_files
+    )
+    findings_with_centralized_context = cwe_284.apply_centralized_authorization_context(
+        deduplicated_findings, ok_java_files
     )
     return cwe_284.apply_hand_rolled_guard_context(findings_with_centralized_context, ok_java_files)
 

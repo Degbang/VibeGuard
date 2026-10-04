@@ -57,6 +57,13 @@ this project treats CWE-284 as having. Bounded and cycle-safe (see
 ``_resolve_transitive_interfaces``), the same shape as CWE-1035's
 parent-POM chain walk, for the same reason: this indexes untrusted,
 AI-generated source.
+
+Also builds the reverse of that relationship
+(``build_implementors_index``): which concrete types implement a given
+interface. Used to deduplicate a finding on an interface's own method
+when a concrete implementing class elsewhere in the scan independently
+flags the identical unprotected endpoint - the interface is never
+itself a deployed HTTP resource, only its implementor is.
 """
 
 from __future__ import annotations
@@ -268,6 +275,46 @@ def build_interface_hierarchy_index(parsed_files: Iterable[ParsedFile]) -> Inter
         for parsed_class in parsed_file.classes
         if parsed_class.name not in ambiguous_type_names
     }
+
+
+def build_implementors_index(parsed_files: Iterable[ParsedFile]) -> Mapping[str, tuple[str, ...]]:
+    """Reverse of each type's own interface list: map every interface or
+    supertype name to every concrete top-level type that (transitively)
+    implements/extends it.
+
+    An interface is never itself an instantiable, deployable HTTP
+    resource - only a concrete class implementing it is. Used to
+    recognise when a method flagged on an interface's own declaration is
+    the identical unprotected endpoint a concrete implementing class
+    elsewhere in the scan has *also* independently flagged, so the two
+    can be deduplicated to one finding at the actually deployable
+    location - see ``cwe_284.deduplicate_interface_implementation_findings``,
+    built after scanning Apache Syncope's real JAX-RS resource-interface/
+    CXF-implementation split, where every one of its unprotected
+    interface contracts was independently re-flagged by its own
+    implementation class too.
+
+    Args:
+        parsed_files: Every successfully-parsed Java file from one scan.
+
+    Returns:
+        A mapping from each interface/supertype name to every concrete
+        type name whose resolved ``implements``/``extends`` closure
+        includes it, subject to the same ambiguous-simple-type-name
+        exclusion as the other indexes in this module.
+    """
+    ambiguous_type_names, materialized = _collect_ambiguous_type_names(parsed_files)
+    hierarchy = build_interface_hierarchy_index(materialized)
+    implementors: dict[str, list[str]] = {}
+    for parsed_file in materialized:
+        for parsed_class in parsed_file.classes:
+            if parsed_class.name in ambiguous_type_names:
+                continue
+            for interface_name in _resolve_transitive_interfaces(
+                parsed_class.interfaces, hierarchy
+            ):
+                implementors.setdefault(interface_name, []).append(parsed_class.name)
+    return {name: tuple(types) for name, types in implementors.items()}
 
 
 def _resolve_transitive_interfaces(

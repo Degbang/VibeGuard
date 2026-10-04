@@ -7,6 +7,7 @@ from pathlib import Path
 import javalang
 
 from vibeguard.layer1_static.ast_parser import parse_file
+from vibeguard.layer1_static.rules._finding import Finding
 from vibeguard.layer1_static.rules._interface_annotations import (
     build_interface_hierarchy_index,
     build_interface_method_index,
@@ -16,6 +17,7 @@ from vibeguard.layer1_static.rules.cwe_284 import (
     _sibling_methods_by_name,
     apply_centralized_authorization_context,
     apply_hand_rolled_guard_context,
+    deduplicate_interface_implementation_findings,
     detect_in_java,
     has_centralized_authorization_rule,
     has_inline_header_guard,
@@ -889,6 +891,119 @@ def test_detect_in_java_does_not_borrow_annotations_from_an_unimplemented_interf
     # it shares the method name "getOwner".
     assert len(findings) == 1
     assert "proxy style" not in findings[0].message
+
+
+# -- Interface-vs-implementation deduplication -------------------------------
+#
+# Found scanning Apache Syncope's real JAX-RS resource-interface/CXF-
+# implementation split (.qa-repos, 2026-10-04): a method flagged on the bare
+# interface was independently re-flagged by its own concrete implementation
+# too, roughly doubling cwe_284_count. The interface is never itself a
+# deployed HTTP resource, so only the implementation's finding should survive
+# when both are present in the same scan.
+
+
+def test_deduplicate_interface_implementation_findings_keeps_only_the_implementation(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "OwnersApi.java").write_text(_OWNERS_API_INTERFACE_JAVA)
+    controller_file = tmp_path / "OwnerRestControllerV1.java"
+    controller_file.write_text(
+        "public class OwnerRestControllerV1 implements OwnersApi {\n"
+        "    @Override\n"
+        "    public String getOwner(int id) {\n"
+        '        return "owner";\n'
+        "    }\n"
+        "}\n"
+    )
+    iface_result = parse_file(tmp_path / "OwnersApi.java")
+    controller_result = parse_file(controller_file)
+    index = build_interface_method_index((iface_result, controller_result))
+
+    # Both files independently produce a finding for the same method -
+    # the bare interface has @GetMapping with no auth, and the
+    # implementation inherits it via the interface-widening mechanism.
+    findings = detect_in_java(iface_result, index) + detect_in_java(controller_result, index)
+    assert {(f.file_path.name, f.identifier) for f in findings} == {
+        ("OwnersApi.java", "getOwner"),
+        ("OwnerRestControllerV1.java", "getOwner"),
+    }
+
+    deduplicated = deduplicate_interface_implementation_findings(
+        findings, (iface_result, controller_result)
+    )
+
+    assert len(deduplicated) == 1
+    assert deduplicated[0].file_path.name == "OwnerRestControllerV1.java"
+
+
+def test_deduplicate_interface_implementation_findings_keeps_unimplemented_interface(
+    tmp_path: Path,
+) -> None:
+    """No implementing class exists anywhere in this scan - the interface's
+    own finding must be kept, not dropped, since there is no evidence
+    either way whether it's deployed elsewhere."""
+    (tmp_path / "OwnersApi.java").write_text(_OWNERS_API_INTERFACE_JAVA)
+    iface_result = parse_file(tmp_path / "OwnersApi.java")
+    index = build_interface_method_index((iface_result,))
+
+    findings = detect_in_java(iface_result, index)
+    assert len(findings) == 1
+
+    deduplicated = deduplicate_interface_implementation_findings(findings, (iface_result,))
+
+    assert deduplicated == findings
+
+
+def test_deduplicate_interface_implementation_findings_leaves_other_cwes_untouched(
+    tmp_path: Path,
+) -> None:
+    """Findings for other CWEs, and CWE-284 findings with no declaring
+    type lookup available, must pass through unchanged."""
+    other_finding = Finding(
+        cwe_id="CWE-798",
+        file_path=tmp_path / "Config.java",
+        line=1,
+        identifier="password",
+        message="unrelated",
+    )
+
+    deduplicated = deduplicate_interface_implementation_findings((other_finding,), ())
+
+    assert deduplicated == (other_finding,)
+
+
+def test_deduplicate_interface_implementation_findings_tree_sitter_fallback(
+    tmp_path: Path,
+) -> None:
+    """The dedup pass operates on ParsedFile.classes, which is already
+    identical on both parser paths - confirms it needs no separate
+    Tree-sitter-specific handling."""
+    (tmp_path / "OwnersApi.java").write_text(_OWNERS_API_INTERFACE_JAVA)
+    controller_file = tmp_path / "OwnerRestControllerV1.java"
+    controller_file.write_text(
+        "public class OwnerRestControllerV1 implements OwnersApi {\n"
+        "    @Override\n"
+        "    public String getOwner(int id) {\n"
+        "        return switch (id) {\n"
+        '            case 1 -> "first";\n'
+        '            default -> "owner";\n'
+        "        };\n"
+        "    }\n"
+        "}\n"
+    )
+    iface_result = parse_file(tmp_path / "OwnersApi.java")
+    controller_result = parse_file(controller_file)
+    assert controller_result.tree_sitter is not None
+    index = build_interface_method_index((iface_result, controller_result))
+
+    findings = detect_in_java(iface_result, index) + detect_in_java(controller_result, index)
+    deduplicated = deduplicate_interface_implementation_findings(
+        findings, (iface_result, controller_result)
+    )
+
+    assert len(deduplicated) == 1
+    assert deduplicated[0].file_path.name == "OwnerRestControllerV1.java"
 
 
 def test_detect_in_java_finds_endpoint_inherited_from_interface_tree_sitter_fallback(

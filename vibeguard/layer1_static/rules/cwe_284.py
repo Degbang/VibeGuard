@@ -73,6 +73,7 @@ from vibeguard.layer1_static.rules._interface_annotations import (
     EMPTY_INTERFACE_INDEX,
     InterfaceHierarchy,
     InterfaceMethodAnnotations,
+    build_implementors_index,
     interface_annotations_for_method,
     nearest_enclosing_type,
     resolve_effective_annotations,
@@ -952,3 +953,85 @@ def apply_hand_rolled_guard_context(
         else:
             result.append(finding)
     return tuple(result)
+
+
+def deduplicate_interface_implementation_findings(
+    findings: tuple[Finding, ...], parsed_files: Iterable[ParsedFile]
+) -> tuple[Finding, ...]:
+    """Remove a CWE-284 finding on an interface's own method when a
+    concrete class elsewhere in the same scan implements that interface
+    and independently produces the identical finding for the same
+    method.
+
+    Not a suppression of a real concern: the implementing class's own
+    finding still fires unchanged, so the underlying unprotected
+    endpoint is still reported - exactly once, at its actually
+    deployable location, rather than twice (once for the interface
+    contract, which is never itself an instantiable HTTP resource, once
+    for the concrete class that is). An interface flagged with no
+    implementing class anywhere in this scan keeps its finding - this
+    project has no evidence either way whether it's deployed elsewhere,
+    and erring toward keeping it is the fail-closed choice consistent
+    with CWE-284's stated false-negative-averse priority.
+
+    Found scanning Apache Syncope's real JAX-RS resource-interface/CXF-
+    implementation split (``.qa-repos``, 2026-10-04): every one of its
+    unprotected interface contracts was independently re-flagged by its
+    own CXF implementation class, roughly doubling ``cwe_284_count`` for
+    any project using this architectural pattern.
+
+    Args:
+        findings: All findings from a scan (not just CWE-284's) -
+            findings for other CWEs pass through unchanged.
+        parsed_files: Every successfully-parsed Java file from the same
+            scan.
+
+    Returns:
+        The same findings, minus any CWE-284 finding shadowed by a
+        concrete implementation's identical finding.
+    """
+    materialized_files = tuple(parsed_files)
+    files_by_path = {parsed_file.path: parsed_file for parsed_file in materialized_files}
+    implementors_by_interface = build_implementors_index(materialized_files)
+
+    declaring_type: dict[Finding, str] = {}
+    for finding in findings:
+        if finding.cwe_id != CWE_ID:
+            continue
+        type_name = _declaring_type_name(finding, files_by_path)
+        if type_name is not None:
+            declaring_type[finding] = type_name
+
+    findings_by_type_and_method = {
+        (declaring_type[finding], finding.identifier): finding for finding in declaring_type
+    }
+
+    result: list[Finding] = []
+    for finding in findings:
+        type_name = declaring_type.get(finding)
+        if type_name is None:
+            result.append(finding)
+            continue
+        implementors = implementors_by_interface.get(type_name, ())
+        shadowed = any(
+            (implementor, finding.identifier) in findings_by_type_and_method
+            for implementor in implementors
+        )
+        if shadowed:
+            continue
+        result.append(finding)
+    return tuple(result)
+
+
+def _declaring_type_name(finding: Finding, files_by_path: Mapping[Path, ParsedFile]) -> str | None:
+    """Which top-level type in ``finding``'s own file declares the method
+    it was raised against, by name - used to look up that type's own
+    implementors (see ``deduplicate_interface_implementation_findings``).
+    """
+    parsed_file = files_by_path.get(finding.file_path)
+    if parsed_file is None:
+        return None
+    for parsed_class in parsed_file.classes:
+        if any(method.name == finding.identifier for method in parsed_class.methods):
+            return parsed_class.name
+    return None
