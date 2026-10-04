@@ -8320,3 +8320,85 @@ fresh independent QA pass on both before either is finally treated as
 settled, specifically re-attacking the two mechanisms just changed
 (the `static final` gate, and the abstract-class exclusion) rather than
 re-covering ground the first two passes already verified clean.
+
+**2026-10-04 third independent QA pass: CWE-284's dedup mechanism is
+now clean and frozen; CWE-798's self-reference check needed one more
+fix (its fourth) before the same could be said.**
+
+**CWE-284: confirmed settled.** The third pass constructed and
+executed a materially harder set of cases than either prior round: a
+4-level chain (`interface A` → `abstract AbstractBase1 implements A` →
+`abstract AbstractBase2 extends AbstractBase1` → `class RealController
+extends AbstractBase2 implements A`), the interface-then-abstract-class
+order, a `final class` implementor, and a `record` implementor forced
+through the Tree-sitter fallback path - every one behaved correctly
+(a genuine concrete implementor collapses the ancestor chain's
+redundant findings; anything without one, at any depth, keeps its
+own). It also deliberately went one case *past* the brief: a
+middle-of-chain abstract class that concretely overrides the
+interface method, with the leaf concrete class inheriting that
+override without re-declaring it itself. This reproduces the already-
+logged, separate superclass-widening gap (a subclass's *inherited-but-
+not-re-overridden* method is never tied back to its superclass's own
+finding) - but confirmed it manifests as an **extra**, surviving
+finding, not a dropped one, consistent with (not contradicting)
+CWE-284's own false-negative-averse design. Re-verified the real
+Syncope `idrepo` measurement precisely: 314 raw, 170 after dedup,
+matching the second fix's corrected number exactly. Re-verified the
+five pre-existing `.qa-repos` entries still sum to 270. Full suite: 432
+passed; all four gates clean. No code changes were needed - this pass
+found nothing to fix.
+
+**Freeze (CWE-284):** `build_implementors_index`/
+`deduplicate_interface_implementation_findings` and
+`ParsedClass.is_interface` are now treated as settled, after three
+independent QA passes (double-interface-no-concrete; abstract-class-
+no-concrete; this multi-level/final/record pass) each found a real bug
+in the first two cases and nothing further in the third. Reopen only if
+a later layer or a future real-repo QA pass surfaces a genuinely new,
+reproduced gap, per Section 8's freeze discipline.
+
+**CWE-798: one more real bug found, now fixed in commit `36e7430`.**
+The implicit-interface-constant fix (`7764c79`) missed a sibling JLS
+rule: an *annotation type*'s own fields (`@interface Foo { String X =
+"X"; }`) are also implicitly `public static final`, for the identical
+reason a plain interface's are. The gap was specific to javalang:
+`AnnotationDeclaration` is modeled as a *sibling* of
+`InterfaceDeclaration` under `TypeDeclaration`, not a subclass of it -
+confirmed directly via javalang's own class hierarchy - so
+`nearest_enclosing_type`'s `isinstance` check against only
+`InterfaceDeclaration` silently missed it, reintroducing the exact
+`PASSWORD_MANAGEMENT_LIST`-shaped false positive one more time, this
+time as an annotation-type constant. The Tree-sitter fallback path
+needed no change at all: that grammar already gives an annotation-type
+field the identical `constant_declaration` node type a plain interface
+constant gets, so `_tree_sitter_is_static_final_field`'s existing check
+already covered it - the gap was javalang-specific.
+
+Fixed by widening `JavalangTypeDeclaration`/`nearest_enclosing_type`
+(shared by `cwe_284.py`/`cwe_20.py` too, not just this check) to also
+recognise `AnnotationDeclaration`, and updating `cwe_798.py`'s own
+`isinstance` check against that result to match. The QA pass that found
+this also noted the same widening is now reachable from `cwe_284.py`/
+`cwe_20.py`'s interface-widening machinery, but assessed it as unlikely
+to matter there in practice (an annotation type can't declare methods
+with bodies the way a plain interface can) - not separately verified or
+chased further this round. Verified directly against the exact
+reproduction: an annotation-type `PASSWORD_MANAGEMENT_LIST` constant is
+now correctly excluded; a non-self-referential annotation-type field
+(`password = "sa"`) is still correctly flagged. Re-verified the real
+Syncope `common` module count is still 11 (this corpus doesn't happen
+to use the annotation-type shape, so the fix closes a gap this specific
+sample never exercised). Added 2 new regression tests. Full suite: 434
+passed; all four gates clean.
+
+**Freeze/handoff (CWE-798):** This is the fourth fix this exclusion has
+needed - three found by three separate independent QA passes
+(bare-keyword suppression; concatenated-keyword-fragment compounds;
+the implicit-interface-constant case found by a second pass alongside
+the `static final` gate itself) plus one found by the build session
+itself while scoping the third QA round (the annotation-type case just
+fixed). Recommend a **fourth** independent QA pass before this is
+finally treated as settled - per Section 11, the same session should
+not self-certify a fix it just wrote, regardless of how many rounds
+have already run clean on adjacent parts of the same mechanism.
