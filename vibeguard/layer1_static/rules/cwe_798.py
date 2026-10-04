@@ -231,6 +231,8 @@ def _check_tree_sitter_declarator(file_path: Path, source: bytes, node: Node) ->
     literal_value = _tree_sitter_expression_literal_value(source, value_node)
     if literal_value is None or _is_safe_value(literal_value):
         return None
+    if _is_self_referential_constant(name, literal_value):
+        return None
     line = _tree_sitter_expression_literal_line(source, value_node)
     if line is None and value_node is not None:
         line = ts_node_line(value_node)
@@ -248,6 +250,8 @@ def _check_tree_sitter_assignment(file_path: Path, source: bytes, node: Node) ->
     value_node = ts_child_by_field(node, "right")
     literal_value = _tree_sitter_expression_literal_value(source, value_node)
     if literal_value is None or _is_safe_value(literal_value):
+        return None
+    if _is_self_referential_constant(name, literal_value):
         return None
     line = _tree_sitter_expression_literal_line(source, value_node) or ts_node_line(node)
     return _hardcoded_credential_finding(file_path, line, name, literal_value)
@@ -435,6 +439,8 @@ def _check_declarator(file_path: Path, node: javalang.tree.VariableDeclarator) -
     literal_value = _expression_literal_value(node.initializer)
     if literal_value is None or _is_safe_value(literal_value):
         return None
+    if _is_self_referential_constant(node.name, literal_value):
+        return None
     line = _initializer_line(node.initializer)
     return _hardcoded_credential_finding(file_path, line, node.name, literal_value)
 
@@ -448,6 +454,8 @@ def _check_assignment(file_path: Path, node: javalang.tree.Assignment) -> Findin
         return None
     literal_value = _expression_literal_value(node.value)
     if literal_value is None or _is_safe_value(literal_value):
+        return None
+    if _is_self_referential_constant(name, literal_value):
         return None
     line = _initializer_line(node.value)
     return _hardcoded_credential_finding(file_path, line, name, literal_value)
@@ -683,6 +691,26 @@ def _is_credential_name(name: str) -> bool:
     if not is_credential_name(name):
         return False
     return last_word(name) not in _REFERENCE_SUFFIXES
+
+
+def _is_self_referential_constant(name: str, value: str) -> bool:
+    """Whether ``value`` is just ``name`` restated as a string literal.
+
+    A real-world false-positive pattern found scanning Apache Syncope
+    (``.qa-repos``): enterprise codebases commonly declare permission/
+    entitlement/event-type constants as ``public static final String
+    PASSWORD_MANAGEMENT_LIST = "PASSWORD_MANAGEMENT_LIST";`` - a string
+    standing in for an enum value, not a credential. A value identical
+    (case-insensitively) to its own declaring identifier can never be
+    exploitable secret material: it reveals nothing an attacker couldn't
+    already read from the field's own, already-public name. Deliberately
+    narrow (exact match only, not a broader "looks like another
+    identifier" heuristic) - 9 of 20 real findings in that scan were this
+    exact shape, byte-identical; a looser similarity heuristic risks
+    suppressing a genuine weak-but-identifier-shaped default instead,
+    the wrong direction to err for this CWE.
+    """
+    return name.strip().lower() == value.strip().lower()
 
 
 def _is_safe_value(value: str) -> bool:

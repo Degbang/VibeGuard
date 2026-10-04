@@ -673,3 +673,120 @@ def test_detect_in_java_does_not_flag_oauth_bearer_token_type(tmp_path: Path) ->
     result = parse_file(java_file)
 
     assert detect_in_java(result) == ()
+
+
+# -- Self-referential constants ----------------------------------------------
+#
+# Found scanning Apache Syncope (.qa-repos): a public static final String
+# constant whose value is just its own name restated as a string literal
+# (a permission/entitlement/event-type identifier, not a credential) -
+# 9 of 20 real CWE-798 findings in that scan's common module were this
+# exact shape.
+
+
+def test_detect_in_java_does_not_flag_a_self_referential_constant(tmp_path: Path) -> None:
+    java_file = tmp_path / "Entitlement.java"
+    java_file.write_text(
+        "public class Entitlement {\n"
+        '    public static final String PASSWORD_MANAGEMENT_LIST = "PASSWORD_MANAGEMENT_LIST";\n'
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    assert detect_in_java(result) == ()
+
+
+def test_detect_in_java_does_not_flag_a_case_insensitive_self_reference(
+    tmp_path: Path,
+) -> None:
+    """A value identical to its own name except for case is the same
+    symbolic-reference shape, not a different, more credential-like one."""
+    java_file = tmp_path / "Entitlement.java"
+    java_file.write_text('public class Entitlement {\n    String TOKEN = "token";\n}\n')
+
+    result = parse_file(java_file)
+
+    assert detect_in_java(result) == ()
+
+
+def test_detect_in_java_still_flags_a_real_value_matching_the_name_s_keyword(
+    tmp_path: Path,
+) -> None:
+    """The self-reference exclusion must not become a blanket pass for
+    anything merely containing the field's own name - only an exact
+    (case-insensitive) match is excluded, not a prefix/substring match."""
+    java_file = tmp_path / "Config.java"
+    java_file.write_text('public class Config {\n    String password = "sa";\n}\n')
+
+    result = parse_file(java_file)
+
+    findings = detect_in_java(result)
+    assert {f.identifier for f in findings} == {"password"}
+
+
+def test_detect_in_java_does_not_flag_a_self_referential_assignment(tmp_path: Path) -> None:
+    """The same exclusion must apply to a plain assignment, not just a
+    field initializer - _check_assignment is a separate code path."""
+    java_file = tmp_path / "Config.java"
+    java_file.write_text(
+        "public class Config {\n"
+        "    String secretKey;\n"
+        "    void init() {\n"
+        '        secretKey = "secretKey";\n'
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    assert detect_in_java(result) == ()
+
+
+def test_detect_in_java_does_not_flag_a_self_referential_constant_tree_sitter_fallback(
+    tmp_path: Path,
+) -> None:
+    """The same exclusion must hold on the Tree-sitter fallback path."""
+    java_file = tmp_path / "Entitlement.java"
+    java_file.write_text(
+        "public class Entitlement {\n"
+        "    int helper(int level) {\n"
+        "        return switch (level) {\n"
+        "            case 1 -> 1;\n"
+        "            default -> 0;\n"
+        "        };\n"
+        "    }\n"
+        '    public static final String PASSWORD_MANAGEMENT_LIST = "PASSWORD_MANAGEMENT_LIST";\n'
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+    assert result.tree_sitter is not None
+
+    assert detect_in_java(result) == ()
+
+
+def test_detect_in_java_does_not_flag_a_self_referential_assignment_tree_sitter_fallback(
+    tmp_path: Path,
+) -> None:
+    """The Tree-sitter mirror of ``_check_assignment``'s self-reference exclusion."""
+    java_file = tmp_path / "Config.java"
+    java_file.write_text(
+        "public class Config {\n"
+        "    String secretKey;\n"
+        "    int helper(int level) {\n"
+        "        return switch (level) {\n"
+        "            case 1 -> 1;\n"
+        "            default -> 0;\n"
+        "        };\n"
+        "    }\n"
+        "    void init() {\n"
+        '        secretKey = "secretKey";\n'
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+    assert result.tree_sitter is not None
+
+    assert detect_in_java(result) == ()
