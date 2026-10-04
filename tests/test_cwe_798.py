@@ -844,6 +844,44 @@ def test_detect_in_java_does_not_flag_an_implicit_interface_constant_tree_sitter
     assert detect_in_java(result) == ()
 
 
+def test_detect_in_java_does_not_flag_an_implicit_annotation_type_constant(
+    tmp_path: Path,
+) -> None:
+    """Found by a third independent QA pass: an annotation type's own
+    fields are also implicitly ``public static final`` under the JLS,
+    the same rule as a plain interface's. javalang models
+    ``AnnotationDeclaration`` as a *sibling* of ``InterfaceDeclaration``
+    under ``TypeDeclaration``, not a subclass of it, so a check for only
+    ``InterfaceDeclaration`` silently missed this shape on the first
+    attempt - ``nearest_enclosing_type`` (and this check) must also
+    recognise ``AnnotationDeclaration``."""
+    java_file = tmp_path / "Foo.java"
+    java_file.write_text(
+        "public @interface Foo {\n"
+        "    String value();\n"
+        '    String PASSWORD_MANAGEMENT_LIST = "PASSWORD_MANAGEMENT_LIST";\n'
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+    assert result.tree_sitter is None  # javalang path - the gap was specific to it
+
+    assert detect_in_java(result) == ()
+
+
+def test_detect_in_java_still_flags_a_non_self_referential_annotation_type_constant(
+    tmp_path: Path,
+) -> None:
+    java_file = tmp_path / "Foo.java"
+    java_file.write_text(
+        "public @interface Foo {\n" "    String value();\n" '    String password = "sa";\n' "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    assert {f.identifier for f in detect_in_java(result)} == {"password"}
+
+
 def test_detect_in_java_still_flags_multi_keyword_fragment_compound_tree_sitter_fallback(
     tmp_path: Path,
 ) -> None:

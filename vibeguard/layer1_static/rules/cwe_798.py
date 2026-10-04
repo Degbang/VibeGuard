@@ -507,17 +507,23 @@ def _is_static_final_field(path: tuple[object, ...]) -> bool:
     real motivating case is already ``static final``, and a genuine
     secret is essentially never declared that way.
 
-    A field declared directly inside an ``interface`` is *implicitly*
+    A field declared directly inside an ``interface`` *or an annotation
+    type* (``@interface Foo { String X = "X"; }``) is *implicitly*
     ``public static final`` under the JLS, even with none of those
     keywords written in source - confirmed directly that javalang's own
     ``FieldDeclaration.modifiers`` reflects only what is literally
     written, never synthesizing the implicit ones, so that shape would
     otherwise fail the modifier check above and silently reintroduce a
     false positive for the exact enterprise permission-constant idiom
-    this exclusion exists for, just declared as an interface constant
-    instead of a class field. Treated as static-final whenever the
-    nearest enclosing type is an interface, regardless of what
-    modifiers were actually written.
+    this exclusion exists for, just declared as an interface or
+    annotation-type constant instead of a class field. Treated as
+    static-final whenever the nearest enclosing type is an interface or
+    annotation type, regardless of what modifiers were actually
+    written. Independent QA found the annotation-type case was missed
+    on the first attempt at this: javalang models ``AnnotationDeclaration``
+    as a *sibling* of ``InterfaceDeclaration`` under ``TypeDeclaration``,
+    not a subclass of it, so a check for only
+    ``InterfaceDeclaration`` silently misses it.
     """
     if len(path) < 2:
         return False
@@ -525,7 +531,10 @@ def _is_static_final_field(path: tuple[object, ...]) -> bool:
     modifiers = getattr(field_declaration, "modifiers", None)
     if isinstance(modifiers, set | frozenset) and {"static", "final"} <= modifiers:
         return True
-    return isinstance(nearest_enclosing_type(path), javalang.tree.InterfaceDeclaration)
+    return isinstance(
+        nearest_enclosing_type(path),
+        javalang.tree.InterfaceDeclaration | javalang.tree.AnnotationDeclaration,
+    )
 
 
 def _check_assignment(file_path: Path, node: javalang.tree.Assignment) -> Finding | None:

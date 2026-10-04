@@ -87,21 +87,39 @@ _MAX_INTERFACE_HIERARCHY_DEPTH = 10
 # implements, same extract-on-second-real-need pattern used throughout
 # this codebase.
 JavalangTypeDeclaration: TypeAlias = (
-    javalang.tree.ClassDeclaration | javalang.tree.InterfaceDeclaration
+    javalang.tree.ClassDeclaration
+    | javalang.tree.InterfaceDeclaration
+    | javalang.tree.AnnotationDeclaration
 )
 
 
 def nearest_enclosing_type(path: tuple[object, ...]) -> JavalangTypeDeclaration | None:
-    """Find the closest enclosing class/interface declaration in a filter() path.
+    """Find the closest enclosing class/interface/annotation-type
+    declaration in a filter() path.
 
     javalang's ``.filter()`` returns the full ancestor chain from the
     ``CompilationUnit`` down; walking it in reverse finds the nearest
     (innermost) enclosing type first, which is what "the method's own
     class" means for a nested/inner class.
+
+    Includes ``AnnotationDeclaration`` (``@interface Foo { ... }``)
+    alongside ``ClassDeclaration``/``InterfaceDeclaration`` - javalang
+    models it as a sibling of ``InterfaceDeclaration`` under
+    ``TypeDeclaration``, not a subclass of it, so it was previously
+    missed entirely. Found by independent QA: an annotation type's own
+    fields are implicitly ``public static final`` under the JLS, the
+    same rule that applies to plain interface fields - without this,
+    ``cwe_798.py``'s self-referential-constant exclusion would
+    reintroduce a false positive for an enterprise permission-constant
+    declared as an annotation-type constant instead of a plain
+    interface one.
     """
     for ancestor in reversed(path):
         if isinstance(
-            ancestor, javalang.tree.ClassDeclaration | javalang.tree.InterfaceDeclaration
+            ancestor,
+            javalang.tree.ClassDeclaration
+            | javalang.tree.InterfaceDeclaration
+            | javalang.tree.AnnotationDeclaration,
         ):
             return ancestor
     return None
