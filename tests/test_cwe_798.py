@@ -697,12 +697,128 @@ def test_detect_in_java_does_not_flag_a_self_referential_constant(tmp_path: Path
     assert detect_in_java(result) == ()
 
 
+def test_detect_in_java_does_not_flag_a_non_static_final_self_referential_constant(
+    tmp_path: Path,
+) -> None:
+    """The exact same compound, self-referential name/value pair as
+    above, but as a plain instance field rather than ``public static
+    final`` - the self-referential exclusion must require the
+    ``static final`` compile-time-constant idiom, not just name/value
+    equality on its own, so this must still be flagged."""
+    java_file = tmp_path / "Entitlement.java"
+    java_file.write_text(
+        "public class Entitlement {\n"
+        '    private String PASSWORD_MANAGEMENT_LIST = "PASSWORD_MANAGEMENT_LIST";\n'
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    assert {f.identifier for f in detect_in_java(result)} == {"PASSWORD_MANAGEMENT_LIST"}
+
+
+# -- Multi-keyword-fragment compounds ----------------------------------------
+#
+# Found by a second independent QA pass on the self-referential-constant
+# fix: a name built by concatenating multiple *different* credential-
+# keyword fragments with no separator (clientSecretKey, secretToken) was
+# wrongly treated as a genuine compound/permission-label idiom, even as a
+# plain, mutable instance field - the real weak-default-credential shape,
+# just arranged as two keyword fragments instead of one repeated keyword.
+# The static-final requirement (not a lexical word analysis, which has no
+# clean answer here) closes this.
+
+
+def test_detect_in_java_still_flags_multi_keyword_fragment_compounds_as_instance_fields(
+    tmp_path: Path,
+) -> None:
+    java_file = tmp_path / "Concat.java"
+    java_file.write_text(
+        "public class Concat {\n"
+        '    private String clientSecretKey = "clientSecretKey";\n'
+        '    private String secretToken = "secretToken";\n'
+        '    private String tokenSecret = "tokenSecret";\n'
+        '    private String apiSecretKey = "apiSecretKey";\n'
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    assert {f.identifier for f in detect_in_java(result)} == {
+        "clientSecretKey",
+        "secretToken",
+        "tokenSecret",
+        "apiSecretKey",
+    }
+
+
+def test_detect_in_java_still_excludes_a_static_final_multi_keyword_fragment_compound(
+    tmp_path: Path,
+) -> None:
+    """A multi-keyword-fragment compound declared ``static final`` is
+    still excluded - the ``static final`` gate narrows which *shapes* of
+    declaration are eligible for the exclusion at all, it doesn't
+    reintroduce a lexical judgement about which words "count" as
+    credential-related."""
+    java_file = tmp_path / "Concat.java"
+    java_file.write_text(
+        "public class Concat {\n"
+        '    public static final String clientSecretKey = "clientSecretKey";\n'
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    assert detect_in_java(result) == ()
+
+
+def test_detect_in_java_still_flags_multi_keyword_fragment_compound_tree_sitter_fallback(
+    tmp_path: Path,
+) -> None:
+    java_file = tmp_path / "Concat.java"
+    java_file.write_text(
+        "public class Concat {\n"
+        "    int helper(int level) {\n"
+        "        return switch (level) {\n"
+        "            case 1 -> 1;\n"
+        "            default -> 0;\n"
+        "        };\n"
+        "    }\n"
+        '    private String clientSecretKey = "clientSecretKey";\n'
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+    assert result.tree_sitter is not None
+
+    assert {f.identifier for f in detect_in_java(result)} == {"clientSecretKey"}
+
+
 def test_detect_in_java_does_not_flag_a_case_insensitive_self_reference(
     tmp_path: Path,
 ) -> None:
-    """A *compound* identifier's value identical to its own name except
-    for case is the same symbolic-reference shape, not a different, more
-    credential-like one."""
+    """A *compound*, ``static final`` identifier's value identical to its
+    own name except for case is the same symbolic-reference shape, not
+    a different, more credential-like one."""
+    java_file = tmp_path / "Entitlement.java"
+    java_file.write_text(
+        "public class Entitlement {\n"
+        '    public static final String ACCESS_TOKEN = "access_token";\n'
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    assert detect_in_java(result) == ()
+
+
+def test_detect_in_java_still_flags_a_case_insensitive_self_reference_without_static_final(
+    tmp_path: Path,
+) -> None:
+    """The same compound, case-varying self-reference as above, but as a
+    plain instance field rather than a ``static final`` constant, must
+    still be flagged - only the genuine compile-time-constant idiom is
+    excluded, not every name/value match regardless of modifiers."""
     java_file = tmp_path / "Entitlement.java"
     java_file.write_text(
         'public class Entitlement {\n    String ACCESS_TOKEN = "access_token";\n}\n'
@@ -710,7 +826,7 @@ def test_detect_in_java_does_not_flag_a_case_insensitive_self_reference(
 
     result = parse_file(java_file)
 
-    assert detect_in_java(result) == ()
+    assert {f.identifier for f in detect_in_java(result)} == {"ACCESS_TOKEN"}
 
 
 def test_detect_in_java_still_flags_a_bare_credential_keyword_as_its_own_value(
@@ -803,9 +919,14 @@ def test_detect_in_java_still_flags_a_real_value_matching_the_name_s_keyword(
     assert {f.identifier for f in findings} == {"password"}
 
 
-def test_detect_in_java_does_not_flag_a_self_referential_assignment(tmp_path: Path) -> None:
-    """The same exclusion must apply to a plain assignment, not just a
-    field initializer - _check_assignment is a separate code path."""
+def test_detect_in_java_still_flags_a_self_referential_assignment(tmp_path: Path) -> None:
+    """The self-referential-constant exclusion deliberately does NOT
+    apply to a plain assignment - ``_check_assignment`` has no such
+    exclusion at all. The enterprise permission-constant idiom this
+    exclusion targets is always a ``static final`` field declaration
+    with an inline initializer, never a later reassignment - a plain
+    assignment restating its own target's name is not that idiom, and
+    the safe direction for this CWE is to still flag it."""
     java_file = tmp_path / "Config.java"
     java_file.write_text(
         "public class Config {\n"
@@ -818,7 +939,7 @@ def test_detect_in_java_does_not_flag_a_self_referential_assignment(tmp_path: Pa
 
     result = parse_file(java_file)
 
-    assert detect_in_java(result) == ()
+    assert {f.identifier for f in detect_in_java(result)} == {"tokenType"}
 
 
 def test_detect_in_java_does_not_flag_a_self_referential_constant_tree_sitter_fallback(
@@ -844,10 +965,11 @@ def test_detect_in_java_does_not_flag_a_self_referential_constant_tree_sitter_fa
     assert detect_in_java(result) == ()
 
 
-def test_detect_in_java_does_not_flag_a_self_referential_assignment_tree_sitter_fallback(
+def test_detect_in_java_still_flags_a_self_referential_assignment_tree_sitter_fallback(
     tmp_path: Path,
 ) -> None:
-    """The Tree-sitter mirror of ``_check_assignment``'s self-reference exclusion."""
+    """The Tree-sitter mirror of the test above: ``_check_tree_sitter_assignment``
+    also has no self-referential-constant exclusion."""
     java_file = tmp_path / "Config.java"
     java_file.write_text(
         "public class Config {\n"
@@ -867,4 +989,4 @@ def test_detect_in_java_does_not_flag_a_self_referential_assignment_tree_sitter_
     result = parse_file(java_file)
     assert result.tree_sitter is not None
 
-    assert detect_in_java(result) == ()
+    assert {f.identifier for f in detect_in_java(result)} == {"tokenType"}

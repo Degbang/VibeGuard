@@ -26,6 +26,9 @@ from vibeguard.layer1_static._tree_sitter_java import (
     child_by_field as ts_child_by_field,
 )
 from vibeguard.layer1_static._tree_sitter_java import (
+    modifiers as ts_modifiers,
+)
+from vibeguard.layer1_static._tree_sitter_java import (
     node_line as ts_node_line,
 )
 from vibeguard.layer1_static._tree_sitter_java import (
@@ -35,7 +38,7 @@ from vibeguard.layer1_static._tree_sitter_java import (
     string_literal_value as ts_string_literal_value,
 )
 from vibeguard.layer1_static._tree_sitter_java import (
-    walk as ts_walk,
+    walk_with_ancestors as ts_walk_with_ancestors,
 )
 from vibeguard.layer1_static.ast_parser import ParsedFile
 from vibeguard.layer1_static.config_parser import ParsedConfigFile
@@ -174,8 +177,8 @@ def detect_in_java(parsed_file: ParsedFile) -> tuple[Finding, ...]:
 
     findings = [
         finding
-        for _path, node in parsed_file.tree.filter(javalang.tree.VariableDeclarator)
-        if (finding := _check_declarator(parsed_file.path, node)) is not None
+        for path, node in parsed_file.tree.filter(javalang.tree.VariableDeclarator)
+        if (finding := _check_declarator(parsed_file.path, node, path)) is not None
     ]
     findings.extend(
         finding
@@ -206,9 +209,11 @@ def _detect_in_tree_sitter_java(parsed_file: ParsedFile) -> tuple[Finding, ...]:
     if parsed is None:
         return ()
     findings: list[Finding] = []
-    for node in ts_walk(parsed.tree.root_node):
+    for ancestors, node in ts_walk_with_ancestors(parsed.tree.root_node):
         if node.type == "variable_declarator":
-            finding = _check_tree_sitter_declarator(parsed_file.path, parsed.source, node)
+            finding = _check_tree_sitter_declarator(
+                parsed_file.path, parsed.source, node, ancestors
+            )
         elif node.type == "assignment_expression":
             finding = _check_tree_sitter_assignment(parsed_file.path, parsed.source, node)
         elif node.type == "method_invocation":
@@ -224,7 +229,9 @@ def _detect_in_tree_sitter_java(parsed_file: ParsedFile) -> tuple[Finding, ...]:
     return tuple(findings)
 
 
-def _check_tree_sitter_declarator(file_path: Path, source: bytes, node: Node) -> Finding | None:
+def _check_tree_sitter_declarator(
+    file_path: Path, source: bytes, node: Node, ancestors: tuple[Node, ...]
+) -> Finding | None:
     name_node = ts_child_by_field(node, "name")
     if name_node is None:
         return None
@@ -235,7 +242,9 @@ def _check_tree_sitter_declarator(file_path: Path, source: bytes, node: Node) ->
     literal_value = _tree_sitter_expression_literal_value(source, value_node)
     if literal_value is None or _is_safe_value(literal_value):
         return None
-    if _is_self_referential_constant(name, literal_value):
+    if _is_self_referential_constant(name, literal_value) and _tree_sitter_is_static_final_field(
+        ancestors
+    ):
         return None
     line = _tree_sitter_expression_literal_line(source, value_node)
     if line is None and value_node is not None:
@@ -243,7 +252,21 @@ def _check_tree_sitter_declarator(file_path: Path, source: bytes, node: Node) ->
     return _hardcoded_credential_finding(file_path, line, name, literal_value)
 
 
+def _tree_sitter_is_static_final_field(ancestors: tuple[Node, ...]) -> bool:
+    """Tree-sitter mirror of ``_is_static_final_field``: whether the
+    nearest enclosing ``field_declaration`` ancestor carries both
+    ``static`` and ``final`` modifiers."""
+    for ancestor in reversed(ancestors):
+        if ancestor.type == "field_declaration":
+            return {"static", "final"} <= ts_modifiers(ancestor)
+        if ancestor.type in {"class_body", "class_declaration", "interface_body"}:
+            return False
+    return False
+
+
 def _check_tree_sitter_assignment(file_path: Path, source: bytes, node: Node) -> Finding | None:
+    """No self-referential-constant exclusion here, deliberately - see
+    ``_check_assignment``'s docstring for why."""
     operator = ts_child_by_field(node, "operator")
     if operator is None or ts_node_text(source, operator) != "=":
         return None
@@ -254,8 +277,6 @@ def _check_tree_sitter_assignment(file_path: Path, source: bytes, node: Node) ->
     value_node = ts_child_by_field(node, "right")
     literal_value = _tree_sitter_expression_literal_value(source, value_node)
     if literal_value is None or _is_safe_value(literal_value):
-        return None
-    if _is_self_referential_constant(name, literal_value):
         return None
     line = _tree_sitter_expression_literal_line(source, value_node) or ts_node_line(node)
     return _hardcoded_credential_finding(file_path, line, name, literal_value)
@@ -436,21 +457,65 @@ def _tree_sitter_char_array_literal_value(source: bytes, node: Node) -> str | No
     return "".join(chars) if chars else None
 
 
-def _check_declarator(file_path: Path, node: javalang.tree.VariableDeclarator) -> Finding | None:
+def _check_declarator(
+    file_path: Path, node: javalang.tree.VariableDeclarator, path: tuple[object, ...]
+) -> Finding | None:
     """Build a Finding if this declarator assigns a real secret-shaped value."""
     if not _is_credential_name(node.name):
         return None
     literal_value = _expression_literal_value(node.initializer)
     if literal_value is None or _is_safe_value(literal_value):
         return None
-    if _is_self_referential_constant(node.name, literal_value):
+    if _is_self_referential_constant(node.name, literal_value) and _is_static_final_field(path):
         return None
     line = _initializer_line(node.initializer)
     return _hardcoded_credential_finding(file_path, line, node.name, literal_value)
 
 
+def _is_static_final_field(path: tuple[object, ...]) -> bool:
+    """Whether the ``VariableDeclarator`` this ``path`` leads to belongs
+    to a ``static final`` field - the Java idiom for a compile-time
+    symbolic constant (``public static final String X = "X";``), as
+    opposed to an instance field or local variable.
+
+    Gates the self-referential-constant exclusion: every one of the 9
+    real enterprise permission/entitlement-constant findings this
+    exclusion was built from is declared this way. Independent QA found
+    a real, reproduced gap in an earlier version of this check (based on
+    name/value equality alone, with no modifier check at all): a name
+    built by concatenating multiple *different* credential-keyword
+    fragments with no separator (``clientSecretKey``, ``secretToken``,
+    ``apiSecretKey``) was wrongly excluded too, even as a plain,
+    mutable *instance* field - the real, well-known weak-default-
+    credential shape, just arranged as two keyword fragments instead of
+    one repeated keyword. Requiring ``static final`` closes this
+    without needing to lexically distinguish "genuinely non-credential
+    word" from "credential-adjacent word" at all, which has no clean,
+    robust answer (``PASSWORD_MANAGEMENT_LIST``'s extra words
+    "MANAGEMENT"/"LIST" are unambiguously non-credential vocabulary,
+    but a word like "key" or "client" is both a completely ordinary
+    English word *and* can be part of a genuine secret's name) - every
+    real motivating case is already ``static final``, and a genuine
+    secret is essentially never declared that way.
+    """
+    if len(path) < 2:
+        return False
+    field_declaration = path[-2]
+    modifiers = getattr(field_declaration, "modifiers", None)
+    return isinstance(modifiers, set | frozenset) and {"static", "final"} <= modifiers
+
+
 def _check_assignment(file_path: Path, node: javalang.tree.Assignment) -> Finding | None:
-    """Build a Finding if an assignment writes a real secret-shaped value."""
+    """Build a Finding if an assignment writes a real secret-shaped value.
+
+    No self-referential-constant exclusion here, deliberately: the
+    enterprise permission-constant idiom this exclusion targets
+    (``public static final String X = "X";``) is always a field
+    *declaration* with an inline initializer, never a later
+    reassignment - a plain assignment restating its own target's name
+    as its value is not that idiom, and erring toward still flagging it
+    is the safe direction for this CWE.
+    """
     if node.type != "=":
         return None
     name = _assignment_target_name(node.expressionl)
@@ -458,8 +523,6 @@ def _check_assignment(file_path: Path, node: javalang.tree.Assignment) -> Findin
         return None
     literal_value = _expression_literal_value(node.value)
     if literal_value is None or _is_safe_value(literal_value):
-        return None
-    if _is_self_referential_constant(name, literal_value):
         return None
     line = _initializer_line(node.value)
     return _hardcoded_credential_finding(file_path, line, name, literal_value)
