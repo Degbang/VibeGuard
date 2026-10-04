@@ -772,6 +772,78 @@ def test_detect_in_java_still_excludes_a_static_final_multi_keyword_fragment_com
     assert detect_in_java(result) == ()
 
 
+# -- Implicit interface constants --------------------------------------------
+#
+# A field declared directly inside an `interface` is implicitly `public
+# static final` under the JLS, even with none of those keywords written in
+# source - confirmed directly that javalang's own FieldDeclaration.modifiers
+# only ever reflects what's literally written, never synthesizing the
+# implicit ones. Without handling this, the static-final gate above would
+# silently reintroduce a false positive for the exact enterprise
+# permission-constant idiom it exists for, just declared as an interface
+# constant instead of a class field - found and fixed before any QA pass
+# reported it, while scoping the third QA round for these fixes.
+
+
+def test_detect_in_java_does_not_flag_an_implicit_interface_constant(tmp_path: Path) -> None:
+    java_file = tmp_path / "Foo.java"
+    java_file.write_text(
+        "public interface Foo {\n"
+        '    String PASSWORD_MANAGEMENT_LIST = "PASSWORD_MANAGEMENT_LIST";\n'
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    assert detect_in_java(result) == ()
+
+
+def test_detect_in_java_still_flags_a_non_self_referential_implicit_interface_constant(
+    tmp_path: Path,
+) -> None:
+    """The implicit-interface-constant recognition only feeds the
+    *self-referential* exclusion - it must not become a blanket pass for
+    every credential-shaped interface field regardless of value."""
+    java_file = tmp_path / "Foo.java"
+    java_file.write_text(
+        "public interface Foo {\n"
+        '    String password = "sa";\n'
+        '    String password2 = "password";\n'
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    assert {f.identifier for f in detect_in_java(result)} == {"password", "password2"}
+
+
+def test_detect_in_java_does_not_flag_an_implicit_interface_constant_tree_sitter_fallback(
+    tmp_path: Path,
+) -> None:
+    """The Tree-sitter grammar gives an interface-level field its own
+    distinct node type (``constant_declaration``, not ``field_declaration``)
+    - this must be recognised directly, not missed by only looking for
+    ``field_declaration``'s modifiers."""
+    java_file = tmp_path / "Foo.java"
+    java_file.write_text(
+        "public interface Foo {\n"
+        "    int helper(int level);\n"
+        "    default int helperDefault(int level) {\n"
+        "        return switch (level) {\n"
+        "            case 1 -> 1;\n"
+        "            default -> 0;\n"
+        "        };\n"
+        "    }\n"
+        '    String PASSWORD_MANAGEMENT_LIST = "PASSWORD_MANAGEMENT_LIST";\n'
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+    assert result.tree_sitter is not None
+
+    assert detect_in_java(result) == ()
+
+
 def test_detect_in_java_still_flags_multi_keyword_fragment_compound_tree_sitter_fallback(
     tmp_path: Path,
 ) -> None:

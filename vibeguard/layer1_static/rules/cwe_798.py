@@ -48,6 +48,7 @@ from vibeguard.layer1_static.rules._credential_names import (
     last_word,
 )
 from vibeguard.layer1_static.rules._finding import Finding
+from vibeguard.layer1_static.rules._interface_annotations import nearest_enclosing_type
 
 CWE_ID = "CWE-798"
 
@@ -253,10 +254,18 @@ def _check_tree_sitter_declarator(
 
 
 def _tree_sitter_is_static_final_field(ancestors: tuple[Node, ...]) -> bool:
-    """Tree-sitter mirror of ``_is_static_final_field``: whether the
-    nearest enclosing ``field_declaration`` ancestor carries both
-    ``static`` and ``final`` modifiers."""
+    """Tree-sitter mirror of ``_is_static_final_field``.
+
+    Unlike javalang, this grammar already gives an interface-level
+    field its own distinct node type, ``constant_declaration`` (as
+    opposed to a class field's ``field_declaration``) - the grammar
+    itself encodes the JLS's "every interface field is implicitly
+    public static final" rule, so no separate enclosing-type check is
+    needed on this path the way javalang's required one.
+    """
     for ancestor in reversed(ancestors):
+        if ancestor.type == "constant_declaration":
+            return True
         if ancestor.type == "field_declaration":
             return {"static", "final"} <= ts_modifiers(ancestor)
         if ancestor.type in {"class_body", "class_declaration", "interface_body"}:
@@ -497,12 +506,26 @@ def _is_static_final_field(path: tuple[object, ...]) -> bool:
     English word *and* can be part of a genuine secret's name) - every
     real motivating case is already ``static final``, and a genuine
     secret is essentially never declared that way.
+
+    A field declared directly inside an ``interface`` is *implicitly*
+    ``public static final`` under the JLS, even with none of those
+    keywords written in source - confirmed directly that javalang's own
+    ``FieldDeclaration.modifiers`` reflects only what is literally
+    written, never synthesizing the implicit ones, so that shape would
+    otherwise fail the modifier check above and silently reintroduce a
+    false positive for the exact enterprise permission-constant idiom
+    this exclusion exists for, just declared as an interface constant
+    instead of a class field. Treated as static-final whenever the
+    nearest enclosing type is an interface, regardless of what
+    modifiers were actually written.
     """
     if len(path) < 2:
         return False
     field_declaration = path[-2]
     modifiers = getattr(field_declaration, "modifiers", None)
-    return isinstance(modifiers, set | frozenset) and {"static", "final"} <= modifiers
+    if isinstance(modifiers, set | frozenset) and {"static", "final"} <= modifiers:
+        return True
+    return isinstance(nearest_enclosing_type(path), javalang.tree.InterfaceDeclaration)
 
 
 def _check_assignment(file_path: Path, node: javalang.tree.Assignment) -> Finding | None:
