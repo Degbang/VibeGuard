@@ -1037,6 +1037,93 @@ def test_deduplicate_interface_implementation_findings_still_collapses_through_a
     assert deduplicated[0].file_path.name == "FooController.java"
 
 
+def test_deduplicate_interface_implementation_findings_keeps_both_unimplemented_abstract_class(
+    tmp_path: Path,
+) -> None:
+    """Found by independent QA: the identical bug class as the interface-
+    extends-interface case above, one level further down the hierarchy.
+    An abstract class implementing an interface is also never
+    instantiated on its own - only a genuinely concrete subclass is -
+    so it must not be treated as a deploying implementor either. With
+    nothing concrete anywhere in this scan, both findings must survive."""
+    (tmp_path / "A.java").write_text(
+        "import org.springframework.web.bind.annotation.GetMapping;\n"
+        "public interface A {\n"
+        '    @GetMapping("/foo")\n'
+        "    String foo(int id);\n"
+        "}\n"
+    )
+    (tmp_path / "AbstractBase.java").write_text(
+        "public abstract class AbstractBase implements A {\n"
+        '    public String foo(int id) { return "unprotected"; }\n'
+        "}\n"
+    )
+    files = (parse_file(tmp_path / "A.java"), parse_file(tmp_path / "AbstractBase.java"))
+    index = build_interface_method_index(files)
+    hierarchy = build_interface_hierarchy_index(files)
+
+    findings = tuple(f for pf in files for f in detect_in_java(pf, index, hierarchy))
+    assert {f.file_path.name for f in findings} == {"A.java", "AbstractBase.java"}
+
+    deduplicated = deduplicate_interface_implementation_findings(findings, files)
+
+    assert {f.file_path.name for f in deduplicated} == {"A.java", "AbstractBase.java"}
+
+
+def test_deduplicate_interface_implementation_findings_collapses_via_a_real_concrete_subclass(
+    tmp_path: Path,
+) -> None:
+    """Once a genuinely concrete class exists - even one extending an
+    abstract intermediate class - the interface's own finding still
+    correctly collapses against it. (The abstract class's own finding
+    does not also collapse here: that would require the dedup
+    mechanism to walk a *class's* ``extends``/superclass chain, which
+    is a separate, pre-existing limitation of the interface-widening
+    feature as a whole - found by this same QA pass, logged separately,
+    not fixed as part of this change.)"""
+    (tmp_path / "A.java").write_text(
+        "import org.springframework.web.bind.annotation.GetMapping;\n"
+        "public interface A {\n"
+        '    @GetMapping("/foo")\n'
+        "    String foo(int id);\n"
+        "}\n"
+    )
+    (tmp_path / "AbstractBase.java").write_text(
+        "public abstract class AbstractBase implements A {\n"
+        "    public abstract String foo(int id);\n"
+        "}\n"
+    )
+    (tmp_path / "RealController.java").write_text(
+        "public class RealController extends AbstractBase implements A {\n"
+        "    @Override\n"
+        '    public String foo(int id) { return "x"; }\n'
+        "}\n"
+    )
+    files = (
+        parse_file(tmp_path / "A.java"),
+        parse_file(tmp_path / "AbstractBase.java"),
+        parse_file(tmp_path / "RealController.java"),
+    )
+    index = build_interface_method_index(files)
+    hierarchy = build_interface_hierarchy_index(files)
+
+    findings = tuple(f for pf in files for f in detect_in_java(pf, index, hierarchy))
+    assert {f.file_path.name for f in findings} == {
+        "A.java",
+        "AbstractBase.java",
+        "RealController.java",
+    }
+
+    deduplicated = deduplicate_interface_implementation_findings(findings, files)
+
+    # A's finding collapses against the real concrete implementor;
+    # AbstractBase's own finding is a known, separately-logged limitation.
+    assert {f.file_path.name for f in deduplicated} == {
+        "AbstractBase.java",
+        "RealController.java",
+    }
+
+
 def test_deduplicate_interface_implementation_findings_leaves_other_cwes_untouched(
     tmp_path: Path,
 ) -> None:

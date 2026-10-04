@@ -303,27 +303,39 @@ def build_implementors_index(parsed_files: Iterable[ParsedFile]) -> Mapping[str,
         includes it, subject to the same ambiguous-simple-type-name
         exclusion as the other indexes in this module.
 
-        Only a genuinely concrete type (``parsed_class.is_interface`` is
-        ``False``) is ever recorded as an implementor. An interface that
-        merely ``extends`` another interface is walked *through* when
-        resolving the hierarchy (so a concrete class further down the
-        chain is still correctly recorded against every ancestor
+        Only a genuinely concrete, instantiable type - not an interface,
+        and not an abstract class - is ever recorded as an implementor.
+        An interface or abstract class is still walked *through* when
+        resolving the hierarchy (so a real concrete class further down
+        the chain is still correctly recorded against every ancestor
         interface), but is never itself recorded as if it were a
-        deploying implementor - independent QA found a real bug in an
-        earlier version of this function that didn't distinguish the
-        two: two interfaces with no concrete implementor anywhere in the
-        scan (``interface B extends A``, nothing implementing either)
-        were incorrectly treated as implementing each other, silently
-        dropping a genuine, undeployed finding with no actual evidence
-        either interface is ever deployed - the opposite of this
-        feature's own stated fail-closed guarantee.
+        deploying implementor.
+
+        Independent QA found two real bugs in earlier versions of this
+        function that didn't draw this line precisely enough: (1) two
+        interfaces with no concrete implementor anywhere in the scan
+        (``interface B extends A``, nothing implementing either) were
+        incorrectly treated as implementing each other, since only
+        ``is_interface`` was excluded; (2) an *abstract* class
+        implementing an interface - also never instantiated anywhere in
+        the scan, structurally the same problem one level further down
+        the hierarchy - was still being recorded as a genuine
+        implementor, since ``is_interface`` alone doesn't distinguish a
+        concrete class from an abstract one. Both cases silently dropped
+        a genuine, undeployed finding with no actual evidence either
+        type is ever deployed - the opposite of this feature's own
+        stated fail-closed guarantee.
     """
     ambiguous_type_names, materialized = _collect_ambiguous_type_names(parsed_files)
     hierarchy = build_interface_hierarchy_index(materialized)
     implementors: dict[str, list[str]] = {}
     for parsed_file in materialized:
         for parsed_class in parsed_file.classes:
-            if parsed_class.name in ambiguous_type_names or parsed_class.is_interface:
+            if (
+                parsed_class.name in ambiguous_type_names
+                or parsed_class.is_interface
+                or "abstract" in parsed_class.modifiers
+            ):
                 continue
             for interface_name in _resolve_transitive_interfaces(
                 parsed_class.interfaces, hierarchy
