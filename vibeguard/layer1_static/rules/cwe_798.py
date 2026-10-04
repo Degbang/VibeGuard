@@ -39,7 +39,11 @@ from vibeguard.layer1_static._tree_sitter_java import (
 )
 from vibeguard.layer1_static.ast_parser import ParsedFile
 from vibeguard.layer1_static.config_parser import ParsedConfigFile
-from vibeguard.layer1_static.rules._credential_names import is_credential_name, last_word
+from vibeguard.layer1_static.rules._credential_names import (
+    CREDENTIAL_KEYWORDS,
+    is_credential_name,
+    last_word,
+)
 from vibeguard.layer1_static.rules._finding import Finding
 
 CWE_ID = "CWE-798"
@@ -694,7 +698,8 @@ def _is_credential_name(name: str) -> bool:
 
 
 def _is_self_referential_constant(name: str, value: str) -> bool:
-    """Whether ``value`` is just ``name`` restated as a string literal.
+    """Whether ``value`` is just ``name`` restated as a string literal -
+    and ``name`` is more than merely the matched credential keyword itself.
 
     A real-world false-positive pattern found scanning Apache Syncope
     (``.qa-repos``): enterprise codebases commonly declare permission/
@@ -702,15 +707,33 @@ def _is_self_referential_constant(name: str, value: str) -> bool:
     PASSWORD_MANAGEMENT_LIST = "PASSWORD_MANAGEMENT_LIST";`` - a string
     standing in for an enum value, not a credential. A value identical
     (case-insensitively) to its own declaring identifier can never be
-    exploitable secret material: it reveals nothing an attacker couldn't
-    already read from the field's own, already-public name. Deliberately
-    narrow (exact match only, not a broader "looks like another
-    identifier" heuristic) - 9 of 20 real findings in that scan were this
-    exact shape, byte-identical; a looser similarity heuristic risks
-    suppressing a genuine weak-but-identifier-shaped default instead,
-    the wrong direction to err for this CWE.
+    exploitable secret material in that shape: it reveals nothing an
+    attacker couldn't already read from the field's own, already-public
+    name.
+
+    Independent QA found a real regression in an earlier version of this
+    function that compared only ``name``/``value`` equality with no
+    further check: ``String password = "password";`` is a real, well-
+    known weak-default-credential anti-pattern (the "password is
+    literally the word 'password'" shape) - textbook CWE-798 material -
+    and was being silently suppressed by the same equality check that
+    correctly excludes ``PASSWORD_MANAGEMENT_LIST``. The distinguishing
+    signal, confirmed against every one of the 9 real Syncope findings
+    this was built from: all 9 are *compound* identifiers (multiple
+    words beyond the bare keyword); none is a bare credential keyword
+    standing alone. This function now also requires ``name``, once
+    separators are stripped, not to be *exactly* one of
+    ``CREDENTIAL_KEYWORDS`` itself (covering ``apiKey = "apiKey"`` too -
+    camelCase splits "apiKey" into two word-parts, but both parts
+    together spell out exactly the ``apikey`` keyword, not a genuinely
+    different, additional identifier like "management" or "list").
     """
-    return name.strip().lower() == value.strip().lower()
+    if name.strip().lower() != value.strip().lower():
+        return False
+    normalized_name = re.sub(r"[_-]", "", name.strip().lower())
+    return not any(
+        re.sub(r"[_-]", "", keyword) == normalized_name for keyword in CREDENTIAL_KEYWORDS
+    )
 
 
 def _is_safe_value(value: str) -> bool:

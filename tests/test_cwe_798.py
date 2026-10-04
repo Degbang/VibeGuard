@@ -700,14 +700,92 @@ def test_detect_in_java_does_not_flag_a_self_referential_constant(tmp_path: Path
 def test_detect_in_java_does_not_flag_a_case_insensitive_self_reference(
     tmp_path: Path,
 ) -> None:
-    """A value identical to its own name except for case is the same
-    symbolic-reference shape, not a different, more credential-like one."""
+    """A *compound* identifier's value identical to its own name except
+    for case is the same symbolic-reference shape, not a different, more
+    credential-like one."""
     java_file = tmp_path / "Entitlement.java"
-    java_file.write_text('public class Entitlement {\n    String TOKEN = "token";\n}\n')
+    java_file.write_text(
+        'public class Entitlement {\n    String ACCESS_TOKEN = "access_token";\n}\n'
+    )
 
     result = parse_file(java_file)
 
     assert detect_in_java(result) == ()
+
+
+def test_detect_in_java_still_flags_a_bare_credential_keyword_as_its_own_value(
+    tmp_path: Path,
+) -> None:
+    """A *bare* credential keyword used as both its own name and value
+    (``password = "password"``, ``token = "token"``, ``apiKey =
+    "apiKey"``) is a real, well-known weak-default-credential
+    anti-pattern - textbook CWE-798 material, not a permission/
+    entitlement-constant idiom. Independent QA found an earlier version
+    of the self-reference exclusion silently suppressed exactly this
+    shape, since it only compared name/value equality with no check that
+    the name carries any identity beyond the bare keyword itself."""
+    java_file = tmp_path / "WeakCreds.java"
+    java_file.write_text(
+        "public class WeakCreds {\n"
+        '    private String password = "password";\n'
+        '    private String secret = "secret";\n'
+        '    private String token = "token";\n'
+        '    private String apiKey = "apiKey";\n'
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    findings_by_identifier = {f.identifier: f for f in detect_in_java(result)}
+    assert set(findings_by_identifier) == {"password", "secret", "token", "apiKey"}
+
+
+def test_detect_in_java_still_flags_a_bare_credential_keyword_assignment(
+    tmp_path: Path,
+) -> None:
+    """The same bare-keyword case for a plain assignment, not just a
+    field initializer - ``_check_assignment`` is a separate code path."""
+    java_file = tmp_path / "WeakCreds.java"
+    java_file.write_text(
+        "public class WeakCreds {\n"
+        "    String password;\n"
+        "    void init() {\n"
+        '        password = "password";\n'
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    assert {f.identifier for f in detect_in_java(result)} == {"password"}
+
+
+def test_detect_in_java_still_flags_a_bare_credential_keyword_tree_sitter_fallback(
+    tmp_path: Path,
+) -> None:
+    """The same bare-keyword case on the Tree-sitter fallback path."""
+    java_file = tmp_path / "WeakCreds.java"
+    java_file.write_text(
+        "public class WeakCreds {\n"
+        "    int helper(int level) {\n"
+        "        return switch (level) {\n"
+        "            case 1 -> 1;\n"
+        "            default -> 0;\n"
+        "        };\n"
+        "    }\n"
+        '    private String password = "password";\n'
+        "    void init() {\n"
+        '        password = "password";\n'
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+    assert result.tree_sitter is not None
+
+    findings = detect_in_java(result)
+    assert len(findings) == 2
+    assert all(f.identifier == "password" for f in findings)
 
 
 def test_detect_in_java_still_flags_a_real_value_matching_the_name_s_keyword(
@@ -731,9 +809,9 @@ def test_detect_in_java_does_not_flag_a_self_referential_assignment(tmp_path: Pa
     java_file = tmp_path / "Config.java"
     java_file.write_text(
         "public class Config {\n"
-        "    String secretKey;\n"
+        "    String tokenType;\n"
         "    void init() {\n"
-        '        secretKey = "secretKey";\n'
+        '        tokenType = "tokenType";\n'
         "    }\n"
         "}\n"
     )
@@ -773,7 +851,7 @@ def test_detect_in_java_does_not_flag_a_self_referential_assignment_tree_sitter_
     java_file = tmp_path / "Config.java"
     java_file.write_text(
         "public class Config {\n"
-        "    String secretKey;\n"
+        "    String tokenType;\n"
         "    int helper(int level) {\n"
         "        return switch (level) {\n"
         "            case 1 -> 1;\n"
@@ -781,7 +859,7 @@ def test_detect_in_java_does_not_flag_a_self_referential_assignment_tree_sitter_
         "        };\n"
         "    }\n"
         "    void init() {\n"
-        '        secretKey = "secretKey";\n'
+        '        tokenType = "tokenType";\n'
         "    }\n"
         "}\n"
     )
