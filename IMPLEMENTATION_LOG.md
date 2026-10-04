@@ -7906,3 +7906,220 @@ above are already verified, not asserted. Next evaluation step per the
 committed interface-based endpoint definitions, if the student wants to
 continue closing the interface-widening features' honest-zero-effect gap
 next.
+
+---
+
+## [2026-10-04] - Sixth real-world repository added: Apache Syncope - a real native-CLI crash reproduced for the first time, a real CWE-798 false-positive pattern found and fixed, and the interface-widening feature validated on JAX-RS (plus a real deduplication gap it exposed, found and fixed)
+**Status: DRAFT, pending student review.**
+
+**What the plan said:** The fifth-repo entry's "remaining limitations"
+section named a sixth repo targeting committed (not generated-at-build-
+time) interface-based endpoint definitions as the next evaluation step,
+specifically to validate the interface-widening features (CWE-284/
+CWE-20) beyond their stated zero-real-world-effect-so-far status.
+Targeted web search for a real, actively-maintained, production-style
+project using this pattern did not converge on a solid candidate within
+reasonable effort (this is not a pattern people blog about or tag);
+rather than force a low-quality match or burn unbounded search budget,
+the student was offered a choice of three alternative directions and
+chose a real JAX-RS application instead.
+
+**What we actually did:** Added `.qa-repos/apache-syncope-20261004`
+(`apache/syncope`, a real, Apache Software Foundation-governed identity-
+and-access-management platform - 3336 Java files, 136 POMs, 50MB), a
+shallow clone. Verified before committing to it that it has a genuine
+real-world instance of the exact pattern the fifth-repo entry was
+looking for, just via JAX-RS (`jakarta.ws.rs.*`) rather than Spring:
+`common/idrepo/rest-api`'s `AccessTokenService` interface declares the
+real `@GET`/`@POST`/etc. routing annotations, and
+`core/idrepo/rest-cxf`'s `AccessTokenServiceImpl implements
+AccessTokenService` carries none of its own - confirmed by direct
+inspection of both files before relying on it.
+
+**Finding 1 - the existing (Spring-built) interface-widening mechanism
+already correctly handles JAX-RS, zero new code needed.** Ran the real
+`AccessTokenService`/`AccessTokenServiceImpl` pair through
+`cwe_284.detect_in_java()` directly: without the interface index, zero
+findings (the implementation's methods are invisible); with it
+(unchanged from its Spring-motivated build), 5 correct findings. The
+underlying mechanism (`resolve_effective_annotations`,
+`build_interface_method_index`) only ever matches annotation names, with
+no framework-specific logic at all - this is the first real validation
+of that design choice generalizing to a second framework, not merely an
+assumption that it would.
+
+**Finding 2 - a real, reproducible native-level crash (SIGBUS) through
+`main.py`'s own CLI, for the first time ever.** The 2026-09-10
+investigation explicitly tested `main.py` against all four `.qa-repos`
+combined (898 files) and concluded "the crash does not reproduce through
+the actual product CLI, at all... real-world risk through `main.py`
+specifically looks near-zero." Running `main.py` against the full
+Syncope clone reproduced the documented native crash, caught cleanly by
+the existing supervisor exactly as designed (clear message, exit code 3,
+no corrupted/silent output) - but this directly updates that prior
+conclusion: the risk is real and reachable on a sufficiently large/
+complex real codebase, not merely theoretical.
+
+Bisected carefully (every step re-run multiple times, since the crash
+turned out to be non-deterministic, not a single deterministic poison
+file):
+- Confirmed deterministic at full `fit/` scale (162 files): 5/5 crashes.
+- At smaller combined scales the crash is genuinely probabilistic, not
+  deterministic: the *identical* 149-file input (`core-reference` +
+  `build-tools`) crashed on run 2 of 3 but was clean on runs 1 and 3 -
+  ruling out "one specific file always crashes" before the bisection
+  continued.
+- Narrowing by splitting in half repeatedly, re-running each split
+  multiple times (3-8x, more repeats as the crash rate dropped) to avoid
+  chasing noise: isolated the signal to the `cxf` subpackage of
+  `build-tools`, then to `ProvisioningImpl.java` specifically - which
+  alone (zero other files) crashed 2 of 3 times, and combined with
+  `core-reference` crashed 6 of 6 times.
+- Read `ProvisioningImpl.java`: it uses a Java 14+ **switch *statement*
+  with arrow-labelled cases** (`switch (x) { case "A" -> foo(); ... }`,
+  no return value), inside a ~200-line method with nested control flow -
+  forcing the javalang→Tree-sitter fallback (confirmed directly:
+  `ParsedFile.tree is None`, `tree_sitter is not None`). This is a
+  materially different shape from every existing test fixture in this
+  codebase, which exclusively uses the switch-*expression* form
+  (`return switch (x) { case 1 -> 1; ... };`) to force the fallback path.
+  Built a minimal standalone reproduction of just a switch statement
+  with arrow cases in isolation: it did **not** crash in 8/8 runs -
+  confirming the trigger is not the bare construct alone, but something
+  about its combination with the real file's surrounding scale/
+  complexity, consistent with (and now demonstrating at much smaller,
+  more realistic scale than previously tested) the 2026-09-10 entry's own
+  "sensitive to overall process memory footprint" hypothesis.
+- Per that same entry's own stated boundary ("instrumenting the C
+  extension directly... is disproportionate to this project's scope"),
+  did not attempt to go further (e.g. valgrind/ASan on the native
+  library). No code was changed for this finding - the supervisor is
+  already the correct mitigation, and it worked throughout. This is
+  evaluation data updating a risk assessment, not a bug to fix.
+
+**Finding 3 - a real CWE-798 false positive, found and fixed (see
+commit `3e5b423`).** 9 of 20 real CWE-798 findings in Syncope's `common`
+module were `public static final String NAME = "NAME"`-shaped constants
+(permission/entitlement/event-type identifiers, a common enterprise-
+Java idiom) - a value identical to its own declaring name can never be
+exploitable secret material. Fixed with a new, deliberately narrow
+`_is_self_referential_constant()` exclusion (exact match only, scoped to
+field declarations and simple assignments - the shape that produced all
+20 real findings), not a broader "looks like another identifier"
+heuristic that risked suppressing a genuine weak-but-identifier-shaped
+default (`password = "sa"`, the one genuine true positive in that same
+sample, correctly still flagged) instead. Confirmed zero effect on the
+other five `.qa-repos` entries (this specific naming idiom didn't
+appear in any of them). 10 of the 20 original findings remain
+unfixed this round (column-name-reference values, HTTP-header-name
+values, dotted-config-key values) - logged as a known, deliberately
+out-of-scope-for-now limitation, not chased into a broader, less-
+justified heuristic within this one pass.
+
+**Finding 4 - a real CWE-284 double-counting gap, found and fixed (see
+commit `ca1cdc5`).** Scanning the interface AND its implementation
+together (as any real project naturally would) revealed that both
+independently produce the identical finding for the same method - the
+interface-widening mechanism correctly makes the *implementation's*
+finding fire, but nothing previously stopped the *interface's own*
+method from *also* independently qualifying as its own separate
+"endpoint with no authorization" finding, even though an interface is
+never itself an instantiable, deployed HTTP resource. Measured directly
+on Syncope's `idrepo` module (`rest-api` + `rest-cxf` together, 334
+files): 314 raw CWE-284 findings, 159 after deduplication - almost
+exactly half every time this pattern occurs. Fixed with a new
+`build_implementors_index()` (the reverse of the existing interface-
+hierarchy index: which concrete types implement a given interface) and
+`deduplicate_interface_implementation_findings()`, which removes an
+interface's own finding only when a concrete implementor elsewhere in
+the *same scan* independently produces the identical finding - never a
+suppression of the underlying concern (the implementation's finding
+still fires unchanged), only removal of a provable duplicate report of
+it. An interface with no implementor anywhere in scope keeps its
+finding (no evidence either way whether it's deployed, so erring toward
+keeping it matches CWE-284's stated false-negative-averse priority).
+Confirmed zero effect on the five existing `.qa-repos` entries (none use
+this architectural split) - their combined finding count is unchanged
+at 270.
+
+**Tests/adversarial checks run (cumulative across all four findings):**
+- Finding 1: verified directly via script against the real
+  `AccessTokenService`/`AccessTokenServiceImpl` file pair, both before
+  and after the interface index.
+- Finding 2: ~25 separate scan invocations across the bisection, several
+  repeated 3-8x each specifically to distinguish a deterministic trigger
+  from a probabilistic one; a minimal standalone reproduction built and
+  tested 8x.
+- Finding 3: 6 new tests in `tests/test_cwe_798.py` (self-referential
+  field initializer, case-insensitive variant, a real value that merely
+  shares the field's credential keyword still correctly flagged, a plain
+  assignment, and both the declarator and assignment cases on the
+  Tree-sitter fallback path). Full `pytest -q`: 411 passed; all four
+  gates clean.
+- Finding 4: 4 new tests in `tests/test_cwe_284.py` (the real dedup case,
+  the unimplemented-interface non-dedup case, an unrelated-CWE pass-
+  through case, and the Tree-sitter fallback path - confirmed to need no
+  separate mirror implementation, since the dedup pass operates on
+  `ParsedFile.classes`, already identical on both parser paths). Full
+  `pytest -q`: 415 passed; all four gates clean.
+- Re-verified the real `.qa-repos` corpus end to end after both fixes:
+  the five pre-existing repos' combined finding count is unchanged at
+  270 (5 + 1 + 20 + 227 + 17, confirmed by scanning each individually and
+  summing, matching the previously-established combined total exactly).
+
+**Remaining limitations:**
+- The native crash's root cause remains uninstrumented at the C-extension
+  level, per this project's own already-stated scope boundary - contained
+  by the supervisor, not fixed or fully explained.
+- CWE-798's self-referential fix covers 9 of 20 real findings from this
+  one sample; the other 10 (column-name references, header-name values,
+  dotted-config-key values) are logged, not fixed.
+- CWE-20's parameter-level equivalent of the interface/implementation
+  double-counting almost certainly exists too (same underlying
+  mechanism, same per-file independent detection), but was not
+  specifically verified or fixed this round - scoped to the CWE-284
+  case that was actually found and measured, consistent with Section 8's
+  "fix only issues found inside the current scope" discipline.
+- Most of Syncope (`client`/`core`/`ext`/`fit` - the modules prone to the
+  native crash) cannot be reliably scanned as a whole through `main.py`
+  today; `common`/`wa`/`sra`/`archetype`/`standalone` scan cleanly, and
+  the `idrepo` sub-modules specifically were scanned successfully for
+  the measurements above.
+
+**Why:** Finding 2 was investigated as far as bisection could precisely
+characterize it, consistent with the project's own prior stopping point
+for this exact crash, but not one step further into native-level
+tooling - a defensible, bounded investigation, not an incomplete one.
+Findings 3 and 4 were both fixed immediately rather than only logged,
+since both are real, reproduced, scoped, low-risk corrections of this
+session's own earlier work (CWE-798's existing false-positive-reduction
+practice; the interface-widening feature's own intended behavior) -
+consistent with Section 8's "fix a real bug found in the current
+module" step, the same standard already applied to every other finding
+this session.
+
+**Effect on thesis chapters:** Chapter 4/5's robustness discussion needs
+a *correction*, not just an addition: the 2026-09-10 entry's claim that
+native-crash risk through `main.py` "looks near-zero" no longer holds
+unqualified - it should be restated as "not reproduced on the project's
+first four real repos, but real and reachable on a sufficiently large,
+complex real codebase," with Syncope as the concrete example and the
+supervisor's correct behavior as the reason this is a robustness data
+point, not an unhandled failure. Chapter 5's CWE-284/CWE-20 evaluation
+gains its first real (not just unit-tested) cross-framework validation
+of the interface-widening design, and should report the double-counting
+fix as evidence the evaluation process itself (not just Layer 1's
+detection logic) is being actively stress-tested against real code, not
+only measured by finding counts. Chapter 5's CWE-798 evaluation gains a
+second real-world false-positive-reduction entry in the same lineage as
+the algorithm-name and placeholder-marker fixes, with an honestly-stated
+partial scope (9 of 20, not all 20).
+
+**Freeze/handoff:** Findings 3 and 4 (the CWE-798 and CWE-284 code
+changes) were built and fixed in this same session that found them -
+per this project's own "build and QA sessions should be separate" rule
+(Section 11), recommend a fresh session independently QA both before
+either is treated as settled, the same discipline already applied to
+every other fix this session. Finding 2 (the crash) needs no further
+build action, only the documentation correction above. Finding 1 needs
+no action - it is a confirmation, not a gap.
