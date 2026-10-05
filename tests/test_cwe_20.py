@@ -285,6 +285,47 @@ def test_detect_in_java_finds_unvalidated_body_inherited_through_a_two_level_int
     assert findings[0].identifier == "owner"
 
 
+def test_detect_in_java_inherits_an_interface_through_a_superclass_without_redeclaring_it(
+    tmp_path: Path,
+) -> None:
+    """Found by independent QA on CWE-284's equivalent, confirmed to
+    affect CWE-20 too since both share the same interface-widening
+    machinery: a class extending an abstract base that implements an
+    interface, without *also* explicitly re-declaring ``implements``
+    itself, must still inherit the interface's ``@RequestBody``
+    annotation through the superclass chain."""
+    (tmp_path / "OwnersApi.java").write_text(_OWNERS_API_NO_VALID_JAVA)
+    (tmp_path / "AbstractBase.java").write_text(
+        "public abstract class AbstractBase implements OwnersApi {\n"
+        "    public abstract void updateOwner(int id, Owner owner);\n"
+        "}\n"
+    )
+    controller_file = tmp_path / "OwnerController.java"
+    controller_file.write_text(
+        "public class OwnerController extends AbstractBase {\n"
+        "    @Override\n"
+        "    public void updateOwner(int id, Owner owner) {}\n"
+        "}\n"
+    )
+    parsed = (
+        parse_file(tmp_path / "OwnersApi.java"),
+        parse_file(tmp_path / "AbstractBase.java"),
+        parse_file(controller_file),
+    )
+    controller_result = parsed[2]
+    method_index, param_index = _build_indexes(*parsed)
+    hierarchy = build_interface_hierarchy_index(parsed)
+
+    # Without the superclass-aware hierarchy, the controller never
+    # re-declares `implements OwnersApi` itself, so it's invisible.
+    assert detect_in_java(controller_result, method_index, param_index) == ()
+
+    findings = detect_in_java(controller_result, method_index, param_index, hierarchy)
+
+    assert len(findings) == 1
+    assert findings[0].identifier == "owner"
+
+
 def test_detect_in_java_adds_caveat_when_interface_parameter_has_validation(
     tmp_path: Path,
 ) -> None:

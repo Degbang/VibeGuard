@@ -73,7 +73,7 @@ from typing import TypeAlias
 
 import javalang
 
-from vibeguard.layer1_static.ast_parser import ParsedFile
+from vibeguard.layer1_static.ast_parser import ParsedClass, ParsedFile
 
 InterfaceMethodAnnotations = Mapping[tuple[str, str], tuple[str, ...]]
 InterfaceParameterAnnotations = Mapping[tuple[str, str, int], tuple[str, ...]]
@@ -260,27 +260,60 @@ def build_interface_parameter_index(
     }
 
 
+def _direct_ancestors(parsed_class: ParsedClass) -> tuple[str, ...]:
+    """A type's own direct ``implements``/interface-``extends`` list,
+    plus its ``superclass`` (class ``extends``) if it has one, as a
+    single flat tuple of names to walk toward.
+
+    Found missing by independent QA, logged as a separate limitation
+    (not fixed at the time): a class's own ``interfaces`` field only
+    ever holds what it *directly* implements - ``class RealController
+    extends AbstractBase`` (where ``AbstractBase implements
+    SomeInterface``), without ``RealController`` *also* explicitly
+    re-declaring ``implements SomeInterface`` itself, was invisible to
+    the whole interface-widening feature family, since nothing ever
+    consulted the ``extends``/superclass chain, only ``implements``.
+    Treating the superclass as one more edge to walk - exactly like an
+    interface's own further ``extends`` - lets the existing, already
+    bounded and cycle-safe ``_resolve_transitive_interfaces`` walk
+    discover an ancestor's interfaces without any new algorithm: the
+    walk doesn't care whether an edge came from ``implements`` or
+    ``extends``, and ``build_interface_method_index`` already indexes
+    every top-level type uniformly regardless of whether it's a class
+    or an interface, so looking up a superclass name in it is already
+    meaningful.
+    """
+    if parsed_class.superclass is None:
+        return parsed_class.interfaces
+    return (*parsed_class.interfaces, parsed_class.superclass)
+
+
 def build_interface_hierarchy_index(parsed_files: Iterable[ParsedFile]) -> InterfaceHierarchy:
-    """Index every top-level type's own *direct* ``implements``/``extends`` list.
+    """Index every top-level type's own *direct* ``implements``/``extends``
+    list, plus its superclass (see ``_direct_ancestors``).
 
     Used by ``top_level_interfaces_by_type_name`` to walk past a
     directly-implemented interface to whatever *that* interface itself
-    extends - found necessary by direct reproduction: a concrete class
-    implementing ``PetsApi``, where ``PetsApi extends BaseApi`` and the
-    real ``@GetMapping`` lives on ``BaseApi``, was previously invisible
-    entirely, since only the single directly-implemented interface was
-    ever checked. This is a project-wide index (unlike
-    ``top_level_interfaces_by_type_name``, which is per-file) because the
-    interface being extended is very often declared in a different file
-    than the one implementing it.
+    extends, and past a class's own superclass to whatever *that*
+    superclass itself implements or extends - found necessary by direct
+    reproduction: a concrete class implementing ``PetsApi``, where
+    ``PetsApi extends BaseApi`` and the real ``@GetMapping`` lives on
+    ``BaseApi``, was previously invisible entirely, since only the
+    single directly-implemented interface was ever checked - and
+    likewise for a class extending an abstract base that implements an
+    interface, never checked at all before the superclass edge was
+    added. This is a project-wide index (unlike
+    ``top_level_interfaces_by_type_name``, which is per-file) because
+    the interface/superclass being extended is very often declared in a
+    different file than the one implementing/extending it.
 
     Args:
         parsed_files: Every successfully-parsed Java file from one scan.
 
     Returns:
         A mapping from each unambiguous top-level type name to its own
-        direct ``interfaces`` list, as ``ParsedClass`` already resolves
-        it. Subject to the same ambiguous-simple-type-name exclusion as
+        direct ancestors (interfaces plus superclass). Subject to the
+        same ambiguous-simple-type-name exclusion as
         ``build_interface_method_index`` - an ambiguous name cannot be
         walked past safely, since which type's own further ``extends``
         list it would be referring to is not knowable, so the walk
@@ -288,7 +321,7 @@ def build_interface_hierarchy_index(parsed_files: Iterable[ParsedFile]) -> Inter
     """
     ambiguous_type_names, materialized = _collect_ambiguous_type_names(parsed_files)
     return {
-        parsed_class.name: parsed_class.interfaces
+        parsed_class.name: _direct_ancestors(parsed_class)
         for parsed_file in materialized
         for parsed_class in parsed_file.classes
         if parsed_class.name not in ambiguous_type_names
@@ -356,7 +389,7 @@ def build_implementors_index(parsed_files: Iterable[ParsedFile]) -> Mapping[str,
             ):
                 continue
             for interface_name in _resolve_transitive_interfaces(
-                parsed_class.interfaces, hierarchy
+                _direct_ancestors(parsed_class), hierarchy
             ):
                 implementors.setdefault(interface_name, []).append(parsed_class.name)
     return {name: tuple(types) for name, types in implementors.items()}
@@ -365,16 +398,25 @@ def build_implementors_index(parsed_files: Iterable[ParsedFile]) -> Mapping[str,
 def _resolve_transitive_interfaces(
     direct_interfaces: tuple[str, ...], hierarchy: InterfaceHierarchy
 ) -> tuple[str, ...]:
-    """Expand a type's direct interfaces to the full ancestor closure.
+    """Expand a type's direct ancestors (interfaces plus superclass, see
+    ``_direct_ancestors``) to the full ancestor closure.
 
     A breadth-first walk from ``direct_interfaces``, following each
-    interface's own further ``extends`` list (via ``hierarchy``) up to
+    ancestor's own further ``implements``/``extends`` list (via
+    ``hierarchy``, which also includes superclass edges - see
+    ``build_interface_hierarchy_index``) up to
     ``_MAX_INTERFACE_HIERARCHY_DEPTH`` hops - the same bounded,
     cycle-safe shape as CWE-1035's parent-POM chain walk, for the same
     reason: this indexes untrusted, AI-generated source, and a malformed
     or adversarial mutual-``extends`` cycle (not valid Java, but not
     assumed impossible either) must terminate rather than hang or recurse
-    without bound.
+    without bound. The name says "interfaces" for historical reasons
+    (that was this walk's original scope); the closure it returns may
+    also include ancestor *class* names now that superclass edges are
+    included, which is intentional - ``build_interface_method_index``
+    already indexes every top-level type uniformly regardless of
+    whether it's a class or an interface, so looking up a superclass
+    name in it is already meaningful.
     """
     closure: list[str] = []
     seen: set[str] = set()
@@ -397,7 +439,7 @@ def top_level_interfaces_by_type_name(
     parsed_file: ParsedFile,
     hierarchy: InterfaceHierarchy = EMPTY_INTERFACE_HIERARCHY,
 ) -> Mapping[str, tuple[str, ...]]:
-    """Map this file's own top-level type names to their effective interfaces.
+    """Map this file's own top-level type names to their effective ancestors.
 
     Used to look up what a method's *top-level* enclosing type
     implements, using exactly the same resolution Layer 1's flattened
@@ -405,22 +447,29 @@ def top_level_interfaces_by_type_name(
     transitively through ``hierarchy`` (see
     ``_resolve_transitive_interfaces``) so a multi-level interface
     ``extends`` chain is visible, not just the single directly-implemented
-    interface. A nested class's name is absent from this file's
-    ``ParsedFile.classes`` by design, so looking up a nested enclosing
-    type's name here correctly finds nothing rather than something wrong.
+    interface - and, since ``_direct_ancestors`` also seeds the walk with
+    the type's own ``superclass``, a class extending an abstract (or
+    concrete) base that itself implements an interface is visible too,
+    even without re-declaring ``implements`` itself. A nested class's
+    name is absent from this file's ``ParsedFile.classes`` by design, so
+    looking up a nested enclosing type's name here correctly finds
+    nothing rather than something wrong.
 
     Args:
         parsed_file: One successfully-parsed Java file.
         hierarchy: A project-wide index (see
             ``build_interface_hierarchy_index``) of every type's own
-            direct interfaces, used to walk past the directly-implemented
-            interface to whatever it itself extends. Defaults to empty,
-            so a caller with no project-wide context sees only the
-            direct, single-hop interfaces - the exact pre-existing
-            behavior, preserved for backward compatibility.
+            direct ancestors, used to walk past a directly-implemented
+            interface to whatever it itself extends, and past a
+            superclass to whatever *it* itself implements or extends.
+            Defaults to empty, so a caller with no project-wide context
+            sees only the direct, single-hop ancestors - the exact
+            pre-existing behavior, preserved for backward compatibility.
     """
     return {
-        parsed_class.name: _resolve_transitive_interfaces(parsed_class.interfaces, hierarchy)
+        parsed_class.name: _resolve_transitive_interfaces(
+            _direct_ancestors(parsed_class), hierarchy
+        )
         for parsed_class in parsed_file.classes
     }
 

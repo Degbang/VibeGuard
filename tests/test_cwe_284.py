@@ -1074,13 +1074,12 @@ def test_deduplicate_interface_implementation_findings_collapses_via_a_real_conc
     tmp_path: Path,
 ) -> None:
     """Once a genuinely concrete class exists - even one extending an
-    abstract intermediate class - the interface's own finding still
-    correctly collapses against it. (The abstract class's own finding
-    does not also collapse here: that would require the dedup
-    mechanism to walk a *class's* ``extends``/superclass chain, which
-    is a separate, pre-existing limitation of the interface-widening
-    feature as a whole - found by this same QA pass, logged separately,
-    not fixed as part of this change.)"""
+    abstract intermediate class - every ancestor's finding (the
+    interface's and the abstract base's) correctly collapses against
+    it. This used to leave the abstract base's own finding stranded -
+    closed by the superclass-widening fix (``_direct_ancestors``),
+    which makes ``build_implementors_index`` walk a class's
+    ``extends``/superclass chain too, not just ``implements``."""
     (tmp_path / "A.java").write_text(
         "import org.springframework.web.bind.annotation.GetMapping;\n"
         "public interface A {\n"
@@ -1116,12 +1115,150 @@ def test_deduplicate_interface_implementation_findings_collapses_via_a_real_conc
 
     deduplicated = deduplicate_interface_implementation_findings(findings, files)
 
-    # A's finding collapses against the real concrete implementor;
-    # AbstractBase's own finding is a known, separately-logged limitation.
-    assert {f.file_path.name for f in deduplicated} == {
+    assert len(deduplicated) == 1
+    assert deduplicated[0].file_path.name == "RealController.java"
+
+
+# -- Superclass-widening ------------------------------------------------------
+#
+# Found by independent QA, logged separately, now fixed: the interface-
+# widening mechanism only ever read a type's own `interfaces` field
+# (direct implements/interface-extends) - it never walked a *class's*
+# `extends`/superclass chain. A concrete class extending an abstract base
+# that itself implements an interface, without *also* explicitly
+# re-declaring `implements` itself, was invisible to the whole feature
+# family (CWE-284 and CWE-20 alike), not just this dedup mechanism.
+
+
+def test_detect_in_java_inherits_an_interface_through_a_superclass_without_redeclaring_it(
+    tmp_path: Path,
+) -> None:
+    """The real gap: ``RealController extends AbstractBase`` alone, with
+    no explicit ``implements A`` on ``RealController`` itself, must
+    still inherit ``A``'s annotation - this used to produce zero
+    findings at all for ``RealController``."""
+    (tmp_path / "A.java").write_text(
+        "import org.springframework.web.bind.annotation.GetMapping;\n"
+        "public interface A {\n"
+        '    @GetMapping("/foo")\n'
+        "    String foo(int id);\n"
+        "}\n"
+    )
+    (tmp_path / "AbstractBase.java").write_text(
+        "public abstract class AbstractBase implements A {\n"
+        "    public abstract String foo(int id);\n"
+        "}\n"
+    )
+    controller_file = tmp_path / "RealController.java"
+    controller_file.write_text(
+        "public class RealController extends AbstractBase {\n"
+        "    @Override\n"
+        '    public String foo(int id) { return "x"; }\n'
+        "}\n"
+    )
+    files = (
+        parse_file(tmp_path / "A.java"),
+        parse_file(tmp_path / "AbstractBase.java"),
+        parse_file(controller_file),
+    )
+    index = build_interface_method_index(files)
+    hierarchy = build_interface_hierarchy_index(files)
+
+    controller_result = next(f for f in files if f.path.name == "RealController.java")
+    findings = detect_in_java(controller_result, index, hierarchy)
+
+    assert len(findings) == 1
+    assert findings[0].identifier == "foo"
+
+
+def test_deduplicate_interface_implementation_findings_collapses_a_superclass_chain(
+    tmp_path: Path,
+) -> None:
+    """End to end: with the superclass edge included, every ancestor's
+    redundant finding (the interface's and the abstract base's) now
+    collapses into the real concrete subclass's single finding, even
+    though ``RealController`` never explicitly re-declares
+    ``implements A`` itself."""
+    (tmp_path / "A.java").write_text(
+        "import org.springframework.web.bind.annotation.GetMapping;\n"
+        "public interface A {\n"
+        '    @GetMapping("/foo")\n'
+        "    String foo(int id);\n"
+        "}\n"
+    )
+    (tmp_path / "AbstractBase.java").write_text(
+        "public abstract class AbstractBase implements A {\n"
+        "    public abstract String foo(int id);\n"
+        "}\n"
+    )
+    controller_file = tmp_path / "RealController.java"
+    controller_file.write_text(
+        "public class RealController extends AbstractBase {\n"
+        "    @Override\n"
+        '    public String foo(int id) { return "x"; }\n'
+        "}\n"
+    )
+    files = (
+        parse_file(tmp_path / "A.java"),
+        parse_file(tmp_path / "AbstractBase.java"),
+        parse_file(controller_file),
+    )
+    index = build_interface_method_index(files)
+    hierarchy = build_interface_hierarchy_index(files)
+
+    findings = tuple(f for pf in files for f in detect_in_java(pf, index, hierarchy))
+    assert {f.file_path.name for f in findings} == {
+        "A.java",
         "AbstractBase.java",
         "RealController.java",
     }
+
+    deduplicated = deduplicate_interface_implementation_findings(findings, files)
+
+    assert len(deduplicated) == 1
+    assert deduplicated[0].file_path.name == "RealController.java"
+
+
+def test_detect_in_java_inherits_an_interface_through_a_multi_level_superclass_chain(
+    tmp_path: Path,
+) -> None:
+    """A two-level class-extends chain (``C extends B extends A``, where
+    ``B implements SomeInterface``) must also resolve - confirms the
+    walk follows superclass edges transitively, not just one hop."""
+    (tmp_path / "SomeInterface.java").write_text(
+        "import org.springframework.web.bind.annotation.GetMapping;\n"
+        "public interface SomeInterface {\n"
+        '    @GetMapping("/foo")\n'
+        "    String foo(int id);\n"
+        "}\n"
+    )
+    (tmp_path / "B.java").write_text(
+        "public abstract class B implements SomeInterface {\n"
+        "    public abstract String foo(int id);\n"
+        "}\n"
+    )
+    (tmp_path / "A.java").write_text("public abstract class A extends B {\n" "}\n")
+    controller_file = tmp_path / "C.java"
+    controller_file.write_text(
+        "public class C extends A {\n"
+        "    @Override\n"
+        '    public String foo(int id) { return "x"; }\n'
+        "}\n"
+    )
+    files = (
+        parse_file(tmp_path / "SomeInterface.java"),
+        parse_file(tmp_path / "B.java"),
+        parse_file(tmp_path / "A.java"),
+        parse_file(controller_file),
+    )
+    index = build_interface_method_index(files)
+    hierarchy = build_interface_hierarchy_index(files)
+
+    controller_result = next(f for f in files if f.path.name == "C.java")
+    findings = detect_in_java(controller_result, index, hierarchy)
+
+    assert len(findings) == 1
+    assert findings[0].identifier == "foo"
 
 
 def test_deduplicate_interface_implementation_findings_leaves_other_cwes_untouched(
