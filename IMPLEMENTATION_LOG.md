@@ -8448,3 +8448,121 @@ interface/implementation dedup and CWE-798's self-referential-constant
 exclusion - are now frozen. Reopen either only if a later layer or a
 future real-repo QA pass surfaces a genuinely new, reproduced gap, per
 Section 8's freeze discipline.
+
+---
+
+## [2026-10-05] - Interface-widening now walks a class's own superclass/extends chain, not just implements
+**Status: DRAFT, pending student review.**
+
+**What the plan said:** This was named as the top priority in the "what
+is there to do" status review right after CWE-284's dedup mechanism
+and CWE-798's self-referential-constant exclusion were both frozen: a
+real, scoped, already-understood gap found and logged (not fixed)
+during the second and third QA rounds on the dedup mechanism - the
+interface-widening feature only ever reads a type's own `interfaces`
+field (direct `implements`/interface-`extends`), never a *class's*
+`extends`/superclass chain. `class RealController extends AbstractBase`
+(where `AbstractBase implements SomeInterface`), without
+`RealController` *also* explicitly re-declaring `implements
+SomeInterface` itself, was invisible to the whole feature family -
+CWE-284's endpoint/authorization widening and CWE-20's
+`@RequestBody`/`@Valid` widening alike, not just the CWE-284 dedup
+mechanism that happened to surface it.
+
+**What we actually did:** Added `_direct_ancestors(parsed_class)` in
+`_interface_annotations.py` - a type's own `interfaces` plus its
+`superclass` (if any), as a single flat tuple of edges. Used this as
+the seed/edge-set everywhere the existing bounded, cycle-safe
+transitive walk (`_resolve_transitive_interfaces`) already runs:
+`build_interface_hierarchy_index` (so an ancestor's own further edges,
+reached via *either* `implements` or `extends`, keep getting walked),
+`top_level_interfaces_by_type_name` (the per-file seed CWE-284/CWE-20
+both consult), and `build_implementors_index` (CWE-284's dedup reverse-
+lookup). No new algorithm was needed: the walk itself doesn't
+distinguish where an edge came from, and `build_interface_method_index`
+already indexes every top-level type uniformly regardless of whether
+it's a class or an interface, so looking up a superclass name in it was
+already meaningful - the only change was *feeding it* superclass edges
+at all.
+
+**A direct, confirmed consequence, not a separate fix:** this also
+closes the other previously-logged, separate limitation ("the abstract
+base's own finding doesn't collapse against the real concrete
+subclass's") - `build_implementors_index` reuses the identical walk, so
+a concrete subclass is now correctly recorded as an implementor of
+*every* ancestor in its superclass chain (not just what it explicitly
+implements), which means an abstract intermediate class's own redundant
+finding now correctly collapses too. Verified directly: the exact
+3-type chain (`interface A`, `abstract class AbstractBase implements A`,
+`class RealController extends AbstractBase` - no explicit `implements A`
+on `RealController`) now produces exactly one finding after dedup
+(`RealController`'s), where it previously produced zero findings for
+`RealController` at all (the original gap) even before considering
+dedup.
+
+**Tests/adversarial checks run:**
+- Verified live, before writing any test, that the exact QA-reported
+  gap is closed: `RealController extends AbstractBase` (no explicit
+  `implements`) now correctly produces a finding, and the 3-type chain
+  correctly collapses to exactly one finding after dedup.
+- Confirmed the identical fix benefits CWE-20 automatically (shared
+  mechanism, no separate code change) via direct script execution: a
+  `@RequestBody` parameter inherited through an abstract base's
+  superclass chain is now correctly found.
+- 4 new tests in `tests/test_cwe_284.py` (the core missing-finding case;
+  the full dedup collapse through a superclass chain without explicit
+  `implements`; a 2-level *class*-extends chain, `C extends A extends B
+  implements SomeInterface`, confirming the walk is genuinely
+  transitive through superclasses, not just one hop) and 1 new test in
+  `tests/test_cwe_20.py` (the parameter-level equivalent). One
+  pre-existing test
+  (`test_deduplicate_interface_implementation_findings_collapses_via_a_real_concrete_subclass`)
+  had its expected outcome corrected: it previously documented the
+  now-closed limitation as expected behavior (two surviving findings);
+  it now correctly expects full collapse to one.
+- Full `pytest -q`: 438 passed (was 433 before the one corrected test
+  plus 5 new ones); all four gates clean.
+- Re-verified against the real Syncope `idrepo` measurement: raw CWE-284
+  findings unchanged at 314 (the fix only affects *deduplication* and
+  *discovery* downstream of detection, not the raw per-file detection
+  count itself for files that already had an explicit `implements`);
+  the post-dedup count moved from 170 to 164 - six more genuine
+  collapses now found, the expected, correct direction. Re-verified the
+  five pre-existing `.qa-repos` entries are unaffected (still sum to
+  270 - none of them happen to use this specific class-extends-without-
+  redeclaring-implements pattern).
+
+**Remaining limitations:** The walk is still scoped to top-level types
+only (per `ParsedFile.classes`'s own documented scope), same as every
+other part of this feature family. CWE-20's benefit from this fix was
+verified directly but received only one new regression test (mirroring
+CWE-284's, not the full depth of CWE-284's own four new tests) -
+proportionate to the fact that this is shared, already-tested
+machinery, not a second independent implementation.
+
+**Why:** This was the explicitly top-recommended next item in the
+post-freeze status review specifically because it was already fully
+scoped and understood (found and precisely characterized by two prior
+QA rounds, not a new investigation), lived entirely in code already
+deeply familiar from the same session's work, and - as it turned out -
+resolved two separately-logged limitations with one minimal, well-
+justified change rather than needing two separate fixes.
+
+**Effect on thesis chapters:** Chapter 4 should describe
+`_direct_ancestors` as completing the interface-widening feature's
+ancestor-resolution model (interfaces *and* superclasses, not just
+interfaces), and Chapter 5 should update the CWE-284 dedup numbers for
+the Syncope evaluation (170 → 164) with the reason why - a real,
+additional measured improvement from this same real-repo evaluation
+track, not a separate anecdote.
+
+**Freeze/handoff:** This was built and fixed in a single session
+without an intervening QA pass, unlike every other fix from this same
+Apache Syncope evaluation track. Per Section 11, recommend a fresh,
+independent QA pass before this is treated as settled - the superclass
+walk's interaction with multi-level chains, diamond-shaped class/
+interface combinations, and the ambiguous-simple-name exclusion (now
+applied to superclass names too, not just interface names) are the
+most likely places a subtle bug could still hide, consistent with every
+other bounded-walk feature in this codebase needing at least one
+independent pass before being trusted.
