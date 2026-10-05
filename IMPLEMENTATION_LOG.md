@@ -8402,3 +8402,49 @@ fixed). Recommend a **fourth** independent QA pass before this is
 finally treated as settled - per Section 11, the same session should
 not self-certify a fix it just wrote, regardless of how many rounds
 have already run clean on adjacent parts of the same mechanism.
+
+**2026-10-05 fourth independent QA pass: clean. CWE-798's self-
+referential-constant exclusion is now frozen.**
+
+Before this round even started, the build session itself checked
+javalang's complete `TypeDeclaration` subclass list directly
+(`ClassDeclaration`/`InterfaceDeclaration`/`AnnotationDeclaration`/
+`EnumDeclaration` - exhaustively confirmed via `inspect.getmembers`,
+no fifth sibling type exists) and verified live that the one remaining
+sibling, `EnumDeclaration`, correctly should **not** be added to the
+implicit-static-final union: a plain field declared in an enum body is
+not implicitly `static final` under the JLS (only the enum *constants*
+themselves are, a different AST node entirely, never reachable via the
+`VariableDeclarator`/string-literal path this check operates on) -
+verified directly that `enum Foo { RED, GREEN; String
+PASSWORD_MANAGEMENT_LIST = "PASSWORD_MANAGEMENT_LIST"; }` still
+correctly produces a finding today.
+
+The fourth QA pass then specifically targeted the two shapes nobody had
+tried across the first three rounds - nested-type combinations (an
+annotation type nested inside an interface and vice versa, a 3-level
+mixed class/interface/annotation nesting with a self-referential
+constant at every level, confirming `nearest_enclosing_type` resolves
+the *nearest* type at each level rather than walking out to an
+ancestor) and enum-constant bodies (`enum Foo { RED { String password =
+"password"; }; }`, an anonymous-class-like construct - confirmed no
+crash, an ordinary field inside it is correctly still flagged, not
+implicitly treated as static-final, and an *explicitly* `static final`
+field inside the same body is still correctly excluded via the
+pre-existing explicit-modifier branch) - and found nothing. Also
+re-verified all four prior fixes together in a single combined file, on
+both parser paths, and re-confirmed the real Syncope `common` module
+count is still 11. Full suite: 434 passed; all four gates clean. No
+code changes were needed.
+
+**Freeze (CWE-798):** `_is_self_referential_constant`/
+`_is_static_final_field`/`nearest_enclosing_type` are now treated as
+settled, after four real bugs found and fixed across three independent
+QA rounds (bare-keyword suppression; concatenated-keyword-fragment
+compounds; implicit interface constants; implicit annotation-type
+constants) and a fourth round finding nothing further. Both of this
+session's major fixes from the Apache Syncope evaluation - CWE-284's
+interface/implementation dedup and CWE-798's self-referential-constant
+exclusion - are now frozen. Reopen either only if a later layer or a
+future real-repo QA pass surfaces a genuinely new, reproduced gap, per
+Section 8's freeze discipline.
