@@ -8566,3 +8566,50 @@ applied to superclass names too, not just interface names) are the
 most likely places a subtle bug could still hide, consistent with every
 other bounded-walk feature in this codebase needing at least one
 independent pass before being trusted.
+
+**2026-10-05 independent QA pass: the superclass-widening extension
+itself (items in scope for this commit) is correct - multi-level class
+chains, mixed interface/superclass chains, diamond reachability, the
+depth cap under mixed edge types, and CWE-20's benefit were all
+reproduced directly and held up. But the pass found a real, previously
+unlogged bug in a neighboring function this commit newly exercises
+more heavily: `build_implementors_index` applied the ambiguous-
+simple-name exclusion to the implementor *source* only, never to the
+ancestor *name* being registered against - so a class's `extends`
+edge naming an ambiguous type (two distinct, unrelated types sharing a
+simple name) could silently shadow the real same-named ancestor's
+finding, with no evidence of which same-named type the edge actually
+points at. QA confirmed this is **not new code from this commit** - it
+reproduces identically with plain interfaces and no superclass
+involvement at all, and was never caught by any of the three prior
+dedup QA rounds (which tested `is_interface`/abstract-exclusion bugs,
+not the ambiguity/dedup interaction). What this commit did was newly
+expose it more: superclass names (`AbstractBase`, `BaseController`)
+collide far more often in real enterprise Java than specific interface
+names do, which is exactly the shape this commit started feeding into
+the unguarded path.
+
+**Fixed the same day, in commit `027541b`**: `build_implementors_index`
+now also skips registering an ancestor name that is itself ambiguous,
+matching the identical guard `build_interface_hierarchy_index` and
+`build_interface_method_index` already apply to their own keys.
+Reproduced QA's exact scenario directly (two unrelated `SharedBase`
+classes, one a real ancestor implementing a real interface, one
+unrelated) and confirmed the real ancestor's finding now correctly
+survives instead of being silently dropped. Added one new regression
+test. Confirmed zero effect on the real Syncope `idrepo` measurement
+(zero ambiguous type names there, so still 314 raw / 164 after dedup)
+and on the five pre-existing `.qa-repos` entries (still sum to 270).
+Full suite: 439 passed; all four gates clean.
+
+**Freeze/handoff:** The core superclass-widening extension (everything
+this commit's QA pass was specifically asked to check) is confirmed
+correct and does not need a further round on that account. The
+ambiguous-name dedup fix just made, however, is itself a fresh,
+same-day, unreviewed change - per Section 11, recommend one more
+independent QA pass specifically targeting it (and, while there,
+confirming `top_level_interfaces_by_type_name`'s annotation-widening
+side continues to degrade safely through an ambiguous *superclass*
+name the same way it was already confirmed to for ambiguous interface
+names) before the interface-widening/dedup feature family as a whole
+is treated as fully settled.
