@@ -9,6 +9,7 @@ import javalang
 from vibeguard.layer1_static.ast_parser import parse_file
 from vibeguard.layer1_static.rules._finding import Finding
 from vibeguard.layer1_static.rules._interface_annotations import (
+    build_implementors_index,
     build_interface_hierarchy_index,
     build_interface_method_index,
 )
@@ -1259,6 +1260,80 @@ def test_detect_in_java_inherits_an_interface_through_a_multi_level_superclass_c
 
     assert len(findings) == 1
     assert findings[0].identifier == "foo"
+
+
+def test_deduplicate_interface_implementation_findings_refuses_an_ambiguous_superclass_name(
+    tmp_path: Path,
+) -> None:
+    """Found by independent QA: two distinct, unrelated classes sharing
+    a simple name (``SharedBase``) - one a genuine ancestor implementing
+    a real interface, one completely unrelated - must never let a
+    concrete class's ``extends SharedBase`` edge silently shadow the
+    real ancestor's finding. Only the *source* side of this collision
+    was previously checked (``build_implementors_index`` skipped an
+    ambiguous class as an implementor), not the *target* name being
+    registered against - so ``SharedBase`` itself, despite being
+    ambiguous, was still used as a dedup key with no actual evidence of
+    which same-named type a given ``extends`` edge really points at.
+    Superclass names collide far more often in real enterprise Java
+    (``BaseController``, ``AbstractBase``) than specific interface
+    names do, which is exactly what this commit's superclass-widening
+    fix newly starts feeding into this same path."""
+    (tmp_path / "RealInterface.java").write_text(
+        "import org.springframework.web.bind.annotation.GetMapping;\n"
+        "public interface RealInterface {\n"
+        '    @GetMapping("/foo")\n'
+        "    String foo(int id);\n"
+        "}\n"
+    )
+    (tmp_path / "SharedBaseA.java").write_text(
+        "public abstract class SharedBase implements RealInterface {\n"
+        "    public abstract String foo(int id);\n"
+        "}\n"
+    )
+    (tmp_path / "SharedBaseB.java").write_text(
+        "public class SharedBase {\n"  # distinct, unrelated declaration
+        "    public void unrelatedMethod() {}\n"
+        "}\n"
+    )
+    controller_file = tmp_path / "RealController.java"
+    controller_file.write_text(
+        "import org.springframework.web.bind.annotation.GetMapping;\n"
+        "public class RealController extends SharedBase {\n"
+        "    @Override\n"
+        '    @GetMapping("/foo")\n'
+        '    public String foo(int id) { return "x"; }\n'
+        "}\n"
+    )
+    files = (
+        parse_file(tmp_path / "RealInterface.java"),
+        parse_file(tmp_path / "SharedBaseA.java"),
+        parse_file(tmp_path / "SharedBaseB.java"),
+        parse_file(controller_file),
+    )
+    index = build_interface_method_index(files)
+    hierarchy = build_interface_hierarchy_index(files)
+    implementors = build_implementors_index(files)
+
+    # The ambiguous name must never be usable as a dedup key at all.
+    assert "SharedBase" not in implementors
+
+    findings = tuple(f for pf in files for f in detect_in_java(pf, index, hierarchy))
+    assert {f.file_path.name for f in findings} == {
+        "RealInterface.java",
+        "SharedBaseA.java",
+        "RealController.java",
+    }
+
+    deduplicated = deduplicate_interface_implementation_findings(findings, files)
+
+    # SharedBaseA's finding must survive - there is no actual evidence
+    # RealController extends SharedBaseA rather than SharedBaseB.
+    assert {f.file_path.name for f in deduplicated} == {
+        "RealInterface.java",
+        "SharedBaseA.java",
+        "RealController.java",
+    }
 
 
 def test_deduplicate_interface_implementation_findings_leaves_other_cwes_untouched(

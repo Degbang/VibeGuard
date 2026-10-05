@@ -362,7 +362,7 @@ def build_implementors_index(parsed_files: Iterable[ParsedFile]) -> Mapping[str,
         interface), but is never itself recorded as if it were a
         deploying implementor.
 
-        Independent QA found two real bugs in earlier versions of this
+        Independent QA found three real bugs in earlier versions of this
         function that didn't draw this line precisely enough: (1) two
         interfaces with no concrete implementor anywhere in the scan
         (``interface B extends A``, nothing implementing either) were
@@ -372,10 +372,21 @@ def build_implementors_index(parsed_files: Iterable[ParsedFile]) -> Mapping[str,
         the scan, structurally the same problem one level further down
         the hierarchy - was still being recorded as a genuine
         implementor, since ``is_interface`` alone doesn't distinguish a
-        concrete class from an abstract one. Both cases silently dropped
-        a genuine, undeployed finding with no actual evidence either
-        type is ever deployed - the opposite of this feature's own
-        stated fail-closed guarantee.
+        concrete class from an abstract one; (3) the ambiguous-simple-
+        name exclusion was applied to the implementor *source*
+        (``parsed_class.name``) but not to the ancestor name being
+        registered *against* - a class whose ``extends``/``implements``
+        edge happens to name an ambiguous type (two distinct, unrelated
+        types sharing that simple name - common for generically-named
+        superclasses like ``BaseController``/``AbstractBase`` in real
+        enterprise Java, unlike specific interface names) was silently
+        registered as that ambiguous name's implementor with no actual
+        evidence of *which* same-named type it really extends, letting
+        the ambiguous name's own (possibly unrelated) finding collapse
+        against it regardless. All three cases silently dropped a
+        genuine, undeployed finding with no actual evidence either type
+        is ever deployed - the opposite of this feature's own stated
+        fail-closed guarantee.
     """
     ambiguous_type_names, materialized = _collect_ambiguous_type_names(parsed_files)
     hierarchy = build_interface_hierarchy_index(materialized)
@@ -391,6 +402,8 @@ def build_implementors_index(parsed_files: Iterable[ParsedFile]) -> Mapping[str,
             for interface_name in _resolve_transitive_interfaces(
                 _direct_ancestors(parsed_class), hierarchy
             ):
+                if interface_name in ambiguous_type_names:
+                    continue
                 implementors.setdefault(interface_name, []).append(parsed_class.name)
     return {name: tuple(types) for name, types in implementors.items()}
 
