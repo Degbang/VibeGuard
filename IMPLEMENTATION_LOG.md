@@ -8906,3 +8906,43 @@ the human-baseline comparison's flagged Layer 4 miss (Case 17,
 `ai-admin-report-export-service`), Gradle support for CWE-1035, and
 the Layer 4 feature-engineering methodology question remain open, and
 are the student's own call on sequencing.
+
+**2026-10-10 independent QA pass: clean. Freeze:
+`build_http_client_type_names` and its wiring into CWE-284/CWE-20.**
+
+A fresh session (no memory of the build above) read `CLAUDE.md` and
+this entry in full first, then re-derived every claim above
+independently rather than trusting the prose - re-ran
+`quarkus-super-heroes-20260722b`'s before/after diff itself (3 findings
+both times, 0 removed/added, confirming the "already covered by the
+pre-existing direct case" claim); wrote a fresh 3-file, 2-hop ancestor
+chain repro (`Marker` extends `Mid` extends `Base`) and confirmed
+`build_http_client_type_names` taints the full closure, not just the
+direct parent, on *both* parser paths (forced the Tree-sitter fallback
+with a `record`-bearing variant); reproduced the "direct type is also a
+real `@RestController` for something else" edge case suggested as a
+plausible failure mode and found no misbehavior - tainting only ever
+walks a marker's ancestors, never its implementors, so an unrelated
+concrete class is never wrongly suppressed; rebuilt the ambiguous-name
+repro from scratch (two distinct `Shared` interfaces, one real, one a
+Feign base) and confirmed the fail-closed direction directly - the
+ambiguous name is excluded from tainting, and critically the *unrelated
+Feign base's own finding is not suppressed either*, i.e. the guard errs
+toward a noisy duplicate, never toward silently dropping a real one;
+confirmed CWE-20's new check sits in the structurally identical
+position on both the javalang and Tree-sitter paths by reading both in
+full, not just the diff hunk. Re-ran the full suite and all four gates
+independently: 447 passed, `black`/`ruff`/`mypy`/`git diff --check` all
+clean. Found two cosmetic (non-blocking) nits, both fixed the same day:
+the log's test-count breakdown undercounted `test_cwe_284.py` by one
+(5 new tests, not 4 - the aggregate "8 new, 447 total" was already
+correct) and the module docstring didn't yet mention the new function.
+No functional defect found anywhere.
+
+**Freeze: this fix is now settled** per Section 8's discipline - reopen
+only if a later layer or a future real-repo QA pass surfaces a
+genuinely new, reproduced gap. Section 7's next-work list is unchanged:
+the human-baseline comparison's flagged Layer 4 miss (Case 17,
+`ai-admin-report-export-service`), Gradle support for CWE-1035, and the
+Layer 4 feature-engineering methodology question remain open, student's
+own call on sequencing.
