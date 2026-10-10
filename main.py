@@ -44,6 +44,7 @@ from vibeguard.layer1_static.config_parser import (
     is_conventional_config_path,
     parse_config_file,
 )
+from vibeguard.layer1_static.gradle_parser import ParsedGradleFile, parse_gradle_file
 from vibeguard.layer1_static.pom_parser import (
     ParsedPomFile,
     parse_pom_file,
@@ -65,6 +66,7 @@ from vibeguard.layer5_report import build_project_risk_report, render_console_re
 
 _JAVA_SUFFIX = ".java"
 _POM_FILENAME = "pom.xml"
+_GRADLE_FILENAMES = frozenset({"build.gradle", "build.gradle.kts"})
 _DEFAULT_MODEL_CONTRACT = (
     Path(__file__).resolve().parent / "data" / "labeled" / "layer4_random_forest_contract.json"
 )
@@ -95,8 +97,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{args.path} is not a file or directory", file=sys.stderr)
         return 1
 
-    if not result.java_files and not result.config_files and not result.pom_files:
-        print(f"No .java/config/pom.xml files found under {args.path}", file=sys.stderr)
+    if (
+        not result.java_files
+        and not result.config_files
+        and not result.pom_files
+        and not result.gradle_files
+    ):
+        print(
+            f"No .java/config/pom.xml/build.gradle files found under {args.path}",
+            file=sys.stderr,
+        )
         return 1
 
     if result.pom_files:
@@ -121,6 +131,8 @@ def main(argv: list[str] | None = None) -> int:
         _print_config_report(result.config_files)
     if result.pom_files:
         _print_pom_report(result.pom_files)
+    if result.gradle_files:
+        _print_gradle_report(result.gradle_files)
     if result.rejected_paths:
         _print_rejected_report(result.rejected_paths)
     if scored_findings:
@@ -130,9 +142,15 @@ def main(argv: list[str] | None = None) -> int:
     java_ok = all(r.status == ParseStatus.OK for r in result.java_files)
     config_ok = all(r.status == ParseStatus.OK for r in result.config_files)
     pom_ok = all(r.status == ParseStatus.OK for r in result.pom_files)
+    gradle_ok = all(r.status == ParseStatus.OK for r in result.gradle_files)
     return (
         0
-        if java_ok and config_ok and pom_ok and not result.rejected_paths and not scored_findings
+        if java_ok
+        and config_ok
+        and pom_ok
+        and gradle_ok
+        and not result.rejected_paths
+        and not scored_findings
         else 1
     )
 
@@ -176,6 +194,10 @@ def _run_rules(result: ScanResult) -> tuple[Finding, ...]:
         if pom_file.status != ParseStatus.OK:
             continue
         findings.extend(cwe_1035.detect_in_pom(pom_file))
+    for gradle_file in result.gradle_files:
+        if gradle_file.status != ParseStatus.OK:
+            continue
+        findings.extend(cwe_1035.detect_in_gradle(gradle_file))
     deduplicated_findings = cwe_284.deduplicate_interface_implementation_findings(
         tuple(findings), ok_java_files
     )
@@ -207,6 +229,19 @@ def _scan_single_file(resolved: Path, max_bytes: int, timeout_seconds: float) ->
             java_files=(),
             config_files=(),
             pom_files=(pom_result,),
+            gradle_files=(),
+            rejected_paths=(),
+        )
+    if resolved.name.lower() in _GRADLE_FILENAMES:
+        gradle_result = parse_gradle_file(
+            resolved, max_bytes=max_bytes, timeout_seconds=timeout_seconds
+        )
+        return ScanResult(
+            root=resolved,
+            java_files=(),
+            config_files=(),
+            pom_files=(),
+            gradle_files=(gradle_result,),
             rejected_paths=(),
         )
     if resolved.suffix.lower() == _JAVA_SUFFIX:
@@ -216,6 +251,7 @@ def _scan_single_file(resolved: Path, max_bytes: int, timeout_seconds: float) ->
             java_files=(java_result,),
             config_files=(),
             pom_files=(),
+            gradle_files=(),
             rejected_paths=(),
         )
     if resolved.suffix.lower() in CONFIG_FILE_SUFFIXES and is_conventional_config_path(resolved):
@@ -227,10 +263,16 @@ def _scan_single_file(resolved: Path, max_bytes: int, timeout_seconds: float) ->
             java_files=(),
             config_files=(config_result,),
             pom_files=(),
+            gradle_files=(),
             rejected_paths=(),
         )
     return ScanResult(
-        root=resolved, java_files=(), config_files=(), pom_files=(), rejected_paths=()
+        root=resolved,
+        java_files=(),
+        config_files=(),
+        pom_files=(),
+        gradle_files=(),
+        rejected_paths=(),
     )
 
 
@@ -242,8 +284,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
             "VibeGuard Layer 1: parse Java source (AST), conventional "
             "application config files "
             "(application*/bootstrap*/microprofile-config* in "
-            ".properties/.yml/.yaml form), and Maven pom.xml dependency "
-            "declarations, then run every CWE rule implemented so far "
+            ".properties/.yml/.yaml form), Maven pom.xml dependency "
+            "declarations, and (narrow heuristic - see gradle_parser.py) "
+            "Gradle build.gradle/build.gradle.kts dependency declarations, "
+            "then run every CWE rule implemented so far "
             "(CWE-798 hardcoded credentials, CWE-284 improper access "
             "control, CWE-287 improper authentication, CWE-20 improper "
             "input validation, CWE-1035 known-vulnerable components) "
@@ -257,7 +301,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "path",
         type=Path,
         help=(
-            "A single .java/pom.xml/conventional application config file "
+            "A single .java/pom.xml/build.gradle(.kts)/conventional "
+            "application config file "
             "(application*/bootstrap*/microprofile-config*), or a "
             "directory to scan recursively for all of the above."
         ),
@@ -369,6 +414,52 @@ def _print_pom_report(results: tuple[ParsedPomFile, ...]) -> None:
         console.print(
             f"{total_unresolved}/{total_dependencies} declared dependencies have no "
             "resolvable version (e.g. inherited from a parent BOM) and could not be "
+            "checked against CWE-1035's known-vulnerability list."
+        )
+
+
+def _print_gradle_report(results: tuple[ParsedGradleFile, ...]) -> None:
+    """Render a Rich table summarizing each Gradle build file's parse outcome.
+
+    Same "Unchecked" column as ``_print_pom_report``, for the same
+    reason - but expect it to be non-zero far more often here: unlike
+    Maven's ``${property}`` substitution (resolved locally when
+    possible), ``gradle_parser.py`` never resolves a variable, version
+    catalog accessor, or string-interpolated version at all (see its
+    own docstring) - every dependency using one of those shapes is
+    "unresolved" by this heuristic's design, not just when a parent POM
+    happens to be unavailable.
+    """
+    console = Console()
+    table = Table(title="VibeGuard Layer 1 - Gradle Build File Parse Report")
+    table.add_column("File")
+    table.add_column("Status")
+    table.add_column("Dependencies")
+    table.add_column("Unchecked (no resolvable version)")
+    table.add_column("Detail")
+
+    for result in results:
+        unresolved = sum(1 for dependency in result.dependencies if dependency.version is None)
+        table.add_row(
+            str(result.path),
+            result.status.value,
+            str(len(result.dependencies)),
+            str(unresolved) if result.dependencies else "-",
+            _summarize(result.error_message),
+        )
+
+    console.print(table)
+    ok_count = sum(1 for result in results if result.status == ParseStatus.OK)
+    console.print(f"{ok_count}/{len(results)} Gradle build files parsed OK")
+    total_dependencies = sum(len(result.dependencies) for result in results)
+    total_unresolved = sum(
+        1 for result in results for dependency in result.dependencies if dependency.version is None
+    )
+    if total_unresolved:
+        console.print(
+            f"{total_unresolved}/{total_dependencies} declared Gradle dependencies have no "
+            "resolvable version (variable/version-catalog/platform-only references are "
+            "never resolved by this heuristic - see gradle_parser.py) and could not be "
             "checked against CWE-1035's known-vulnerability list."
         )
 

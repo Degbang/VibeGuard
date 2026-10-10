@@ -1,7 +1,11 @@
 """CWE-1035: Using Components with Known Vulnerabilities.
 
-Cross-references Maven dependencies (via ``pom_parser.py``) against a
-small, curated, offline snapshot of well-known, publicly-documented
+Cross-references Maven dependencies (via ``pom_parser.py``) and, since
+2026-10-10, Gradle dependencies recognized by ``gradle_parser.py``'s
+deliberately narrow text heuristic (see that module's docstring for
+its scope and limitations - this rule's own checking logic below is
+unaware of which build tool a dependency came from, by design) against
+a small, curated, offline snapshot of well-known, publicly-documented
 Java library CVEs. Deliberately **not** a live lookup against
 OSV.dev/NVD/etc.: CLAUDE.md's non-negotiable constraint is "runs
 entirely locally... no external API calls for core scanning" - a
@@ -30,6 +34,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from vibeguard.layer1_static.gradle_parser import ParsedGradleFile
 from vibeguard.layer1_static.pom_parser import MavenDependency, ParsedPomFile
 from vibeguard.layer1_static.rules._finding import Finding
 
@@ -93,9 +98,27 @@ _VERSION_PREFIX_PATTERN = re.compile(r"^[\d.]+")
 
 def detect_in_pom(parsed_pom: ParsedPomFile) -> tuple[Finding, ...]:
     """Find declared Maven dependencies matching a known-vulnerable version."""
+    return _detect_in_dependencies(parsed_pom.path, parsed_pom.dependencies)
+
+
+def detect_in_gradle(parsed_gradle: ParsedGradleFile) -> tuple[Finding, ...]:
+    """Find declared Gradle dependencies matching a known-vulnerable version.
+
+    Identical check to ``detect_in_pom`` - ``gradle_parser.py`` already
+    reuses ``MavenDependency`` as its own dependency record precisely so
+    this rule's checking logic stays format-agnostic, needing only
+    group/artifact/version/line, never anything Maven- or Gradle-
+    specific.
+    """
+    return _detect_in_dependencies(parsed_gradle.path, parsed_gradle.dependencies)
+
+
+def _detect_in_dependencies(
+    file_path: Path, dependencies: tuple[MavenDependency, ...]
+) -> tuple[Finding, ...]:
     findings = []
-    for dependency in parsed_pom.dependencies:
-        finding = _check_dependency(parsed_pom.path, dependency)
+    for dependency in dependencies:
+        finding = _check_dependency(file_path, dependency)
         if finding is not None:
             findings.append(finding)
     return tuple(findings)

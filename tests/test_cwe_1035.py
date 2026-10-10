@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from vibeguard.layer1_static.gradle_parser import parse_gradle_file
 from vibeguard.layer1_static.pom_parser import parse_pom_file
-from vibeguard.layer1_static.rules.cwe_1035 import CWE_ID, detect_in_pom
+from vibeguard.layer1_static.rules.cwe_1035 import CWE_ID, detect_in_gradle, detect_in_pom
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -116,3 +117,56 @@ def test_detect_in_pom_handles_malformed_pom_gracefully(tmp_path: Path) -> None:
 
     assert parsed.dependencies == ()
     assert detect_in_pom(parsed) == ()
+
+
+def test_detect_in_gradle_finds_known_vulnerable_dependency(tmp_path: Path) -> None:
+    gradle_file = tmp_path / "build.gradle"
+    gradle_file.write_text(
+        "dependencies {\n" '    implementation "org.apache.logging.log4j:log4j-core:2.14.1"\n' "}\n"
+    )
+    parsed = parse_gradle_file(gradle_file)
+
+    findings = detect_in_gradle(parsed)
+
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding.cwe_id == CWE_ID
+    assert finding.identifier == "org.apache.logging.log4j:log4j-core"
+    assert finding.line == 2
+    assert "CVE-2021-44228" in finding.message
+
+
+def test_detect_in_gradle_does_not_flag_patched_version(tmp_path: Path) -> None:
+    gradle_file = tmp_path / "build.gradle"
+    gradle_file.write_text(
+        'dependencies {\n    implementation "org.apache.logging.log4j:log4j-core:2.17.1"\n}\n'
+    )
+    parsed = parse_gradle_file(gradle_file)
+
+    assert detect_in_gradle(parsed) == ()
+
+
+def test_detect_in_gradle_does_not_flag_an_unresolved_interpolated_version(
+    tmp_path: Path,
+) -> None:
+    """A variable-interpolated version is "unknown," never treated as
+    vulnerable - the same discipline as an unresolved Maven property."""
+    gradle_file = tmp_path / "build.gradle"
+    gradle_file.write_text(
+        "dependencies {\n"
+        '    implementation "org.apache.logging.log4j:log4j-core:$log4jVersion"\n'
+        "}\n"
+    )
+    parsed = parse_gradle_file(gradle_file)
+
+    assert detect_in_gradle(parsed) == ()
+
+
+def test_detect_in_gradle_finds_nothing_when_build_file_has_no_dependencies(
+    tmp_path: Path,
+) -> None:
+    gradle_file = tmp_path / "build.gradle"
+    gradle_file.write_text("plugins {\n    id 'java'\n}\n")
+    parsed = parse_gradle_file(gradle_file)
+
+    assert detect_in_gradle(parsed) == ()

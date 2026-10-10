@@ -1,11 +1,15 @@
-"""Layer 1 scanner: orchestrates ast_parser/config_parser/pom_parser across a directory tree.
+"""Layer 1 scanner: orchestrates ast_parser/config_parser/pom_parser/
+gradle_parser across a directory tree.
 
 Never executes or evaluates any content from a target file: Java source
 is only ever parsed into an AST via ``javalang``/Tree-sitter, config
 files are only ever parsed into key-value pairs via a hand-rolled
 reader (``.properties``) or PyYAML's ``SafeLoader`` (``.yml``/
-``.yaml``), and ``pom.xml`` is only ever parsed into an element tree
-via the stdlib ``xml.etree.ElementTree`` - none of these paths
+``.yaml``), ``pom.xml`` is only ever parsed into an element tree via
+the stdlib ``xml.etree.ElementTree``, and ``build.gradle``/
+``build.gradle.kts`` are only ever scanned as plain text via ``re``
+(see ``gradle_parser.py``'s own docstring for why this is a narrow
+heuristic, not a real Groovy/Kotlin parse) - none of these paths
 construct or run arbitrary code from the file being analysed.
 
 This module's one added responsibility beyond the individual parsers is
@@ -38,12 +42,14 @@ from vibeguard.layer1_static.config_parser import (
     is_conventional_config_path,
     parse_config_file,
 )
+from vibeguard.layer1_static.gradle_parser import ParsedGradleFile, parse_gradle_file
 from vibeguard.layer1_static.pom_parser import ParsedPomFile, parse_pom_file
 
 logger = logging.getLogger(__name__)
 
 _JAVA_SUFFIX = ".java"
 _POM_FILENAME = "pom.xml"
+_GRADLE_FILENAMES = frozenset({"build.gradle", "build.gradle.kts"})
 # Build output, dependency caches, and IDE metadata: never *production*
 # source. Build output contains verbatim *copies* of real source files
 # (e.g. Maven copies src/main/resources/*.properties into
@@ -99,6 +105,7 @@ class ScanResult:
     java_files: tuple[ParsedFile, ...]
     config_files: tuple[ParsedConfigFile, ...]
     pom_files: tuple[ParsedPomFile, ...]
+    gradle_files: tuple[ParsedGradleFile, ...]
     rejected_paths: tuple[RejectedPath, ...]
 
 
@@ -109,7 +116,7 @@ def scan_directory(
     timeout_seconds: float = DEFAULT_PARSE_TIMEOUT_SECONDS,
 ) -> ScanResult:
     """Recursively parse every ``.java``/``.properties``/``.yml``/``.yaml``/
-    ``pom.xml`` file under root.
+    ``pom.xml``/``build.gradle``/``build.gradle.kts`` file under root.
 
     Args:
         root: Directory to scan. Resolved to its canonical, symlink-free
@@ -139,6 +146,7 @@ def scan_directory(
     java_results: list[ParsedFile] = []
     config_results: list[ParsedConfigFile] = []
     pom_results: list[ParsedPomFile] = []
+    gradle_results: list[ParsedGradleFile] = []
     rejected: list[RejectedPath] = []
 
     for candidate in _discover_candidate_files(resolved_root):
@@ -149,6 +157,10 @@ def scan_directory(
         if candidate.name.lower() == _POM_FILENAME:
             pom_results.append(
                 parse_pom_file(candidate, max_bytes=max_bytes, timeout_seconds=timeout_seconds)
+            )
+        elif candidate.name.lower() in _GRADLE_FILENAMES:
+            gradle_results.append(
+                parse_gradle_file(candidate, max_bytes=max_bytes, timeout_seconds=timeout_seconds)
             )
         elif candidate.suffix.lower() == _JAVA_SUFFIX:
             java_results.append(
@@ -164,6 +176,7 @@ def scan_directory(
         java_files=tuple(java_results),
         config_files=tuple(config_results),
         pom_files=tuple(pom_results),
+        gradle_files=tuple(gradle_results),
         rejected_paths=tuple(rejected),
     )
 
@@ -218,7 +231,11 @@ def _discover_candidate_files(resolved_root: Path) -> list[Path]:
         ]
         for filename in filenames:
             candidate = dirpath_obj / filename
-            if filename.lower() == _POM_FILENAME or candidate.suffix.lower() == _JAVA_SUFFIX:
+            if (
+                filename.lower() == _POM_FILENAME
+                or filename.lower() in _GRADLE_FILENAMES
+                or candidate.suffix.lower() == _JAVA_SUFFIX
+            ):
                 matches.append(candidate)
             elif candidate.suffix.lower() in CONFIG_FILE_SUFFIXES and is_conventional_config_path(
                 candidate

@@ -33,7 +33,7 @@ def test_main_returns_nonzero_when_nothing_found(
     exit_code = main.main([str(tmp_path)])
 
     assert exit_code == 1
-    assert "No .java/config/pom.xml files found" in capsys.readouterr().err
+    assert "No .java/config/pom.xml/build.gradle files found" in capsys.readouterr().err
 
 
 def test_main_returns_zero_for_config_only_file_with_no_findings(tmp_path: Path) -> None:
@@ -123,7 +123,7 @@ def test_main_returns_nonzero_when_explicit_non_config_yaml_file_is_not_scanned(
     exit_code = main.main([str(openapi_file)])
 
     assert exit_code == 1
-    assert "No .java/config/pom.xml files found" in capsys.readouterr().err
+    assert "No .java/config/pom.xml/build.gradle files found" in capsys.readouterr().err
 
 
 def test_main_returns_nonzero_when_model_contract_dataset_is_missing(

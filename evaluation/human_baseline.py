@@ -297,6 +297,10 @@ def _run_all_rules(result: ScanResult) -> tuple[Finding, ...]:
         if pom_file.status != ParseStatus.OK:
             continue
         findings.extend(cwe_1035.detect_in_pom(pom_file))
+    for gradle_file in result.gradle_files:
+        if gradle_file.status != ParseStatus.OK:
+            continue
+        findings.extend(cwe_1035.detect_in_gradle(gradle_file))
     deduplicated_findings = cwe_284.deduplicate_interface_implementation_findings(
         tuple(findings), ok_java_files
     )

@@ -300,3 +300,42 @@ def test_scan_ignores_pom_xml_inside_target_directory(tmp_path: Path) -> None:
 
     assert len(result.pom_files) == 1
     assert result.pom_files[0].path == tmp_path.resolve() / "pom.xml"
+
+
+def test_scan_discovers_build_gradle_by_exact_filename(tmp_path: Path) -> None:
+    """build.gradle is matched by exact filename, like pom.xml, not by suffix."""
+    (tmp_path / "build.gradle").write_text(
+        "dependencies {\n" '    implementation "junit:junit:4.13.2"\n' "}\n"
+    )
+
+    result = scan_directory(tmp_path)
+
+    assert len(result.gradle_files) == 1
+    assert result.gradle_files[0].path.name == "build.gradle"
+    assert len(result.gradle_files[0].dependencies) == 1
+
+
+def test_scan_discovers_build_gradle_kts_by_exact_filename(tmp_path: Path) -> None:
+    """The Kotlin DSL variant is recognized too, independently of build.gradle."""
+    (tmp_path / "build.gradle.kts").write_text(
+        'dependencies {\n    implementation("junit:junit:4.13.2")\n}\n'
+    )
+
+    result = scan_directory(tmp_path)
+
+    assert len(result.gradle_files) == 1
+    assert result.gradle_files[0].path.name == "build.gradle.kts"
+
+
+def test_scan_ignores_build_gradle_inside_build_directory(tmp_path: Path) -> None:
+    """A copy of build.gradle under build/ (Gradle's own output dir) must not
+    be double-counted - same reasoning as the Maven target/ exclusion."""
+    (tmp_path / "build.gradle").write_text("dependencies {}\n")
+    build_dir = tmp_path / "build"
+    build_dir.mkdir()
+    (build_dir / "build.gradle").write_text("dependencies {}\n")
+
+    result = scan_directory(tmp_path)
+
+    assert len(result.gradle_files) == 1
+    assert result.gradle_files[0].path == tmp_path.resolve() / "build.gradle"

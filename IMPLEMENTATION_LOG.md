@@ -8946,3 +8946,171 @@ the human-baseline comparison's flagged Layer 4 miss (Case 17,
 `ai-admin-report-export-service`), Gradle support for CWE-1035, and the
 Layer 4 feature-engineering methodology question remain open, student's
 own call on sequencing.
+
+## [2026-10-10] - Gradle support for CWE-1035: a new, deliberately narrow text heuristic, not a Gradle parser
+
+**Status: DRAFT, pending student review.**
+
+**Scope defined before editing (Section 8 step 1):** Layer 1 static
+analysis, specifically recognizing `build.gradle`/`build.gradle.kts`
+dependency declarations and feeding them into the existing CWE-1035
+rule, alongside `pom.xml`. **In scope:** the single, extremely common
+shape `<configName> "group:artifact[:version]"` (Groovy, space-
+separated) or `<configName>("group:artifact[:version]")` (Kotlin DSL,
+parenthesized), for the standard Gradle Java/Java-library plugin
+configuration names (`implementation`, `api`, `compileOnly`,
+`compileOnlyApi`, `runtimeOnly`, `testImplementation`,
+`testCompileOnly`, `testRuntimeOnly`, `annotationProcessor`,
+`testAnnotationProcessor`, and the legacy pre-Gradle-7
+`compile`/`testCompile`). **Explicitly out of scope, by the student's
+own choice (offered three options: minimal string-literal-only, a
+broader map-style-plus-variables pass, or a full `tree-sitter-groovy`/
+`-kotlin` grammar parse - minimal was chosen):** version catalogs
+(`libs.versions.toml`), any variable or Groovy/Kotlin string-
+interpolation reference for the version, map-style Groovy dependency
+syntax (`implementation group: '...', name: '...', version: '...'`),
+`ext`/`project.ext` properties, `buildSrc` convention plugins, and (as
+a real, not just anticipated, limitation - see below) a single
+configuration call declaring more than one dependency via Groovy's
+comma-separated argument list.
+
+**What we actually did:** New module `vibeguard/layer1_static/
+gradle_parser.py` - **a structural addition to Section 6's approved
+file list**, logged here per Section 6's own rule rather than silently
+added; the student should update `CLAUDE.md`/`AGENTS.md`'s project-
+structure diagram to include it alongside `pom_parser.py`. Only ever
+parses text with Python's `re` module and plain string scanning -
+never executes or evaluates any part of the Groovy/Kotlin DSL, the
+same never-execute guarantee every other Layer 1 parser already makes.
+Reuses `pom_parser.MavenDependency` directly as its own dependency
+record (not a parallel Gradle-specific type), since CWE-1035's checking
+logic only ever needs group/artifact/version/line, nothing Maven-
+specific about the shape itself - this let `cwe_1035.py` gain Gradle
+support via one new three-line function, `detect_in_gradle`, plus a
+shared `_detect_in_dependencies` helper extracted from the pre-existing
+`detect_in_pom` rather than duplicating its body.
+
+Wired into `scanner.py` (`ScanResult.gradle_files`, discovered by exact
+filename like `pom.xml`, same containment/exclusion treatment - `build/`
+was already in `_EXCLUDED_DIR_NAMES` as "Gradle build output" before
+this entry, so Gradle's own copied-output directory was already
+correctly excluded without any change needed there) and `main.py`
+(scanning, the `_run_rules` CWE-1035 loop, a new `_print_gradle_report`
+mirroring `_print_pom_report`'s "Unchecked (no resolvable version)"
+column, the `--help` text, and the overall exit-code contract).
+`evaluation/human_baseline.py`'s explicit mirror of `main.py`'s rule-
+running pipeline was updated identically, the same discipline applied
+every other time this session touched that pipeline.
+
+**A real, specific false-positive risk was checked directly, not just
+reasoned about:** a Groovy/Kotlin variable or string-interpolation
+version reference (`"group:artifact:$version"`,
+`"group:artifact:${version}"`) must never be passed through as a real,
+comparable version - `MavenDependency.version` feeds straight into
+`cwe_1035._version_less_than`'s tuple comparison, which treats an
+unparseable string as version `()`, padded to all-zeros, which compares
+as *less than every real threshold* - i.e. every vulnerable artifact
+with an unresolved templated version would be wrongly flagged as using
+version "0.0.0" and match the very first curated CVE it's checked
+against. Guarded against directly: a version segment must match
+`^[0-9][\w.+-]*$` (digit-leading, the near-universal shape of a real
+artifact version) to be treated as resolved; anything else (a `$`-
+prefixed reference, a bare property name) resolves to `version=None`,
+`raw_version=<the literal text>` - the same "unknown is not vulnerable,
+stay silent" discipline `pom_parser.py`'s own unresolved `${property}`
+case already established. Verified with a dedicated test
+(`test_parse_treats_variable_interpolated_version_as_unresolved`) using
+exactly this shape against `log4j-core`/`jackson-databind`.
+
+**Tests/adversarial checks run:** 22 new tests total, counted via
+`git diff` against the prior commit rather than summed by hand (an
+earlier draft of this entry miscounted twice before this check caught
+it): 15 in `tests/test_gradle_parser.py` (Groovy and Kotlin-DSL
+extraction; every recognized configuration name; the `compile`/
+`compileOnly` camelCase-boundary distinction; GA-only version-
+unresolved; the variable-interpolation false-positive guard above; a
+nested brace block inside `dependencies {}` not truncating the scan
+early; two separate `dependencies {}` blocks in one file without
+double-counting, and specifically without the search re-matching a
+block already consumed; `buildscript { dependencies { classpath ... } }`
+correctly ignored, since `classpath` is deliberately not a recognized
+configuration name; a version-catalog accessor and a `project(...)`
+reference correctly producing zero matches, not a mis-parse; empty
+file, oversized file, no-`dependencies{}`-block, and unbalanced-brace
+malformed input all handled as values, never an exception), 4 in
+`tests/test_cwe_1035.py` (`detect_in_gradle` finds a known-vulnerable
+version, doesn't flag a patched one, doesn't flag an unresolved
+interpolated one, finds nothing when the build file has no
+dependencies), and 3 in `tests/test_scanner.py` (`build.gradle`/
+`build.gradle.kts` discovery by exact filename, and `build/`-directory
+exclusion). Full suite: 469 passed (447 pre-existing + 22 new). All
+four gates clean: `black --check`, `ruff check`, `mypy`, `git diff
+--check` (one `ruff` line-length violation introduced by the
+scanner.py docstring edit was found and fixed in this same pass, not
+left for a separate round).
+
+**Verified against a real repository, not just synthetic fixtures:**
+`.qa-repos/spring-boot-realworld-example-app-20260904/build.gradle` (a
+real Spring Boot 2.6 microservice already in this scan corpus) -
+correctly found 20 of its dependencies, correctly resolved 11 explicit
+literal versions, correctly left the other 9 Spring-Boot-BOM-managed
+(no explicit version) dependencies unresolved rather than guessing, and
+ran end to end through the real CLI (`python main.py <path>`) with no
+crash, producing the new Gradle Parse Report table and correctly
+reporting zero CWE-1035 findings (none of its real dependencies appear
+in the small curated vulnerability list - a true negative, not a
+missed detection). **One real, not just anticipated, coverage gap
+found this way**, not previously listed as a limitation before this
+verification: this file's `runtimeOnly 'io.jsonwebtoken:jjwt-impl:
+0.11.2', 'io.jsonwebtoken:jjwt-jackson:0.11.2'` line declares *two*
+dependencies via Groovy's comma-separated argument list on one
+configuration call - only the first (`jjwt-impl`) is extracted; the
+second (`jjwt-jackson`, no configuration-name keyword immediately
+before it) is invisible to this heuristic. Confirmed directly (not
+assumed) by running the parser against this exact file and inspecting
+every extracted dependency. Added as an explicit, now-confirmed-real
+limitation to `gradle_parser.py`'s module docstring rather than
+silently left as a gap nobody would otherwise know about - not fixed
+in this pass, since handling comma-separated multi-dependency calls
+was explicitly part of the "broader" option the student declined in
+favour of the minimal, string-literal-only scope.
+
+**What limitations remain** (the explicit scope boundary chosen, plus
+the one confirmed-real gap above): version catalogs, variables/string
+interpolation, map-style Groovy syntax, `ext` properties, `buildSrc`,
+and comma-separated multi-dependency configuration calls are all
+simply invisible to this heuristic - a dependency declared only one of
+these ways is never extracted, never guessed at, exactly the same
+"unknown, stay silent" discipline as every other coarse heuristic this
+codebase already uses. `_find_matching_brace`'s plain brace-depth
+counting also does not understand string literals or comments, so a
+literal `{`/`}` character inside either could rarely miscount a
+block's span - accepted, not fixed, for the same reason.
+
+**Effect on thesis chapters:** Chapter 3 should list `gradle_parser.py`
+alongside `pom_parser.py` as CWE-1035's second input format, and state
+explicitly that it is a text heuristic, not a real Gradle/Groovy/Kotlin
+parse - the same honesty already applied to CWE-1035's own "curated
+snapshot, not a live feed" scope statement. Chapter 4/5 gain a second,
+real-world-verified input format for the dependency-vulnerability
+layer, with an honestly-quantified, specific coverage gap (comma-
+separated multi-dependency calls) rather than an unexamined one.
+Chapter 6/limitations should note Gradle support is real but narrower
+than Maven's, consistent with `pom_parser.py`'s own documented
+property-resolution limits.
+
+**Freeze/handoff:** This is new, same-session work with no independent
+review yet. Per Section 11, recommend a fresh session run adversarial
+QA against it before treating it as frozen - in particular: (a)
+re-verify the version-interpolation false-positive guard directly
+against a real log4j/jackson CVE-matching scenario, not just the unit
+test; (b) try an adversarial/pathological `dependencies {}` block
+(deeply nested braces, a brace inside a string literal) against
+`_find_matching_brace`'s known limitation; (c) confirm `scan_directory`'s
+`gradle_files`/`pom_files` handling doesn't interact badly in a project
+that has *both* a `pom.xml` and a `build.gradle` in the same directory
+(an unusual but not impossible migration-in-progress repository
+shape). Section 7's next-work list is otherwise unchanged: the human-
+baseline comparison's flagged Layer 4 miss (Case 17,
+`ai-admin-report-export-service`) and the Layer 4 feature-engineering
+methodology question remain open, student's own call on sequencing.
