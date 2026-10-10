@@ -174,6 +174,7 @@ def parse_gradle_file(
 
 
 def _extract_dependencies(text: str) -> tuple[MavenDependency, ...]:
+    text = _strip_comments(text)
     dependencies: list[MavenDependency] = []
     for block_text, block_offset in _find_dependencies_blocks(text):
         for match in _DEPENDENCY_DECLARATION_PATTERN.finditer(block_text):
@@ -217,6 +218,81 @@ def _parse_coordinate(coordinate: str) -> tuple[str, str, str | None, str | None
     return None
 
 
+def _strip_comments(text: str) -> str:
+    """Replace every ``//`` line comment and ``/* ... */`` block comment
+    with blank characters, leaving every other character - including
+    every newline, even one inside a multi-line block comment - in its
+    original position.
+
+    Found necessary (not just theoretically possible) by independent
+    QA: without this, a single stray ``{``/``}`` character inside a
+    comment (a very ordinary thing to write - "see the mapping {
+    below") pushes ``_find_matching_brace``'s depth counter off balance
+    for the *rest of the file*, silently returning zero dependency
+    blocks - and separately, a commented-out or merely-discussed
+    dependency string (``// compile "log4j-core:2.12.0" if needed``)
+    was extracted as if genuinely declared, a real false positive.
+    Stripping comments before any brace-counting or regex matching
+    closes both at once.
+
+    Preserving every character's position (not just every newline) is
+    deliberate: ``_extract_dependencies`` computes a dependency's line
+    number from its character offset in *this* stripped text, so a
+    shifted offset would silently misattribute every line number after
+    the first stripped comment.
+
+    String-literal-aware: a comment-start sequence inside a quoted
+    string (e.g. a URL containing ``"http://example.com"``) is never
+    mistaken for a real comment, tracked the same way a real
+    tokenizer would - including a backslash-escaped quote not ending
+    the string early. An unterminated string literal (malformed/
+    adversarial input) degrades safely: every character from that
+    point on is treated as "inside a string" and passed through
+    unchanged, so nothing after it gets stripped, but nothing raises
+    either.
+    """
+    result: list[str] = []
+    index = 0
+    length = len(text)
+    string_delimiter: str | None = None
+    while index < length:
+        character = text[index]
+        if string_delimiter is not None:
+            result.append(character)
+            if character == "\\" and index + 1 < length:
+                result.append(text[index + 1])
+                index += 2
+                continue
+            if character == string_delimiter:
+                string_delimiter = None
+            index += 1
+            continue
+        if character in ("'", '"'):
+            string_delimiter = character
+            result.append(character)
+            index += 1
+            continue
+        two_characters = text[index : index + 2]
+        if two_characters == "//":
+            while index < length and text[index] != "\n":
+                result.append(" ")
+                index += 1
+            continue
+        if two_characters == "/*":
+            result.append("  ")
+            index += 2
+            while index < length and text[index : index + 2] != "*/":
+                result.append("\n" if text[index] == "\n" else " ")
+                index += 1
+            if index < length:
+                result.append("  ")
+                index += 2
+            continue
+        result.append(character)
+        index += 1
+    return "".join(result)
+
+
 def _find_dependencies_blocks(text: str) -> list[tuple[str, int]]:
     """Find every brace-matched ``dependencies { ... }`` block's inner text
     and its starting character offset within ``text``.
@@ -249,12 +325,17 @@ def _find_dependencies_blocks(text: str) -> list[tuple[str, int]]:
 def _find_matching_brace(text: str, open_brace_index: int) -> int | None:
     """Find the index of the ``}`` that closes the ``{`` at ``open_brace_index``.
 
-    Plain depth counting over every ``{``/``}`` character in the text -
-    does not understand string literals or comments, so a literal brace
-    character inside a quoted string or a comment is (rarely, but
-    possibly) miscounted. Accepted as a known limitation of a
-    deliberately narrow heuristic, not a correctness goal this module
-    claims to meet in full.
+    Plain depth counting over every ``{``/``}`` character in ``text``,
+    which by the time this is called has already had every comment
+    stripped by ``_strip_comments`` - a brace character inside a
+    *comment* was found (by independent QA, not anticipated in advance)
+    to silently zero out an entire file's extraction, not just mis-span
+    one block, since one unmatched brace leaves the depth counter
+    unbalanced for everything after it. A brace character inside a
+    *string literal* (e.g. a pathological version qualifier) is still
+    not specifically handled here - accepted as a narrower, genuinely
+    rare residual limitation of a deliberately narrow heuristic, not a
+    correctness goal this module claims to meet in full.
     """
     depth = 0
     for index in range(open_brace_index, len(text)):

@@ -57,6 +57,7 @@ def test_score_features_assigns_expected_base_scores_and_severities(
         ("CWE-287", "AuthService.java", 75, RiskSeverity.HIGH),
         ("CWE-798", "Service.java", 90, RiskSeverity.CRITICAL),
         ("CWE-1035", "pom.xml", 90, RiskSeverity.CRITICAL),
+        ("CWE-1035", "build.gradle", 90, RiskSeverity.CRITICAL),
     )
 
     for cwe_id, filename, expected_score, expected_severity in cases:
@@ -177,3 +178,27 @@ def test_score_features_rejects_unexpected_redacted_value(tmp_path: Path) -> Non
 
     with pytest.raises(ValueError, match="does not accept redacted_value"):
         score_features((feature,))
+
+
+def test_score_features_boosts_gradle_known_vulnerable_dependency(tmp_path: Path) -> None:
+    """Mirrors the pom.xml boost - the underlying concern (a declared,
+    known-vulnerable dependency) is identical regardless of build tool,
+    so there is no principled reason to score it differently."""
+    feature = _feature(tmp_path, "CWE-1035", "build.gradle")
+
+    scored = score_features((feature,))[0]
+
+    assert scored.score == 90
+    assert scored.severity is RiskSeverity.CRITICAL
+    assert "known vulnerable dependency is declared in build.gradle" in scored.factors[1]
+
+
+def test_score_features_boosts_gradle_kts_known_vulnerable_dependency(
+    tmp_path: Path,
+) -> None:
+    feature = _feature(tmp_path, "CWE-1035", "build.gradle.kts")
+
+    scored = score_features((feature,))[0]
+
+    assert scored.score == 90
+    assert scored.severity is RiskSeverity.CRITICAL

@@ -30,6 +30,7 @@ _CWE_NAMES = {
     "CWE-1035": "known_vulnerable_component",
 }
 _CONFIG_EXTENSIONS = frozenset({"properties", "yml", "yaml"})
+_GRADLE_FILENAMES = frozenset({"build.gradle", "build.gradle.kts"})
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,7 @@ class FindingFeature:
     is_java_source: bool
     is_config_source: bool
     is_pom_file: bool
+    is_gradle_file: bool
     identifier_length: int
     message_length: int
 
@@ -104,6 +106,7 @@ def _feature_from_finding(finding: Finding) -> FindingFeature:
         is_java_source=source_type == "java",
         is_config_source=source_type == "config",
         is_pom_file=source_type == "pom",
+        is_gradle_file=source_type == "gradle",
         identifier_length=len(identifier),
         message_length=len(message),
     )
@@ -149,6 +152,12 @@ def _reject_invisible_text(value: str, field_name: str) -> None:
 def _source_extension(path: Path) -> str:
     if path.name.lower() == "pom.xml":
         return "pom.xml"
+    if path.name.lower() in _GRADLE_FILENAMES:
+        # The literal filename, not path.suffix: build.gradle.kts's suffix
+        # is only ".kts" (Path.suffix returns just the last dot-segment),
+        # which would collide with any other ".kts" file and lose the
+        # distinction from build.gradle - same convention as pom.xml above.
+        return path.name.lower()
     return path.suffix.lower().lstrip(".") or "unknown"
 
 
@@ -157,6 +166,8 @@ def _source_type(source_extension: str) -> str:
         return "java"
     if source_extension == "pom.xml":
         return "pom"
+    if source_extension in _GRADLE_FILENAMES:
+        return "gradle"
     if source_extension in _CONFIG_EXTENSIONS:
         return "config"
     raise ValueError(f"unsupported finding source extension: {source_extension}")

@@ -260,3 +260,96 @@ def test_parse_unbalanced_dependencies_block_stops_without_crashing(tmp_path: Pa
 
     assert result.status == ParseStatus.OK
     assert result.dependencies == ()
+
+
+def test_parse_a_stray_brace_inside_a_line_comment_does_not_lose_real_dependencies(
+    tmp_path: Path,
+) -> None:
+    """Found by independent QA: a brace character inside an ordinary
+    "// see the mapping { below" comment used to push the brace-depth
+    counter off balance for the rest of the file, silently returning
+    zero dependencies for the whole file - not just mis-spanning one
+    block. A real dependency declared anywhere in the file, before or
+    after the stray brace, must still be found."""
+    gradle_file = tmp_path / "build.gradle"
+    gradle_file.write_text(
+        "dependencies {\n"
+        "    // see the mapping { below for context\n"
+        '    implementation("com.example:foo:1.0.0")\n'
+        "}\n"
+    )
+
+    result = parse_gradle_file(gradle_file)
+
+    assert result.status == ParseStatus.OK
+    assert len(result.dependencies) == 1
+    dependency = result.dependencies[0]
+    assert dependency.artifact_id == "foo"
+    assert dependency.line == 3
+
+
+def test_parse_does_not_flag_a_dependency_mentioned_only_in_a_line_comment(
+    tmp_path: Path,
+) -> None:
+    """Found by independent QA: a vulnerable dependency merely discussed
+    or commented out in a // comment (a common pattern during a
+    migration) must never be extracted as if genuinely declared - a
+    real false-positive source for a security tool."""
+    gradle_file = tmp_path / "build.gradle"
+    gradle_file.write_text(
+        "dependencies {\n"
+        '    // compile "org.apache.logging.log4j:log4j-core:2.12.0" if needed for legacy support\n'
+        '    implementation "com.example:safe-lib:1.0.0"\n'
+        "}\n"
+    )
+
+    result = parse_gradle_file(gradle_file)
+
+    assert len(result.dependencies) == 1
+    assert result.dependencies[0].artifact_id == "safe-lib"
+
+
+def test_parse_a_stray_brace_inside_a_block_comment_does_not_lose_real_dependencies(
+    tmp_path: Path,
+) -> None:
+    """Same guard as the line-comment case, for a /* ... */ block comment
+    spanning multiple lines - including correct line-number tracking
+    for whatever comes after it."""
+    gradle_file = tmp_path / "build.gradle"
+    gradle_file.write_text(
+        "dependencies {\n"
+        "    /* a block comment\n"
+        "       with a stray { brace\n"
+        '       and a mention of "org.apache.logging.log4j:log4j-core:2.12.0" */\n'
+        '    implementation "com.example:real:1.0.0"\n'
+        "}\n"
+    )
+
+    result = parse_gradle_file(gradle_file)
+
+    assert len(result.dependencies) == 1
+    dependency = result.dependencies[0]
+    assert dependency.artifact_id == "real"
+    assert dependency.line == 5
+
+
+def test_parse_does_not_treat_a_url_slashes_inside_a_string_as_a_comment(
+    tmp_path: Path,
+) -> None:
+    """Comment-stripping must be string-literal-aware: a "//" occurring
+    *inside* a quoted string (e.g. a URL assigned to a variable earlier
+    in the block) must never be mistaken for the start of a line
+    comment - which would otherwise blank out everything from that
+    point to the end of the line, including a real dependency declared
+    later on the *same* line."""
+    gradle_file = tmp_path / "build.gradle"
+    gradle_file.write_text(
+        "dependencies {\n"
+        '    def docs = "https://example.com/docs"; implementation "com.example:real:1.0.0"\n'
+        "}\n"
+    )
+
+    result = parse_gradle_file(gradle_file)
+
+    assert len(result.dependencies) == 1
+    assert result.dependencies[0].artifact_id == "real"

@@ -122,6 +122,50 @@ def test_extract_features_marks_missing_line_and_pom_extension(tmp_path: Path) -
     assert features[0].is_java_source is False
     assert features[0].is_config_source is False
     assert features[0].is_pom_file is True
+    assert features[0].is_gradle_file is False
+
+
+def test_extract_features_marks_gradle_sources(tmp_path: Path) -> None:
+    gradle_file = tmp_path / "build.gradle"
+    finding = Finding(
+        cwe_id="CWE-1035",
+        file_path=gradle_file,
+        line=2,
+        identifier="org.example:vulnerable",
+        message="Known vulnerable dependency",
+    )
+
+    features = extract_features((finding,))
+
+    assert len(features) == 1
+    assert features[0].source_extension == "build.gradle"
+    assert features[0].source_type == "gradle"
+    assert features[0].is_java_source is False
+    assert features[0].is_config_source is False
+    assert features[0].is_pom_file is False
+    assert features[0].is_gradle_file is True
+
+
+def test_extract_features_marks_gradle_kts_sources_distinctly_from_kts(
+    tmp_path: Path,
+) -> None:
+    """build.gradle.kts must resolve by its full filename, not by
+    Path.suffix (which would only see ".kts" and collide with any other
+    ".kts" file)."""
+    gradle_file = tmp_path / "build.gradle.kts"
+    finding = Finding(
+        cwe_id="CWE-1035",
+        file_path=gradle_file,
+        line=2,
+        identifier="org.example:vulnerable",
+        message="Known vulnerable dependency",
+    )
+
+    features = extract_features((finding,))
+
+    assert features[0].source_extension == "build.gradle.kts"
+    assert features[0].source_type == "gradle"
+    assert features[0].is_gradle_file is True
 
 
 def test_extract_features_marks_config_sources(tmp_path: Path) -> None:
@@ -143,6 +187,7 @@ def test_extract_features_marks_config_sources(tmp_path: Path) -> None:
     assert features[0].is_java_source is False
     assert features[0].is_config_source is True
     assert features[0].is_pom_file is False
+    assert features[0].is_gradle_file is False
 
 
 def test_extract_features_rejects_invalid_negative_line(tmp_path: Path) -> None:

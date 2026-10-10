@@ -32,6 +32,7 @@ from vibeguard.layer1_static.ast_parser import (
     ParsedFile,
 )
 from vibeguard.layer1_static.config_parser import ParsedConfigFile
+from vibeguard.layer1_static.gradle_parser import ParsedGradleFile
 from vibeguard.layer1_static.pom_parser import ParsedPomFile, resolve_inherited_versions
 from vibeguard.layer1_static.rules._finding import Finding
 from vibeguard.layer1_static.scanner import ScanResult, scan_directory
@@ -644,7 +645,12 @@ def _execute_scan(
     else:
         raise ValueError(f"scan path is not a file or directory: {scan_path}")
 
-    if not result.java_files and not result.config_files and not result.pom_files:
+    if (
+        not result.java_files
+        and not result.config_files
+        and not result.pom_files
+        and not result.gradle_files
+    ):
         return ScanExecution(
             scan_path=scan_path,
             result=result,
@@ -652,7 +658,7 @@ def _execute_scan(
             scored_findings=(),
             final_report=None,
             exit_code=1,
-            error_message=f"No .java/config/pom.xml files found under {scan_path}",
+            error_message=f"No .java/config/pom.xml/build.gradle files found under {scan_path}",
         )
 
     if result.pom_files:
@@ -689,9 +695,15 @@ def _execute_scan(
     java_ok = all(item.status == ParseStatus.OK for item in result.java_files)
     config_ok = all(item.status == ParseStatus.OK for item in result.config_files)
     pom_ok = all(item.status == ParseStatus.OK for item in result.pom_files)
+    gradle_ok = all(item.status == ParseStatus.OK for item in result.gradle_files)
     exit_code = (
         0
-        if java_ok and config_ok and pom_ok and not result.rejected_paths and not scored_findings
+        if java_ok
+        and config_ok
+        and pom_ok
+        and gradle_ok
+        and not result.rejected_paths
+        and not scored_findings
         else 1
     )
     return ScanExecution(
@@ -715,6 +727,8 @@ def _render_scan_execution(execution: ScanExecution) -> None:
         scan_cli._print_config_report(execution.result.config_files)
     if execution.result.pom_files:
         scan_cli._print_pom_report(execution.result.pom_files)
+    if execution.result.gradle_files:
+        scan_cli._print_gradle_report(execution.result.gradle_files)
     if execution.result.rejected_paths:
         scan_cli._print_rejected_report(execution.result.rejected_paths)
     if execution.scored_findings:
@@ -732,6 +746,7 @@ def _scan_report_payload(execution: ScanExecution) -> dict[str, object]:
         "java_files": [_java_file_payload(item) for item in execution.result.java_files],
         "config_files": [_config_file_payload(item) for item in execution.result.config_files],
         "pom_files": [_pom_file_payload(item) for item in execution.result.pom_files],
+        "gradle_files": [_gradle_file_payload(item) for item in execution.result.gradle_files],
         "rejected_paths": [
             {"path": str(item.path), "reason": item.reason}
             for item in execution.result.rejected_paths
@@ -770,6 +785,15 @@ def _config_file_payload(parsed: ParsedConfigFile) -> dict[str, object]:
 
 
 def _pom_file_payload(parsed: ParsedPomFile) -> dict[str, object]:
+    return {
+        "path": str(parsed.path),
+        "status": parsed.status.value,
+        "dependency_count": len(parsed.dependencies),
+        "error_message": parsed.error_message,
+    }
+
+
+def _gradle_file_payload(parsed: ParsedGradleFile) -> dict[str, object]:
     return {
         "path": str(parsed.path),
         "status": parsed.status.value,

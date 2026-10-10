@@ -25,18 +25,19 @@ _BASE_SCORES = {
     "CWE-287": 75,
     "CWE-20": 65,
 }
-_SUPPORTED_SOURCE_TYPES = frozenset({"java", "config", "pom"})
+_SUPPORTED_SOURCE_TYPES = frozenset({"java", "config", "pom", "gradle"})
 _EXPECTED_SOURCE_EXTENSIONS = {
     "java": frozenset({"java"}),
     "config": frozenset({"properties", "yml", "yaml"}),
     "pom": frozenset({"pom.xml"}),
+    "gradle": frozenset({"build.gradle", "build.gradle.kts"}),
 }
 _EXPECTED_SOURCE_TYPES = {
     "CWE-20": frozenset({"java"}),
     "CWE-284": frozenset({"java"}),
     "CWE-287": frozenset({"java"}),
     "CWE-798": frozenset({"java", "config"}),
-    "CWE-1035": frozenset({"pom"}),
+    "CWE-1035": frozenset({"pom", "gradle"}),
 }
 
 
@@ -113,6 +114,7 @@ def _validate_feature(feature: FindingFeature) -> None:
         feature.is_java_source,
         feature.is_config_source,
         feature.is_pom_file,
+        feature.is_gradle_file,
     )
     if sum(expected_flags) != 1:
         raise ValueError("exactly one source-type flag must be true")
@@ -139,6 +141,8 @@ def _source_type_from_flags(feature: FindingFeature) -> str:
         return "java"
     if feature.is_config_source:
         return "config"
+    if feature.is_gradle_file:
+        return "gradle"
     return "pom"
 
 
@@ -148,6 +152,8 @@ def _context_adjustments(feature: FindingFeature) -> tuple[tuple[int, str], ...]
         adjustments.append((5, "hardcoded credential is in deployment config"))
     if feature.cwe_id == "CWE-1035" and feature.is_pom_file:
         adjustments.append((5, "known vulnerable dependency is declared in pom.xml"))
+    if feature.cwe_id == "CWE-1035" and feature.is_gradle_file:
+        adjustments.append((5, "known vulnerable dependency is declared in build.gradle"))
     if not feature.has_line:
         adjustments.append((-5, "source line is unavailable, reducing traceability confidence"))
     return tuple(adjustments)

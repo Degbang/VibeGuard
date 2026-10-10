@@ -9114,3 +9114,220 @@ shape). Section 7's next-work list is otherwise unchanged: the human-
 baseline comparison's flagged Layer 4 miss (Case 17,
 `ai-admin-report-export-service`) and the Layer 4 feature-engineering
 methodology question remain open, student's own call on sequencing.
+
+## [2026-10-10] - Independent QA found Gradle support's true-positive path completely broken, plus a real comment-handling gap - both fixed and re-verified
+
+**Status: DRAFT, pending student review.**
+
+An independent QA pass on the Gradle support commit (`71d974c`, logged
+above) found that despite 22 passing unit tests, a real-repo
+verification run, and all four gates clean, **the feature had never
+once been exercised with an actual positive finding through the real
+pipeline it was built to feed.** Every unit test called
+`gradle_parser.detect_in_gradle`/`cwe_1035.detect_in_gradle` directly,
+bypassing Layer 2/3/4/5 entirely, and the one real-repo verification
+run (`spring-boot-realworld-example-app-20260904`) happened to produce
+zero CWE-1035 findings - a true negative that never exercised the
+path a true positive would have to travel. Reproduced directly, not
+just trusted: a `build.gradle` with one real, curated-CVE-matching
+dependency crashes the entire scan with no report at all, for the
+whole project, not just that one finding.
+
+```
+$ cat build.gradle
+dependencies {
+    implementation "com.fasterxml.jackson.core:jackson-databind:2.9.8"
+}
+$ python3 main.py .
+Scoring failed: unsupported finding source extension: gradle
+```
+
+**Root cause:** `layer2_features/extractor.py`'s `_source_extension`/
+`_source_type` and `layer3_scoring/scorer.py`'s closed-world
+`_SUPPORTED_SOURCE_TYPES`/`_EXPECTED_SOURCE_EXTENSIONS`/
+`_EXPECTED_SOURCE_TYPES`/`_context_adjustments` were never updated for
+this feature - both modules already had the identical machinery for
+`pom.xml` (a `source_type` string, an `is_pom_file` flag, a validated
+closed set of allowed extensions per type and allowed types per CWE, a
+pom.xml-specific `+5` scoring adjustment), but nothing analogous was
+added for `build.gradle`/`build.gradle.kts` when the Gradle feature was
+built. This is exactly the "later layer exposes a blocking correctness
+issue" scenario Section 8 names as grounds to reopen already-touched
+work, not a reason to leave it broken - Layer 2/3 weren't themselves
+frozen by name the way Layer 4 is, but the gap is squarely the same
+shape.
+
+**Fixed**, mirroring the existing pom.xml machinery exactly rather than
+inventing a new pattern: `extractor.py` gained `is_gradle_file: bool`
+on `FindingFeature`, a `_GRADLE_FILENAMES` exact-filename check in
+`_source_extension` (returning the literal filename, e.g.
+`"build.gradle.kts"`, the same convention `"pom.xml"` already uses -
+necessary because `Path.suffix` on `build.gradle.kts` only ever
+returns `".kts"`, which would otherwise collide with any unrelated
+`.kts` file), and a `"gradle"` branch in `_source_type`. `scorer.py`
+gained `"gradle"` in `_SUPPORTED_SOURCE_TYPES`, a
+`frozenset({"build.gradle", "build.gradle.kts"})` entry in
+`_EXPECTED_SOURCE_EXTENSIONS`, `"gradle"` added to CWE-1035's allowed
+source types in `_EXPECTED_SOURCE_TYPES`, `is_gradle_file` added to
+`_validate_feature`'s exactly-one-flag check and
+`_source_type_from_flags`, and a `+5 "known vulnerable dependency is
+declared in build.gradle"` adjustment mirroring the pom.xml one exactly
+- there is no principled reason to score the identical underlying
+concern (a declared, known-vulnerable dependency) differently by build
+tool.
+
+**Deliberately not touched:** `layer4_ml/predictor.py`'s `_SOURCE_TYPES`
+tuple (`("java", "config", "pom")`) was left as-is, not extended with
+`"gradle"`. Layer 4 is frozen, and adding a new source-type dimension
+to its feature vector would change the trained model's input shape,
+requiring retraining against the labelled dataset - a materially
+larger, genuinely different change than fixing a crash, and outside
+this round's scope. Checked directly, not just assumed safe: a
+Gradle-sourced finding with an unrecognized `source_type` is never
+validated/rejected by `predictor.py` (unlike `scorer.py`'s closed-world
+check) - it simply isn't counted in any of the three existing
+`*_source_count` features, exactly the same honest "not counted in
+this specific dimension" gap `_SOURCE_TYPES`'s own fixed tuple already
+has for any format it doesn't enumerate. The finding itself still
+fully flows through `cwe_1035_count`, `finding_count`,
+`max_rule_score`/`mean_rule_score`, and every severity-count feature,
+confirmed by the end-to-end repro below producing a correct `critical`
+Layer 4 prediction. Logged here as a known, accepted limitation rather
+than silently left unexplained - revisit only if/when Layer 4 is
+deliberately reopened for retraining on other grounds, not for this
+alone.
+
+**Also fixed, found by the same QA pass:** `gradle_parser.py`'s plain
+brace-depth counting and dependency-literal regex had zero awareness
+of comments, and this was materially worse than the module's own
+docstring claimed ("rarely... miscounted" one block's span) - a single
+stray `{`/`}` character inside an entirely ordinary `//` comment (e.g.
+"see the mapping { below") pushes the depth counter off balance for
+the *rest of the file*, silently returning **zero dependencies for the
+whole file**, not just mis-spanning one block. Reproduced directly:
+
+```python
+content = '''
+dependencies {
+    // see the mapping { below for context
+    implementation("com.example:foo:1.0.0")
+}
+'''
+# parse_gradle_file(...) -> status=OK, dependencies=() - foo is lost entirely
+```
+
+Separately, and independently real: a dependency merely mentioned or
+commented out in a `//` comment (an ordinary pattern during a
+migration, e.g. `// compile "log4j-core:2.12.0" if needed for legacy
+support`) was extracted as if genuinely declared - a real false
+positive for a security tool, reproduced directly the same way.
+
+**Fixed** with a single new pre-processing pass, `_strip_comments`,
+run once at the top of `_extract_dependencies` before any brace-
+counting or regex matching: a one-pass scanner that blanks every `//`
+line comment and `/* ... */` block comment to spaces (preserving every
+newline exactly in place, including inside a multi-line block comment,
+so every line number computed downstream from a character offset into
+the *stripped* text still matches the original source exactly), while
+tracking single/double-quote string-literal state (with backslash-
+escape awareness) so a comment-start sequence genuinely inside a
+quoted string - e.g. a URL assigned to a variable earlier in the same
+block - is never mistaken for a real comment. An unterminated string
+literal (malformed/adversarial input) degrades safely: everything from
+that point on is treated as "inside a string" and passed through
+unchanged, never stripped, never raising. This closes both bugs at
+once, the same unified fix the QA pass itself suggested. The narrower,
+now-correctly-scoped residual limitation: a brace or dependency-
+looking string *inside a string literal itself* (not a comment) is
+still not specifically guarded against - accepted as genuinely rare,
+restated honestly in `_find_matching_brace`'s own docstring rather than
+left under the old, now-inaccurate "rarely... miscounted" framing.
+
+**Tests/adversarial checks run:** Reproduced every bug above directly
+via a throwaway script before fixing (not just trusting the QA
+report's prose), then re-ran the exact same repros after each fix to
+confirm. 8 new tests total, counted via `git diff` against the prior
+commit (`71d974c`) rather than summed by hand, after the per-file
+miscounting already corrected once in the prior entry: 2 in
+`tests/test_layer2_extractor.py` (`is_gradle_file`/`source_type`/
+`source_extension` for both `build.gradle` and `build.gradle.kts`,
+confirmed to resolve by exact filename, not by `Path.suffix`), 2 in
+`tests/test_layer3_scorer.py` (the `+5` boost and its exact factor
+text, for both Gradle filename variants) plus one new case added to
+the existing parameterized base-score test, and 4 in
+`tests/test_gradle_parser.py` (the stray-brace-in-line-comment case,
+the commented-out-dependency false-positive case, the equivalent
+block-comment case with line-number verification, and the string-
+literal-aware comment-boundary case). Full suite: 477 passed (469 +
+8, confirmed against `pytest --collect-only`'s own count, not just the
+arithmetic). All four gates clean: `black --check`, `ruff check`,
+`mypy`, `git diff --check`.
+
+**Re-verified end to end through the real CLI**, not just unit tests,
+closing the exact coverage gap that let the critical bug through
+undetected the first time: a `build.gradle` with one real,
+curated-CVE-matching dependency (`jackson-databind:2.9.8`) now
+produces a correct `critical`-severity scored finding and a correct
+Layer 4/5 `critical` risk prediction with SHAP attribution, end to end,
+with no crash. Also verified a mixed `pom.xml` + `build.gradle` project
+(a real CVE in each) produces exactly 2 scored findings with no
+interaction bug between the two source types.
+
+**Checked immediately, same round, rather than left for the next QA
+pass:** does `evaluation/thesis_orchestrator.py` have the same gap?
+It reuses `main.py`'s now-fixed `_run_rules` (`import main as
+scan_cli; scan_cli._run_rules(result)`), so the finding-detection path
+itself was never broken there. But its own independently-duplicated
+"nothing found" early-exit check, exit-code contract (`pom_ok`-style
+flags), console reporting, and `scan_report.json` payload
+construction had the identical gap `main.py` had before this round's
+fix - never updated for `gradle_files` when the original Gradle
+feature shipped. Fixed the same way: the early-exit check, exit-code
+contract, `_render_scan_execution`'s new `_print_gradle_report` call,
+the payload's new `"gradle_files"` key, and a new `_gradle_file_payload`
+function all now mirror their `pom_files` counterparts exactly. No
+strict JSON Schema (`additionalProperties: false`) exists for
+`scan_report.json` itself (only for the two outer manifest wrapper
+files, `scan_manifest.json`/`run_manifest.json`, confirmed by reading
+both schemas in full before assuming it was safe to add a new key) -
+so this addition doesn't violate any existing schema contract. Added
+one new regression test, `test_run_scan_handles_a_gradle_only_project_end_to_end`,
+calling `_run_scan` directly on a project with *only* a `build.gradle`
+(no java/config/pom.xml) containing a real `jackson-databind` CVE, and
+asserting the resulting `scan_report.json` correctly reports it
+instead of the old "nothing found" early exit. `evaluation/
+thesis_run.py` was checked and confirmed to be a thin wrapper with no
+independent duplication of any of this - no change needed there. Full
+suite after this addition: 478 passed (477 + 1). All four gates clean.
+
+**Effect on thesis chapters:** Chapter 4/5's evaluation methodology
+should note that rule-level/unit-test coverage and full-pipeline
+coverage are not the same claim - this entry is itself a concrete,
+citable example of exactly that gap (22 green unit tests, a real-repo
+verification run, and clean static gates all simultaneously true while
+the feature's only true-positive path crashed end to end), found only
+because an independent QA pass specifically looked for it. Worth
+stating explicitly in the methodology/limitations discussion as a
+reason this project's "build and QA must be separate sessions" rule
+(Section 11) exists, not just an abstract process preference. Chapter
+3's description of `gradle_parser.py` should mention the comment-
+stripping pre-pass alongside the already-documented variable/version-
+catalog exclusions.
+
+**Freeze/handoff:** All fixes in this entry are new, same-round, not
+yet independently re-reviewed. Per Section 11, recommend one more
+fresh-session QA pass before treating Gradle support as fully settled
+- specifically confirming: (a) the comment-stripping pre-pass doesn't
+itself introduce a new false negative on some real-world comment
+style not yet tried (e.g. a Groovy triple-quoted string, explicitly
+out of scope and not previously claimed supported); (b) a final, clean
+read of `gradle_parser.py`'s module docstring against its actual
+current behavior, since this is the second round of corrections to it
+in one day; (c) independently re-derive that the `thesis_orchestrator.py`
+fix above is complete - in particular that no other strict schema
+anywhere in that file implicitly assumes the old three-source-type
+(`java`/`config`/`pom`) shape. Section 7's next-work list is otherwise
+unchanged: the human-baseline comparison's flagged Layer 4 miss (Case
+17, `ai-admin-report-export-service`) and the Layer 4 feature-
+engineering methodology question remain open, student's own call on
+sequencing.

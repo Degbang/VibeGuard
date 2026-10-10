@@ -278,3 +278,36 @@ def test_combined_scan_captures_shap_runtime_failure(
     stderr = (artifact_dir / "scan_stderr.txt").read_text(encoding="utf-8")
     assert "injected SHAP failure" in stderr
     assert "Traceback" not in stderr
+
+
+def test_run_scan_handles_a_gradle_only_project_end_to_end(tmp_path: Path) -> None:
+    """A project with only a build.gradle (no java/config/pom.xml) must
+    not be treated as "nothing found" - a real, now-fixed gap found by
+    independent QA on main.py's own equivalent path, confirmed here to
+    be fixed in the orchestrator's independently-wired "nothing found"
+    check, exit-code contract, and scan_report.json payload too."""
+    scan_path = tmp_path / "project"
+    scan_path.mkdir()
+    (scan_path / "build.gradle").write_text(
+        "dependencies {\n"
+        '    implementation "com.fasterxml.jackson.core:jackson-databind:2.9.8"\n'
+        "}\n"
+    )
+    artifact_dir = tmp_path / "scan"
+
+    artifacts = thesis_orchestrator._run_scan(
+        scan_path,
+        artifact_dir,
+        model_contract=REAL_CONTRACT_PATH,
+        max_bytes=2_000_000,
+        timeout=5.0,
+    )
+
+    report = json.loads(artifacts.report_path.read_text(encoding="utf-8"))
+    assert report["error_message"] is None
+    assert len(report["gradle_files"]) == 1
+    assert report["gradle_files"][0]["dependency_count"] == 1
+    assert report["finding_count"] == 1
+    assert report["scored_finding_count"] == 1
+    assert report["scored_findings"][0]["cwe_id"] == "CWE-1035"
+    assert report["project_risk_report"] is not None
