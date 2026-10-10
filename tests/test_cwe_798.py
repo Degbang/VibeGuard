@@ -1100,3 +1100,79 @@ def test_detect_in_java_still_flags_a_self_referential_assignment_tree_sitter_fa
     assert result.tree_sitter is not None
 
     assert {f.identifier for f in detect_in_java(result)} == {"tokenType"}
+
+
+# Found scanning OWASP WebGoat's real WebSecurityConfig.java
+# (.qa-repos/webgoat-20260904): Spring Security's own
+# .passwordParameter("password")/.usernameParameter("username") name
+# which HTTP form field to read a credential from - the argument is a
+# field name, never a credential value, but the pre-existing call-site
+# heuristic (_check_method_invocation) treated the method name
+# "passwordParameter" as credential-shaped and its literal argument as
+# a reportable value, producing a real false positive on real code.
+def test_detect_in_java_does_not_flag_spring_security_password_parameter(
+    tmp_path: Path,
+) -> None:
+    java_file = tmp_path / "WebSecurityConfig.java"
+    java_file.write_text(
+        "public class WebSecurityConfig {\n"
+        "    void configure(HttpSecurity http) {\n"
+        "        http.formLogin(login -> login\n"
+        '            .usernameParameter("username")\n'
+        '            .passwordParameter("password"));\n'
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    assert detect_in_java(result) == ()
+
+
+def test_detect_in_java_still_flags_a_real_setter_with_a_weak_literal_password(
+    tmp_path: Path,
+) -> None:
+    """The fix above must not become a blanket "credential name matches
+    its own argument" exclusion - a real setter call hardcoding a weak
+    literal password is exactly the vulnerability this rule exists to
+    catch, and its last word ("password") is not in the reference-suffix
+    exclusion list, unlike "...Parameter"."""
+    java_file = tmp_path / "Config.java"
+    java_file.write_text(
+        "public class Config {\n"
+        "    void configure() {\n"
+        '        auth.setPassword("hunter2");\n'
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    assert {f.identifier for f in detect_in_java(result)} == {"setPassword"}
+
+
+def test_detect_in_java_does_not_flag_spring_security_password_parameter_tree_sitter(
+    tmp_path: Path,
+) -> None:
+    """The same exclusion must hold on the Tree-sitter fallback path."""
+    java_file = tmp_path / "WebSecurityConfig.java"
+    java_file.write_text(
+        "public class WebSecurityConfig {\n"
+        "    int helper(int level) {\n"
+        "        return switch (level) {\n"
+        "            case 1 -> 1;\n"
+        "            default -> 0;\n"
+        "        };\n"
+        "    }\n"
+        "    void configure(HttpSecurity http) {\n"
+        "        http.formLogin(login -> login\n"
+        '            .usernameParameter("username")\n'
+        '            .passwordParameter("password"));\n'
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+    assert result.tree_sitter is not None
+
+    assert detect_in_java(result) == ()

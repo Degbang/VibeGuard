@@ -9375,3 +9375,120 @@ against `.qa-repos/`, and the still-open human-baseline Layer 4 miss
 (Case 17, `ai-admin-report-export-service`) and Layer 4 feature-
 engineering methodology question, both the student's own call on
 sequencing.
+
+## [2026-10-10] - CWE-798 false positive on Spring Security's own form-field-name configurer methods, found scanning OWASP WebGoat
+
+**Status: DRAFT, pending student review.**
+
+**Scope:** Layer 1, `cwe_798.py`'s call-site detection
+(`_check_method_invocation`/`_check_tree_sitter_method_invocation`),
+specifically the shared `_REFERENCE_SUFFIXES` exclusion set both
+parser paths already go through via `_is_credential_name`. In scope:
+the one real false-positive pattern found. Out of scope: any broader
+"self-referential call" exclusion - deliberately rejected, see below.
+
+**What we actually did / found:** Both of the two Layer 4 fix rounds
+above were followed by continued real-repo precision/recall review per
+Section 7's own stated next-work priority. Re-scanning OWASP WebGoat
+(`.qa-repos/webgoat-20260904`, an intentionally-vulnerable teaching
+app already in this scan corpus) for a plausibility pass surfaced a
+real false positive: its genuine `WebSecurityConfig.java` declares
+
+```java
+.formLogin(login -> login
+    .usernameParameter("username")
+    .passwordParameter("password")
+    .permitAll())
+```
+
+- Spring Security's own, long-standing, documented
+`AbstractAuthenticationFilterConfigurer` API: these two methods
+configure which HTTP form field *name* to read a credential from, not
+a credential *value*. VibeGuard flagged both as "Hardcoded credential-
+like value assigned to 'passwordParameter'/'usernameParameter'" -
+`_check_method_invocation`'s generic call-site heuristic treats any
+method whose *name* is credential-shaped (`_is_credential_name`) as a
+candidate, then flags any string-literal argument, with no awareness
+that these two specific, well-known methods' argument is always a
+field name. Found in exactly the same way every other real-repo gap
+this session found one: scanning real code, not guessing. (Also
+re-verified, before investigating further, that an earlier quick
+plausibility check via a table-grep claiming "0 of 199 CWE-284
+findings carry the centralized-authorization caveat" was itself wrong -
+a measurement artifact of Rich's table column-wrapping splitting the
+caveat text across rows at a narrow terminal width, not a real gap; a
+wider terminal confirmed all 199 do carry it, exactly as designed. Not
+every initial finding from this kind of review turns out to be a real
+bug - this one didn't, and is recorded here so the next session doesn't
+re-investigate something already checked and closed.)
+
+**Fixed** by adding `"parameter"` to the pre-existing `_REFERENCE_SUFFIXES`
+set - the same, already-established mechanism that already excludes a
+name whose last word is "name"/"id"/"ref"/"path"/"alias"/etc. (a
+*reference* to a secret, not the secret material itself) from being
+treated as credential-shaped at all. "...Parameter" fits this exact,
+pre-existing category - a configuration slot's name, not a secret -
+rather than warranting a new, one-off special case for Spring Security
+specifically. Verified directly: `last_word("passwordParameter")` →
+`"parameter"`, confirmed via the existing camelCase-splitting helper,
+not assumed.
+
+**Deliberately not a broader fix.** Considered and rejected: a blanket
+exclusion for any call where the method name's credential keyword
+equals its own literal argument (the self-referential pattern already
+excluded for *field declarators* in an earlier entry this session).
+This was explicitly tried for *assignments* earlier and reverted,
+because a real `setPassword("password")` call - hardcoding a weak,
+guessable literal password via a real setter - is exactly the
+vulnerability this rule exists to catch, not a false positive to
+suppress, even though the method name and its argument also happen to
+coincide there. `_REFERENCE_SUFFIXES`'s narrower, already-vetted
+mechanism (what kind of *thing* does the name's last word describe,
+independent of whether it matches the argument) correctly tells these
+two cases apart: "...Parameter" is a slot reference by its naming
+convention alone; "...Password" is not. Verified this distinction holds
+with a dedicated regression test asserting `setPassword("hunter2")`
+is still flagged after this fix.
+
+**Tests/adversarial checks run:** Confirmed the real false positive
+directly against the real file, before and after the fix, not just
+reasoned about (0 CWE-798 findings in `WebSecurityConfig.java` after,
+same as before for the two genuine Spring Security Configuration
+methods it declares). 3 new tests added to `tests/test_cwe_798.py`:
+the real Spring Security shape on the javalang path, the same shape on
+the Tree-sitter fallback path, and the `setPassword("hunter2")`
+still-flagged regression confirming this isn't a blanket self-
+referential-call exclusion in disguise. Checked all seven `.qa-repos`
+entries directly (`grep -rl "passwordParameter\|usernameParameter"`):
+only WebGoat's two files use this pattern, so this fix has zero effect
+on the other six, confirmed by construction rather than assumed. Full
+suite: 481 passed (478 + 3). All four gates clean: `black --check`,
+`ruff check`, `mypy`, `git diff --check`. Re-ran the real scanner
+against the full WebGoat repo before and after: CWE-798 findings
+18 → 16, exactly the two removed, nothing else changed.
+
+**What limitations remain:** `_REFERENCE_SUFFIXES` is still a coarse,
+last-word-only heuristic - a hypothetical method genuinely named
+"...Parameter" that *did* hardcode a real secret (contrived; no real
+instance of this shape was found anywhere in this session's seven-repo
+corpus) would now be missed. Accepted as the same tradeoff every other
+entry in this list already makes, not a new one introduced here.
+
+**Effect on thesis chapters:** A second, independently-found real
+false-positive pattern for Chapter 4/5's precision discussion,
+alongside CWE-798's earlier self-referential-constant fixes - this one
+specifically about a well-known third-party framework API (Spring
+Security's configurer DSL) reusing credential-shaped vocabulary for a
+non-credential purpose, a different root cause from the earlier
+same-session fixes (which were about a project's *own* constant-naming
+convention). Chapter 4's WebGoat evaluation narrative should also note
+the corrected table-grep methodology point above as a small but real
+example of why this project's "reproduce it, don't just reason about
+it" standard extends to the QA/review process's own tooling, not just
+to the code under review.
+
+**Freeze/handoff:** New, same-session work with no independent review
+yet. Per Section 11, recommend a fresh session run adversarial QA
+against it before treating it as frozen, in particular re-deriving the
+"only WebGoat affected" claim and the `setPassword` regression test's
+premise independently rather than trusting this entry's own account.

@@ -64,11 +64,29 @@ CWE_ID = "CWE-798"
 # than the secret material itself. "secretName" holds the name of a
 # secret to look up, not a value; "quarkus.kubernetes.env.secrets"
 # names which Kubernetes Secret resources to mount, not an embedded
-# credential. Deliberately excludes words like "key" that are
+# credential. "parameter" was added scanning OWASP WebGoat's real
+# WebSecurityConfig (``.qa-repos/webgoat-20260904``): Spring Security's
+# own ``.passwordParameter("password")``/``.usernameParameter("username")``
+# configure which HTTP form field name to read a credential from, not a
+# credential value - the method name is a reference to a slot, exactly
+# the same category this suffix list already exists for, not a one-off
+# special case. Deliberately excludes words like "key" that are
 # themselves part of a real credential-shaped name (e.g. "secretKey"
 # must still match).
 _REFERENCE_SUFFIXES = frozenset(
-    {"name", "id", "ref", "reference", "path", "alias", "arn", "uri", "url", "secrets"}
+    {
+        "name",
+        "id",
+        "ref",
+        "reference",
+        "path",
+        "alias",
+        "arn",
+        "uri",
+        "url",
+        "secrets",
+        "parameter",
+    }
 )
 
 # Substrings that mark a value as an obvious placeholder rather than a
