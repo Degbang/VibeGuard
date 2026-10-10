@@ -9,6 +9,7 @@ import javalang
 from vibeguard.layer1_static.ast_parser import parse_file
 from vibeguard.layer1_static.rules._finding import Finding
 from vibeguard.layer1_static.rules._interface_annotations import (
+    build_http_client_type_names,
     build_implementors_index,
     build_interface_hierarchy_index,
     build_interface_method_index,
@@ -2042,3 +2043,139 @@ def test_sibling_methods_by_name_excludes_a_varargs_vs_fixed_arity_collision() -
     siblings = _sibling_methods_by_name(class_path)
 
     assert ("allowed", 1) not in siblings
+
+
+# The real shape found scanning adorsys/xs2a-adapter (a real PSD2/
+# NextGenPSD2 banking middleware added to .qa-repos/ for exactly this
+# kind of real-world validation): a Feign client is split across two
+# types - an empty @FeignClient marker interface declaring no methods
+# of its own, extending a separate, unannotated base interface that
+# declares the actual @RequestMapping-style methods. The pre-existing
+# direct-annotation check (_is_http_client_type) only ever looks at a
+# method's own enclosing type, so it never sees the marker annotation
+# one hop away on the subinterface - 21 real CWE-284/CWE-20 findings on
+# this exact outbound client contract survived as false positives until
+# build_http_client_type_names closed the gap. See IMPLEMENTATION_LOG.md.
+def _write_feign_split_fixture(tmp_path: Path) -> tuple[Path, Path]:
+    base_file = tmp_path / "AccountApi.java"
+    base_file.write_text(
+        "import org.springframework.web.bind.annotation.GetMapping;\n"
+        "interface AccountApi {\n"
+        '    @GetMapping("/v1/accounts")\n'
+        "    String getAccountList();\n"
+        "}\n"
+    )
+    marker_file = tmp_path / "AccountInformationClient.java"
+    marker_file.write_text(
+        "import org.springframework.cloud.openfeign.FeignClient;\n"
+        '@FeignClient(value = "account-information-client")\n'
+        "public interface AccountInformationClient extends AccountApi {\n"
+        "}\n"
+    )
+    return base_file, marker_file
+
+
+def test_build_http_client_type_names_includes_an_indirect_ancestor(tmp_path: Path) -> None:
+    """The base interface a Feign marker extends must be tainted too, not
+    just the marker type itself - that's the whole gap this index closes."""
+    base_file, marker_file = _write_feign_split_fixture(tmp_path)
+    files = (parse_file(base_file), parse_file(marker_file))
+
+    tainted = build_http_client_type_names(files)
+
+    assert tainted == {"AccountApi", "AccountInformationClient"}
+
+
+def test_build_http_client_type_names_refuses_an_ambiguous_ancestor_name(
+    tmp_path: Path,
+) -> None:
+    """Two distinct, unrelated types sharing a simple name must not let a
+    Feign marker's ancestor edge taint the wrong one - the same
+    fail-closed discipline ``build_implementors_index`` already applies
+    to the identical ambiguous-name problem."""
+    (tmp_path / "SharedA.java").write_text("interface Shared {\n    String foo();\n}\n")
+    (tmp_path / "SharedB.java").write_text("interface Shared {\n    String bar();\n}\n")
+    (tmp_path / "Client.java").write_text(
+        "import org.springframework.cloud.openfeign.FeignClient;\n"
+        '@FeignClient(value = "client")\n'
+        "public interface Client extends Shared {\n"
+        "}\n"
+    )
+    files = (
+        parse_file(tmp_path / "SharedA.java"),
+        parse_file(tmp_path / "SharedB.java"),
+        parse_file(tmp_path / "Client.java"),
+    )
+
+    tainted = build_http_client_type_names(files)
+
+    assert "Shared" not in tainted
+    assert "Client" in tainted
+
+
+def test_detect_in_java_suppresses_a_feign_split_base_interface_finding(
+    tmp_path: Path,
+) -> None:
+    """End to end: with the project-wide index passed in, the base
+    interface's own unprotected-endpoint finding must not fire, since the
+    only thing in scope extending it is a declared Feign client contract."""
+    base_file, marker_file = _write_feign_split_fixture(tmp_path)
+    files = (parse_file(base_file), parse_file(marker_file))
+    http_client_type_names = build_http_client_type_names(files)
+
+    findings = tuple(
+        f for pf in files for f in detect_in_java(pf, http_client_type_names=http_client_type_names)
+    )
+
+    assert findings == ()
+
+
+def test_detect_in_java_still_flags_the_feign_split_base_by_default(
+    tmp_path: Path,
+) -> None:
+    """Without the project-wide index (e.g. a single-file call), behavior
+    is unchanged from before this fix - no regression for any caller that
+    doesn't pass the new parameter."""
+    base_file, _ = _write_feign_split_fixture(tmp_path)
+    result = parse_file(base_file)
+
+    findings = detect_in_java(result)
+
+    assert [f.identifier for f in findings] == ["getAccountList"]
+
+
+def test_detect_in_java_suppresses_a_feign_split_base_interface_tree_sitter(
+    tmp_path: Path,
+) -> None:
+    """Tree-sitter fallback must preserve the same indirect-ancestor
+    exclusion as the javalang path."""
+    base_file = tmp_path / "AccountApi.java"
+    base_file.write_text(
+        "import org.springframework.web.bind.annotation.GetMapping;\n"
+        "interface AccountApi {\n"
+        '    @GetMapping("/v1/accounts")\n'
+        "    String getAccountList();\n"
+        "    default int helper(int level) {\n"
+        "        return switch (level) {\n"
+        "            case 1 -> 1;\n"
+        "            default -> 0;\n"
+        "        };\n"
+        "    }\n"
+        "}\n"
+    )
+    marker_file = tmp_path / "AccountInformationClient.java"
+    marker_file.write_text(
+        "import org.springframework.cloud.openfeign.FeignClient;\n"
+        '@FeignClient(value = "account-information-client")\n'
+        "public interface AccountInformationClient extends AccountApi {\n"
+        "}\n"
+    )
+    files = (parse_file(base_file), parse_file(marker_file))
+    assert files[0].tree_sitter is not None
+    http_client_type_names = build_http_client_type_names(files)
+
+    findings = tuple(
+        f for pf in files for f in detect_in_java(pf, http_client_type_names=http_client_type_names)
+    )
+
+    assert findings == ()

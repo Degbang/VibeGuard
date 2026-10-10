@@ -81,6 +81,7 @@ from vibeguard.layer1_static.rules._endpoint_annotations import (
 )
 from vibeguard.layer1_static.rules._finding import Finding
 from vibeguard.layer1_static.rules._interface_annotations import (
+    EMPTY_HTTP_CLIENT_TYPE_NAMES,
     EMPTY_INTERFACE_HIERARCHY,
     EMPTY_INTERFACE_INDEX,
     EMPTY_INTERFACE_PARAMETER_INDEX,
@@ -139,6 +140,7 @@ def detect_in_java(
         EMPTY_INTERFACE_PARAMETER_INDEX
     ),
     interface_hierarchy: InterfaceHierarchy = EMPTY_INTERFACE_HIERARCHY,
+    http_client_type_names: frozenset[str] = EMPTY_HTTP_CLIENT_TYPE_NAMES,
 ) -> tuple[Finding, ...]:
     """Find endpoint methods whose @RequestBody parameter isn't @Valid/@Validated.
 
@@ -162,6 +164,16 @@ def detect_in_java(
             declared two or more interface hops away is still found.
             Defaults to empty, so a single-file call sees only the
             single directly-implemented interface.
+        http_client_type_names: A project-wide index (see
+            ``_interface_annotations.build_http_client_type_names``) of
+            type names that are never a real inbound endpoint because
+            they're an outbound HTTP client contract. Unlike
+            ``cwe_284.py``, this rule had no direct-annotation check at
+            all before this parameter existed - an interface's
+            ``@RequestBody`` parameter was flagged the same way whether
+            the interface was a real controller contract or a Feign/
+            REST-client one. Defaults to empty, so a single-file call
+            sees exactly the pre-existing behavior.
     """
     if parsed_file.tree_sitter is not None:
         return _detect_in_tree_sitter_java(
@@ -169,6 +181,7 @@ def detect_in_java(
             interface_annotations,
             interface_parameter_annotations,
             interface_hierarchy,
+            http_client_type_names,
         )
     if parsed_file.tree is None:
         return ()
@@ -177,6 +190,8 @@ def detect_in_java(
     findings = []
     for path, method in parsed_file.tree.filter(javalang.tree.MethodDeclaration):
         enclosing_type = nearest_enclosing_type(path)
+        if enclosing_type is not None and enclosing_type.name in http_client_type_names:
+            continue
         implemented_interfaces = (
             interfaces_by_type_name.get(enclosing_type.name, ())
             if enclosing_type is not None
@@ -207,6 +222,7 @@ def _detect_in_tree_sitter_java(
     interface_annotations: InterfaceMethodAnnotations,
     interface_parameter_annotations: InterfaceParameterAnnotations,
     interface_hierarchy: InterfaceHierarchy = EMPTY_INTERFACE_HIERARCHY,
+    http_client_type_names: frozenset[str] = EMPTY_HTTP_CLIENT_TYPE_NAMES,
 ) -> tuple[Finding, ...]:
     """Find unvalidated request bodies in a Tree-sitter fallback parse."""
     parsed = parsed_file.tree_sitter
@@ -224,6 +240,8 @@ def _detect_in_tree_sitter_java(
             if enclosing_type is not None
             else None
         )
+        if enclosing_type_name is not None and enclosing_type_name in http_client_type_names:
+            continue
         implemented_interfaces = (
             interfaces_by_type_name.get(enclosing_type_name, ()) if enclosing_type_name else ()
         )

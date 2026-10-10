@@ -74,12 +74,31 @@ from typing import TypeAlias
 import javalang
 
 from vibeguard.layer1_static.ast_parser import ParsedClass, ParsedFile
+from vibeguard.layer1_static.rules._endpoint_annotations import simple_name
 
 InterfaceMethodAnnotations = Mapping[tuple[str, str], tuple[str, ...]]
 InterfaceParameterAnnotations = Mapping[tuple[str, str, int], tuple[str, ...]]
 InterfaceHierarchy = Mapping[str, tuple[str, ...]]
 
 _MAX_INTERFACE_HIERARCHY_DEPTH = 10
+
+# Marker annotations for an outbound HTTP client interface - Quarkus/
+# MicroProfile's REST client and Spring's OpenFeign client. Both reuse
+# the identical JAX-RS/Spring MVC endpoint-annotation vocabulary
+# (@GET/@Path, @GetMapping/@RequestMapping, ...) to describe an
+# *outbound* call's shape, not an inbound one - a type carrying one of
+# these is never itself an access-control/input-validation candidate.
+# Canonical home for this constant: cwe_284.py's own (pre-existing)
+# direct-annotation check and build_http_client_type_names below both
+# use it, so one definition, not two independently-maintained copies.
+_HTTP_CLIENT_TYPE_ANNOTATIONS = frozenset(
+    {
+        "RegisterRestClient",  # Quarkus / MicroProfile REST client
+        "FeignClient",  # Spring OpenFeign client
+    }
+)
+
+EMPTY_HTTP_CLIENT_TYPE_NAMES: frozenset[str] = frozenset()
 
 # Extracted from cwe_284.py once cwe_20.py needed the identical "find this
 # method's nearest enclosing class/interface in a javalang .filter() path"
@@ -406,6 +425,74 @@ def build_implementors_index(parsed_files: Iterable[ParsedFile]) -> Mapping[str,
                     continue
                 implementors.setdefault(interface_name, []).append(parsed_class.name)
     return {name: tuple(types) for name, types in implementors.items()}
+
+
+def build_http_client_type_names(parsed_files: Iterable[ParsedFile]) -> frozenset[str]:
+    """Project-wide set of type names that are never a real inbound endpoint.
+
+    A type directly annotated ``@FeignClient``/``@RegisterRestClient`` is
+    already excluded by ``cwe_284.py``'s own direct per-file check - but
+    that check only ever looks at the type where an unprotected method is
+    *textually declared*. Found by scanning adorsys/xs2a-adapter (a real
+    PSD2/NextGenPSD2 banking middleware, added to ``.qa-repos/`` for this
+    exact kind of real-world validation): a Feign client is frequently
+    split across two types, not one - an empty ``@FeignClient`` marker
+    interface (``AccountInformationClient``) that declares no methods of
+    its own, extending a separate, unannotated base interface
+    (``AccountApi``) that declares the actual ``@RequestMapping``-style
+    methods Feign reads to build its outbound call shape. Every method
+    VibeGuard's rules see is declared on that unannotated base interface,
+    so the existing direct check - which only inspects the *method's own*
+    enclosing type - never fires, and 21 real CWE-284/CWE-20 findings on a
+    legitimate outbound client contract survived as false positives.
+
+    This widens the same way ``build_implementors_index`` does, just in
+    the opposite direction: starting from every marker-annotated type
+    found anywhere in the scan, walk *its own* ancestor closure (see
+    ``_resolve_transitive_interfaces``) and record every ancestor name
+    too, not just the marker type's own name. A base interface reached
+    this way is exactly as safe to treat as "never a real endpoint" as
+    the marker type itself - nothing in a scan where its only recorded
+    ancestor-closure membership comes from a declared Feign/REST-client
+    contract gives any evidence it's also deployed as an inbound
+    ``@RestController``/JAX-RS resource; if it genuinely is also used
+    that way elsewhere, a concrete, non-interface implementor of it would
+    independently flag its own identical finding via the ordinary
+    per-method check, which this index does nothing to suppress.
+
+    Args:
+        parsed_files: Every successfully-parsed Java file from one scan.
+
+    Returns:
+        The set of type names - the marker types themselves, plus every
+        type in their resolved ancestor closure - that
+        ``cwe_284.detect_in_java``/``cwe_20.detect_in_java`` should never
+        treat as an inbound endpoint, regardless of what endpoint-style
+        annotations its methods carry. Subject to the same ambiguous-
+        simple-type-name exclusion as every other index in this module:
+        an ambiguous name cannot be walked past, or recorded as tainted,
+        without risking suppressing an unrelated same-named type's
+        genuine finding.
+    """
+    ambiguous_type_names, materialized = _collect_ambiguous_type_names(parsed_files)
+    hierarchy = build_interface_hierarchy_index(materialized)
+    tainted: set[str] = set()
+    for parsed_file in materialized:
+        for parsed_class in parsed_file.classes:
+            if parsed_class.name in ambiguous_type_names:
+                continue
+            if not any(
+                simple_name(a) in _HTTP_CLIENT_TYPE_ANNOTATIONS for a in parsed_class.annotations
+            ):
+                continue
+            tainted.add(parsed_class.name)
+            for ancestor_name in _resolve_transitive_interfaces(
+                _direct_ancestors(parsed_class), hierarchy
+            ):
+                if ancestor_name in ambiguous_type_names:
+                    continue
+                tainted.add(ancestor_name)
+    return frozenset(tainted)
 
 
 def _resolve_transitive_interfaces(

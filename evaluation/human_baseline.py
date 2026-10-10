@@ -48,6 +48,7 @@ from vibeguard.layer1_static.pom_parser import resolve_inherited_versions
 from vibeguard.layer1_static.rules import cwe_20, cwe_284, cwe_287, cwe_798, cwe_1035
 from vibeguard.layer1_static.rules._finding import Finding
 from vibeguard.layer1_static.rules._interface_annotations import (
+    build_http_client_type_names,
     build_interface_hierarchy_index,
     build_interface_method_index,
     build_interface_parameter_index,
@@ -269,11 +270,14 @@ def _run_all_rules(result: ScanResult) -> tuple[Finding, ...]:
     interface_annotations = build_interface_method_index(ok_java_files)
     interface_parameter_annotations = build_interface_parameter_index(ok_java_files)
     interface_hierarchy = build_interface_hierarchy_index(ok_java_files)
+    http_client_type_names = build_http_client_type_names(ok_java_files)
     findings: list[Finding] = []
     for java_file in ok_java_files:
         findings.extend(cwe_798.detect_in_java(java_file))
         findings.extend(
-            cwe_284.detect_in_java(java_file, interface_annotations, interface_hierarchy)
+            cwe_284.detect_in_java(
+                java_file, interface_annotations, interface_hierarchy, http_client_type_names
+            )
         )
         findings.extend(cwe_287.detect_in_java(java_file))
         findings.extend(
@@ -282,6 +286,7 @@ def _run_all_rules(result: ScanResult) -> tuple[Finding, ...]:
                 interface_annotations,
                 interface_parameter_annotations,
                 interface_hierarchy,
+                http_client_type_names,
             )
         )
     for config_file in result.config_files:

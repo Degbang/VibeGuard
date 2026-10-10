@@ -8665,3 +8665,243 @@ the human-baseline comparison's flagged Layer 4 miss (Case 17,
 `ai-admin-report-export-service`), Gradle support for CWE-1035, and the
 Layer 4 feature-engineering methodology question, which remains the
 student's own call.
+
+## [2026-10-10] - Seventh real-world repository added: adorsys/xs2a-adapter - Spring-side interface-widening validated on real code, and a new Feign-client false-positive gap found and partially fixed
+
+**Status: DRAFT, pending student review.**
+
+**What the plan said:** Section 7's next-work list named a seventh
+`.qa-repos` entry as the top open evaluation item. The specific angle
+chosen (after two weaker web-search angles - a Gradle-based project,
+an OAuth2/JWT resource server - came up thin) was: find a real Spring
+application that *commits* its OpenAPI-generator-produced controller
+interface to source control, rather than generating it only at build
+time into a gitignored `target/generated-sources/` directory. This
+matters because the original motivating case for the whole interface-
+widening feature family, `spring-petclinic-rest`'s `OwnersApi`/
+`OwnerRestControllerV1` pair, lives under exactly that excluded path -
+real, but never actually scanned - so the Spring side of this
+mechanism had only ever been unit-tested, never validated against
+real, scanned, committed source the way the JAX-RS side already was
+via Apache Syncope (2026-10-04 entry).
+
+**What we actually did / found:**
+
+**1. Found and verified a real candidate.** adorsys/xs2a-adapter
+(`github.com/adorsys/xs2a-adapter`, AGPL-3.0, 40 stars, not archived,
+last pushed 2025-12-12) is a production PSD2/NextGenPSD2 "XS2A"
+banking middleware - real adapter code a bank integrates to satisfy
+EU open-banking regulatory requirements, not a tutorial or demo.
+Verified directly against the repository rather than trusting its
+README: its `.gitignore` excludes only `target/`, not `src/`; its
+`xs2a-adapter-codegen` module's `pom.xml` has no plugin bound to
+regenerate into `xs2a-adapter-generated-rest-api/src/main/java/...` at
+build time (only an unrelated ANTLR grammar step and a
+`build-helper-maven-plugin` source-folder registration, confirmed by
+reading the pom directly); and the committed `AccountApi.java` carries
+`@Generated("xs2a-adapter-codegen")` plus real Spring MVC annotations.
+Cloned shallow (`--depth 1`, `develop` branch) to
+`.qa-repos/xs2a-adapter-20261010/` (654 Java files, 14MB, HEAD
+`355b58d`, gitignored, not tracked in this repo per existing
+`.qa-repos/` convention).
+
+**2. The Spring-side interface-widening mechanism is now validated on
+real code, not just unit tests.** `ConsentController` (in
+`xs2a-adapter-rest-impl`) is declared as
+`public class ConsentController extends AbstractController implements
+ConsentApi, AccountApi` - `@RestController` is the *only* annotation on
+the class, and every `@Override` method carries no annotation of its
+own at all. Every `@GetMapping`/`@PostMapping`/`@RequestBody`
+annotation VibeGuard needs to reason about this controller's endpoints
+comes purely from the two implemented, committed, generated
+interfaces. Running the real scanner against the full repo (`python
+main.py .qa-repos/xs2a-adapter-20261010`) correctly produced CWE-284/
+CWE-20 findings attributed to `ConsentController.java`/
+`PaymentController.java` at the concrete class's own lines, via
+widening from `ConsentApi`/`AccountApi`/`PaymentApi` - exactly the
+mechanism this repo was sought out to prove works on real, not
+synthetic, multi-interface Spring code.
+
+**3. Found a real, new false-positive gap: Feign clients split across
+two types.** The scan also surfaced `AccountInformationClient`,
+`PaymentInitiationClient`, `AspspClient`, `Oauth2Client`, and
+`EmbeddedPreAuthorisationClient` in `xs2a-adapter-service-remote` -
+Spring Cloud OpenFeign *outbound* HTTP clients, e.g.:
+
+```java
+@FeignClient(value = "account-information-client", url = "${xs2a-adapter.url}")
+public interface AccountInformationClient extends AccountApi {
+}
+```
+
+CWE-284's existing `_is_http_client_type` check (added for Quarkus's
+`@RegisterRestClient`/Spring's `@FeignClient`, pre-dating this entry)
+already excludes a type *directly* carrying one of these marker
+annotations - but it only ever inspects the method's own immediately
+enclosing type. Here, `AccountInformationClient` declares no methods
+of its own (empty body); every `@RequestMapping`-style method Feign
+reads to build its outbound call shape is declared on a *separate*,
+unannotated base interface (a package-private `AccountApi` in
+`xs2a-adapter-service-remote`'s own `remote.client` package, textually
+unrelated to the real server-side `rest.api.AccountApi` despite the
+name collision - see point 4). The existing direct check never fires
+for methods declared one hop away from the marker annotation, so this
+pattern produced 21 real false positives in this one scan (18 CWE-284
++ 3 CWE-20) on a type that is never deployed as an inbound endpoint
+anywhere in the project. CWE-20 had no equivalent HTTP-client
+exclusion at all before this fix, direct or indirect - not even the
+simpler, same-type case was previously guarded.
+
+**Fixed via a new project-wide index**,
+`_interface_annotations.build_http_client_type_names`: for every
+marker-annotated type found anywhere in a scan, walks its own ancestor
+closure (reusing the existing, already bounded/cycle-safe
+`_resolve_transitive_interfaces`/`_direct_ancestors` machinery
+`build_implementors_index` already uses, just in the opposite
+direction) and records every ancestor name as "never a real inbound
+endpoint" too, not just the marker type's own name. Threaded through
+as a new, defaulted-to-empty parameter on `cwe_284.detect_in_java` (in
+addition to, not replacing, its pre-existing direct check - kept for
+single-file-call backward compatibility) and `cwe_20.detect_in_java`
+(which gained HTTP-client awareness for the first time, covering both
+the direct and indirect case in one index, since it never had a direct
+check to preserve). Wired into `main.py` and `evaluation/
+human_baseline.py` (which explicitly mirrors `main.py`'s rule-running
+pipeline) alongside the other project-wide indexes. Also respects the
+same ambiguous-simple-type-name exclusion every other index in this
+module already applies - see point 4 for why that matters here
+specifically, not just in the abstract.
+
+**4. Honest accounting - this fix does not close the originally-
+targeted gap, and that is expected, not a bug.** Re-running the same
+before/after comparison directly (not just trusting the new finding
+count) shows the fix removes exactly 16 findings, all genuine
+duplicates: `PaymentApi`/`AspspSearchApi`/`EmbeddedPreAuthorisationApi`
+are *also* real, dual-purpose interfaces - genuinely implemented by
+real concrete controllers (`PaymentController`, `AspspSearchController`,
+`EmbeddedPreAuthorisationController`) *and* separately extended by a
+Feign client for unrelated internal routing. Confirmed by direct
+re-scan that every one of those concrete controllers' own findings
+(e.g. `PaymentController.java:55 initiatePayment`,
+`ConsentController.java:56 body`) survives completely unchanged after
+the fix - CWE-284's existing dedup already collapsed the interface-
+level copy into the concrete one for `PaymentApi` before this fix even
+shipped, so removing its now-also-tainted standalone copy here is
+strictly a cleanup of an already-redundant entry, not a new
+suppression of a real concern. Zero regressions confirmed this way.
+
+The 21 findings that originally motivated this fix (point 3,
+`de.adorsys.xs2a.adapter.remote.client.AccountApi`) are **not** among
+the 16 removed. Directly confirmed why:
+`_collect_ambiguous_type_names` correctly flags `"AccountApi"` as
+ambiguous in this project, because the real server-side
+`rest.api.AccountApi` and the unrelated Feign-only `remote.client.
+AccountApi` are two textually distinct top-level types that happen to
+share a simple name - exactly the scenario the ambiguous-name guard
+exists to refuse to walk past, since this module's indexing is
+deliberately coarse and name-based, not import/package-resolution-
+based (stated as a known ceiling throughout `_interface_annotations.py`
+since it was first written). The guard did its job correctly here: it
+is choosing not to guess which `AccountApi` a Feign marker really
+extends rather than risk tainting the wrong one. This fix's real-world
+effect in this one repo is therefore smaller than the motivating case
+suggested - 16 genuine duplicates removed, 21 pre-existing false
+positives still present - but the new indexing mechanism itself is
+correct, tested, and will close the gap in full on any project where
+the same pattern doesn't also collide with an ambiguous name.
+
+**Tests/adversarial checks run:** Added 4 new tests to
+`test_cwe_284.py` (`build_http_client_type_names` includes an indirect
+ancestor; refuses an ambiguous ancestor name, mirroring
+`build_implementors_index`'s own test; `detect_in_java` suppresses the
+base-interface finding end to end with the index passed, both the
+javalang and Tree-sitter-fallback paths; still flags it by default
+with no index passed, confirming no regression for any caller that
+doesn't opt in) and 3 to `test_cwe_20.py` (the same split-interface
+suppression; the default-unchanged case; the direct same-type case
+CWE-20 never guarded before). Full suite: 447 passed (439 pre-existing
++ 8 new). All four gates clean: `black --check`, `ruff check`, `mypy`,
+`git diff --check`. Re-ran the real scanner against
+`.qa-repos/xs2a-adapter-20261010` before and after, diffed the raw
+finding set directly (not just the summary counts): 96 → 80 raw
+findings (96 → 72 after Layer 2/3 normalization in the CLI's own
+count), 16 removed, 0 added, every removal independently confirmed to
+be a redundant interface-level copy of a finding that survives
+unchanged on its real concrete implementor. Checked all **six** (not
+five - corrected after double-checking `.qa-repos/`, which this draft
+initially miscounted) pre-existing entries for zero effect, not just
+assumed it: `apache-syncope-20261004`, `spring-boot-realworld-example-
+app-20260904`, `spring-petclinic-microservices-20261003`, and
+`spring-petclinic-rest-20260722b` contain zero `@FeignClient`/
+`@RegisterRestClient`-annotated types at all (confirmed by direct
+grep), so `build_http_client_type_names` is empty for all four by
+construction - identical to the pre-fix default. `quarkus-super-
+heroes-20260722b` *does* use `@RegisterRestClient` (`HeroRestClient`,
+`NarrationClient`) - genuinely exercised, not just assumed absent -
+but both declare their marker annotation and their own methods on the
+same type, the direct case the pre-existing `_is_http_client_type`
+check already covered before this session; re-running the same before/
+after diff this entry used for xs2a-adapter confirms 3 findings before
+and 3 after, 0 removed, 0 added. `apache-syncope-20261004` and
+`webgoat-20260904` could not be re-verified the same direct way: a raw
+`scan_directory` call outside `process_supervisor`'s protection hit the
+pre-existing, already-documented, non-deterministic native Tree-sitter
+crash (2026-10-04 entry) on both - unrelated to this fix (this change
+never touches the Tree-sitter binding, only adds a `frozenset`
+membership check) and exactly the failure mode `process_supervisor`
+exists to survive; confirmed `python main.py .qa-repos/webgoat-20260904`
+itself (the real, supervised entry point) completes normally end to
+end despite it. Zero effect on both is established the same way as the
+other zero-marker-annotation repos - confirmed by direct grep that
+neither contains a single `@FeignClient`/`@RegisterRestClient`-
+annotated type, which deterministically means `build_http_client_type_names`
+returns an empty set for them by construction, regardless of whether
+the raw verification script itself can complete a full scan.
+
+**What limitations remain:** The residual 21 false positives in this
+one repo are a direct, inherent consequence of this whole module's
+deliberately coarse, simple-name-based design, not a defect specific
+to this fix - closing them fully would need real import-statement-
+based type resolution to disambiguate `remote.client.AccountApi` from
+`rest.api.AccountApi`, a materially larger scope change than this
+entry's fix, and one that would also need to be re-justified against
+every other ambiguous-name guard this module already relies on
+elsewhere (CWE-798's and CWE-284's own prior ambiguous-name fixes this
+session). Logged here as a known, accepted ceiling rather than pursued
+now - matches this project's established practice of treating the
+coarse/name-based tradeoff as already accepted project-wide, not
+something to silently re-open piecemeal for one repo's specific
+collision.
+
+**Effect on thesis chapters:** Chapter 4/5 gain a second, independent
+real-world validation of the Spring-side interface-widening mechanism
+(adorsys/xs2a-adapter, alongside Apache Syncope's JAX-RS validation),
+closing the specific gap the 2026-09/10 sessions already flagged -
+`spring-petclinic-rest`'s equivalent case was real but unscanned.
+Chapter 4/5 also gain a second, honestly-quantified real-world
+precision finding to set alongside the CWE-284 centralized-
+authorization and hand-rolled-guard false-negative fixes already
+logged: a false-*positive* class (outbound Feign HTTP clients
+misread as inbound endpoints), partially closed in this one repo (16
+of 37 total candidate findings), with the specific, understood reason
+the remainder isn't - a defensible, citable limitation of the coarse
+name-based design rather than an unexplained gap. Chapter 3's
+description of the interface-widening indexes should note the new
+`build_http_client_type_names` index alongside the existing method/
+parameter/hierarchy/implementor ones.
+
+**Freeze/handoff:** This fix is new, same-session work with no
+independent review yet. Per Section 11, recommend a fresh session run
+adversarial QA against it before treating it as frozen - in
+particular: (a) re-verify the ambiguous-name interaction documented in
+point 4 is exactly what's happening, not an artifact of how this
+entry's own verification script was written; (b) check whether a
+Feign client extending a *chain* of interfaces (not just one direct
+hop) is still walked correctly; (c) check a marker type that also
+declares methods of its own directly (the case the pre-existing direct
+check already covered) still behaves correctly now that both checks
+run. Section 7's next-work list is otherwise unchanged by this entry:
+the human-baseline comparison's flagged Layer 4 miss (Case 17,
+`ai-admin-report-export-service`), Gradle support for CWE-1035, and
+the Layer 4 feature-engineering methodology question remain open, and
+are the student's own call on sequencing.

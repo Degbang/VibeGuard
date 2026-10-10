@@ -8,6 +8,7 @@ from vibeguard.layer1_static.ast_parser import ParsedFile, parse_file
 from vibeguard.layer1_static.rules._interface_annotations import (
     InterfaceMethodAnnotations,
     InterfaceParameterAnnotations,
+    build_http_client_type_names,
     build_interface_hierarchy_index,
     build_interface_method_index,
     build_interface_parameter_index,
@@ -429,3 +430,88 @@ def test_detect_in_java_finds_unvalidated_body_inherited_from_interface_tree_sit
 
     assert len(findings) == 1
     assert findings[0].identifier == "owner"
+
+
+# The same adorsys/xs2a-adapter shape cwe_284.py's equivalent test
+# documents (see test_cwe_284.py's _write_feign_split_fixture): a Feign
+# client is an empty @FeignClient marker interface extending a separate,
+# unannotated base interface that declares the real @RequestBody
+# parameter. Unlike cwe_284.py, this rule had no direct-annotation
+# exclusion at all before this fix - a Feign client's own @RequestBody
+# parameter (declared directly on the @FeignClient-annotated type) was
+# never excluded either, so this covers both the direct and indirect
+# case in one project-wide index.
+def _write_feign_split_fixture(tmp_path: Path) -> tuple[Path, Path]:
+    base_file = tmp_path / "AccountApi.java"
+    base_file.write_text(
+        "import org.springframework.web.bind.annotation.PostMapping;\n"
+        "import org.springframework.web.bind.annotation.RequestBody;\n"
+        "interface AccountApi {\n"
+        '    @PostMapping("/v1/consents")\n'
+        "    String createConsent(@RequestBody Consents body);\n"
+        "}\n"
+    )
+    marker_file = tmp_path / "AccountInformationClient.java"
+    marker_file.write_text(
+        "import org.springframework.cloud.openfeign.FeignClient;\n"
+        '@FeignClient(value = "account-information-client")\n'
+        "public interface AccountInformationClient extends AccountApi {\n"
+        "}\n"
+    )
+    return base_file, marker_file
+
+
+def test_detect_in_java_suppresses_a_feign_split_base_interface_finding(
+    tmp_path: Path,
+) -> None:
+    """With the project-wide HTTP-client-type index passed in, the base
+    interface's own unvalidated-@RequestBody finding must not fire - the
+    only thing in scope extending it is a declared Feign client contract."""
+    base_file, marker_file = _write_feign_split_fixture(tmp_path)
+    interface_result = parse_file(base_file)
+    marker_result = parse_file(marker_file)
+    files = (interface_result, marker_result)
+    http_client_type_names = build_http_client_type_names(files)
+
+    findings = tuple(
+        f for pf in files for f in detect_in_java(pf, http_client_type_names=http_client_type_names)
+    )
+
+    assert findings == ()
+
+
+def test_detect_in_java_still_flags_the_feign_split_base_by_default(
+    tmp_path: Path,
+) -> None:
+    """Without the project-wide index, behavior is unchanged from before
+    this fix - no regression for any caller that doesn't pass it."""
+    base_file, _ = _write_feign_split_fixture(tmp_path)
+    result = parse_file(base_file)
+
+    findings = detect_in_java(result)
+
+    assert [f.identifier for f in findings] == ["body"]
+
+
+def test_detect_in_java_suppresses_a_direct_feign_client_body_param(
+    tmp_path: Path,
+) -> None:
+    """The direct case - @FeignClient and the @RequestBody method on the
+    *same* type - which this rule never excluded before this fix either."""
+    client_file = tmp_path / "AccountInformationClient.java"
+    client_file.write_text(
+        "import org.springframework.cloud.openfeign.FeignClient;\n"
+        "import org.springframework.web.bind.annotation.PostMapping;\n"
+        "import org.springframework.web.bind.annotation.RequestBody;\n"
+        '@FeignClient(value = "account-information-client")\n'
+        "public interface AccountInformationClient {\n"
+        '    @PostMapping("/v1/consents")\n'
+        "    String createConsent(@RequestBody Consents body);\n"
+        "}\n"
+    )
+    result = parse_file(client_file)
+    http_client_type_names = build_http_client_type_names((result,))
+
+    findings = detect_in_java(result, http_client_type_names=http_client_type_names)
+
+    assert findings == ()

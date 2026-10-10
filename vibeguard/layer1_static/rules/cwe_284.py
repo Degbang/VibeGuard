@@ -69,6 +69,8 @@ from vibeguard.layer1_static.rules._endpoint_annotations import (
 )
 from vibeguard.layer1_static.rules._finding import Finding
 from vibeguard.layer1_static.rules._interface_annotations import (
+    _HTTP_CLIENT_TYPE_ANNOTATIONS,
+    EMPTY_HTTP_CLIENT_TYPE_NAMES,
     EMPTY_INTERFACE_HIERARCHY,
     EMPTY_INTERFACE_INDEX,
     InterfaceHierarchy,
@@ -151,18 +153,12 @@ _INTERFACE_AUTHORIZATION_CAVEAT = (
     "typically do not), which is not visible to static analysis."
 )
 
-_HTTP_CLIENT_TYPE_ANNOTATIONS = frozenset(
-    {
-        "RegisterRestClient",  # Quarkus / MicroProfile REST client
-        "FeignClient",  # Spring OpenFeign client
-    }
-)
-
 
 def detect_in_java(
     parsed_file: ParsedFile,
     interface_annotations: InterfaceMethodAnnotations = EMPTY_INTERFACE_INDEX,
     interface_hierarchy: InterfaceHierarchy = EMPTY_INTERFACE_HIERARCHY,
+    http_client_type_names: frozenset[str] = EMPTY_HTTP_CLIENT_TYPE_NAMES,
 ) -> tuple[Finding, ...]:
     """Find endpoint methods with no authorization annotation anywhere in scope.
 
@@ -191,9 +187,19 @@ def detect_in_java(
             declared two or more interface hops away is still found.
             Defaults to empty, so a single-file call sees only the
             single directly-implemented interface.
+        http_client_type_names: A project-wide index (see
+            ``_interface_annotations.build_http_client_type_names``) of
+            type names that are never a real inbound endpoint because
+            they're an outbound HTTP client contract (directly, or as an
+            ancestor of a ``@FeignClient``/``@RegisterRestClient``
+            marker type declared elsewhere in the scan). Defaults to
+            empty, so a single-file call sees only the pre-existing
+            direct-annotation check below.
     """
     if parsed_file.tree_sitter is not None:
-        return _detect_in_tree_sitter_java(parsed_file, interface_annotations, interface_hierarchy)
+        return _detect_in_tree_sitter_java(
+            parsed_file, interface_annotations, interface_hierarchy, http_client_type_names
+        )
     if parsed_file.tree is None:
         return ()
 
@@ -203,7 +209,12 @@ def detect_in_java(
         for path, node in parsed_file.tree.filter(javalang.tree.MethodDeclaration)
         if (
             finding := _check_method(
-                parsed_file.path, node, path, interfaces_by_type_name, interface_annotations
+                parsed_file.path,
+                node,
+                path,
+                interfaces_by_type_name,
+                interface_annotations,
+                http_client_type_names,
             )
         )
         is not None
@@ -215,6 +226,7 @@ def _detect_in_tree_sitter_java(
     parsed_file: ParsedFile,
     interface_annotations: InterfaceMethodAnnotations,
     interface_hierarchy: InterfaceHierarchy = EMPTY_INTERFACE_HIERARCHY,
+    http_client_type_names: frozenset[str] = EMPTY_HTTP_CLIENT_TYPE_NAMES,
 ) -> tuple[Finding, ...]:
     """Find unprotected endpoints in a Tree-sitter fallback parse."""
     parsed = parsed_file.tree_sitter
@@ -233,6 +245,7 @@ def _detect_in_tree_sitter_java(
                 ancestors,
                 interfaces_by_type_name,
                 interface_annotations,
+                http_client_type_names,
             )
         )
         is not None
@@ -247,6 +260,7 @@ def _check_tree_sitter_method(
     ancestors: tuple[Node, ...],
     interfaces_by_type_name: Mapping[str, tuple[str, ...]],
     interface_annotations: InterfaceMethodAnnotations,
+    http_client_type_names: frozenset[str] = EMPTY_HTTP_CLIENT_TYPE_NAMES,
 ) -> Finding | None:
     own_method_annotations = ts_annotation_names(source, method)
     enclosing_type = ts_nearest_enclosing_type(ancestors)
@@ -254,6 +268,8 @@ def _check_tree_sitter_method(
     enclosing_type_name = (
         ts_declaration_name(source, enclosing_type) if enclosing_type is not None else None
     )
+    if enclosing_type_name is not None and enclosing_type_name in http_client_type_names:
+        return None
     implemented_interfaces = (
         interfaces_by_type_name.get(enclosing_type_name, ()) if enclosing_type_name else ()
     )
@@ -298,10 +314,13 @@ def _check_method(
     path: tuple[object, ...],
     interfaces_by_type_name: Mapping[str, tuple[str, ...]],
     interface_annotations: InterfaceMethodAnnotations,
+    http_client_type_names: frozenset[str] = EMPTY_HTTP_CLIENT_TYPE_NAMES,
 ) -> Finding | None:
     """Build a Finding if this method is an unprotected endpoint."""
     own_method_annotations = tuple(a.name for a in method.annotations)
     enclosing_type = nearest_enclosing_type(path)
+    if enclosing_type is not None and enclosing_type.name in http_client_type_names:
+        return None
     implemented_interfaces = (
         interfaces_by_type_name.get(enclosing_type.name, ()) if enclosing_type is not None else ()
     )
