@@ -8810,16 +8810,17 @@ positives still present - but the new indexing mechanism itself is
 correct, tested, and will close the gap in full on any project where
 the same pattern doesn't also collide with an ambiguous name.
 
-**Tests/adversarial checks run:** Added 4 new tests to
+**Tests/adversarial checks run:** Added 5 new tests to
 `test_cwe_284.py` (`build_http_client_type_names` includes an indirect
 ancestor; refuses an ambiguous ancestor name, mirroring
 `build_implementors_index`'s own test; `detect_in_java` suppresses the
-base-interface finding end to end with the index passed, both the
-javalang and Tree-sitter-fallback paths; still flags it by default
-with no index passed, confirming no regression for any caller that
-doesn't opt in) and 3 to `test_cwe_20.py` (the same split-interface
-suppression; the default-unchanged case; the direct same-type case
-CWE-20 never guarded before). Full suite: 447 passed (439 pre-existing
+base-interface finding end to end with the index passed - one test for
+the javalang path, one for the Tree-sitter-fallback path; still flags
+it by default with no index passed, confirming no regression for any
+caller that doesn't opt in) and 3 to `test_cwe_20.py` (the same split-
+interface suppression; the default-unchanged case; the direct same-type
+case CWE-20 never guarded before) - 8 new tests total. Full suite: 447
+passed (439 pre-existing
 + 8 new). All four gates clean: `black --check`, `ruff check`, `mypy`,
 `git diff --check`. Re-ran the real scanner against
 `.qa-repos/xs2a-adapter-20261010` before and after, diffed the raw

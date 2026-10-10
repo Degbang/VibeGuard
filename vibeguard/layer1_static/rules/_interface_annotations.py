@@ -64,6 +64,18 @@ interface. Used to deduplicate a finding on an interface's own method
 when a concrete implementing class elsewhere in the scan independently
 flags the identical unprotected endpoint - the interface is never
 itself a deployed HTTP resource, only its implementor is.
+
+Also builds ``build_http_client_type_names``: the project-wide set of
+type names that are never a real inbound endpoint because they're an
+outbound HTTP client contract (``@FeignClient``/``@RegisterRestClient``),
+walked the same way as ``build_implementors_index`` but in the opposite
+direction - from a marker-annotated type outward through its own
+ancestor closure, not from a concrete implementor's ancestors inward.
+Found necessary scanning adorsys/xs2a-adapter: a Feign client is often
+an empty marker interface extending a separate, unannotated base
+interface that declares the real endpoint-looking methods one hop
+away, invisible to a check that only inspects a method's own
+immediately-enclosing type.
 """
 
 from __future__ import annotations
