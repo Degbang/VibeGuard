@@ -8613,3 +8613,55 @@ side continues to degrade safely through an ambiguous *superclass*
 name the same way it was already confirmed to for ambiguous interface
 names) before the interface-widening/dedup feature family as a whole
 is treated as fully settled.
+
+**2026-10-10 independent QA pass: clean. The entire interface-widening/
+dedup feature family is now treated as fully settled.**
+
+This pass specifically re-attacked the ambiguous-name dedup fix
+(`027541b`) on every shape not yet tried: confirmed the annotation-
+widening side (not just dedup) continues to degrade safely through an
+ambiguous *superclass* name, exactly as already established for
+ambiguous interface names - `top_level_interfaces_by_type_name` still
+surfaces the raw edge, but `build_interface_method_index`'s own key
+exclusion means the lookup finds nothing, so no widening happens and
+nothing crashes. Also verified: three-or-more-way ambiguous collisions
+(not just two); an ambiguous name colliding between an *interface*
+declaration and a *class* declaration (not just class-vs-class);
+ambiguity sitting in the *middle* of a multi-hop chain (`C extends B`,
+`B extends SharedBase` where `SharedBase` is ambiguous and the true
+`SharedBase` has its own further interface two hops beyond) - the walk
+correctly "admits the limit" at the ambiguous name and never reaches
+past it. Independently re-verified (not just re-running the shipped
+tests) two of the three originally-frozen ambiguous-*interface*-name
+mechanisms predating this whole session's Syncope work (CWE-20's
+parameter index; a two-hop chain with an ambiguous middle name) still
+degrade safely too - no regression anywhere in the feature's older,
+already-settled parts. Re-confirmed the real Syncope `idrepo`
+measurement is unaffected (314 raw / 164 after dedup - this module has
+zero ambiguous names) and that the five pre-existing `.qa-repos`
+entries, two of which (`quarkus-super-heroes`: 6 ambiguous names;
+`spring-petclinic-microservices`: 9) genuinely exercise the ambiguity
+path for the first time in this specific measurement, still sum to
+270 unchanged. Full suite: 439 passed; all four gates clean. No code
+changes were needed - this pass found nothing to fix.
+
+**Freeze: the interface-widening/dedup feature family as a whole.**
+Recapping the full lineage this closes out, spanning five separate
+fixes and QA rounds across this session's Apache Syncope evaluation
+track: `ParsedClass.is_interface` (interface-extends-interface and
+abstract-class-implements-interface, both found and fixed, re-verified
+clean on a third pass); the superclass/`extends`-chain walk itself
+(`_direct_ancestors`, confirmed correct on its first QA pass -
+multi-level chains, mixed edge types, diamond reachability, the depth
+cap, and CWE-20's shared benefit); and the ambiguous-name exclusion now
+also applied to ancestor names, not just implementor sources (found
+and fixed the same day the superclass walk shipped, confirmed clean on
+this pass). No further QA round is indicated for this mechanism -
+reopen only if a later layer or a future real-repo QA pass surfaces a
+genuinely new, reproduced gap, per Section 8's freeze discipline. Per
+Section 7, the next actual pieces of work remain unchanged by this
+freeze: continued real-repo evaluation (a seventh `.qa-repos` entry),
+the human-baseline comparison's flagged Layer 4 miss (Case 17,
+`ai-admin-report-export-service`), Gradle support for CWE-1035, and the
+Layer 4 feature-engineering methodology question, which remains the
+student's own call.
