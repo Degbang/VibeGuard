@@ -9331,3 +9331,47 @@ unchanged: the human-baseline comparison's flagged Layer 4 miss (Case
 17, `ai-admin-report-export-service`) and the Layer 4 feature-
 engineering methodology question remain open, student's own call on
 sequencing.
+
+**2026-10-10 independent QA pass: clean. Freeze: Gradle support for
+CWE-1035, including both this entry's fix and the prior entry's
+original build.**
+
+A fresh session re-derived every claim across both of this day's
+Gradle entries with real command executions, not code review alone -
+re-reproduced the critical crash fix end to end for both
+`build.gradle` and `build.gradle.kts` individually and together in one
+directory (no `Path.suffix` collision between them); computed and
+diffed a `ScoredFinding` for the identical dependency via `pom.xml` and
+via `build.gradle` field-by-field, confirming the only difference is
+the factor text; stress-tested the comment-stripping fix with an
+unterminated block comment, a string ending in an escaped backslash
+right before its closing quote, non-nesting `/* /* */ */` semantics
+matching real Groovy/Java, a bare single-digit version, a genuine `//`/
+`/*` sequence inside real string literals, 500-deep nested braces
+inside a comment, and a 20,000-line comment-heavy file - all handled
+correctly, none hung or crashed; ran a Gradle-only project through the
+real Layer 4/5 SHAP output directly and confirmed no `gradle_source_count`
+feature, no NaN, no missing values, and `cwe_1035_count`/`critical_count`
+correctly reflecting the Gradle finding regardless; re-ran
+`tests/test_thesis_orchestrator.py` and wrote independent repros
+against `_run_scan` beyond the one shipped test (a `.kts`-only project,
+an unresolvable-variable-version project correctly yielding zero
+findings with no crash); read all three of `thesis_orchestrator.py`'s
+JSON Schema payloads in full and confirmed none of them enumerate a
+fixed source-type set that Gradle would violate; and checked
+`evaluation/human_baseline.py`/`evaluation/thesis_run.py` for the same
+duplicated-gap pattern that hit `thesis_orchestrator.py` - neither has
+one. Full suite and all four gates re-run independently: 478 passed,
+`black`/`ruff`/`mypy`/`git diff --check` all clean. No new bug found.
+
+**Freeze: Gradle support for CWE-1035 as a whole** (the original build
+in the prior-but-one entry, the critical-crash and comment-handling
+fixes in the prior entry, and this confirmation). No further QA round
+is indicated for this feature - reopen only if a later layer or a
+future real-repo QA pass surfaces a genuinely new, reproduced gap, per
+Section 8's freeze discipline. Per Section 7, the next actual work is
+unrelated to Gradle: continued real-repo precision/recall evaluation
+against `.qa-repos/`, and the still-open human-baseline Layer 4 miss
+(Case 17, `ai-admin-report-export-service`) and Layer 4 feature-
+engineering methodology question, both the student's own call on
+sequencing.
