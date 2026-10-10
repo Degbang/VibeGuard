@@ -1151,6 +1151,35 @@ def test_detect_in_java_still_flags_a_real_setter_with_a_weak_literal_password(
     assert {f.identifier for f in detect_in_java(result)} == {"setPassword"}
 
 
+def test_detect_in_java_pins_the_known_miss_on_a_parameter_suffixed_setter(
+    tmp_path: Path,
+) -> None:
+    """Documents a known, accepted limitation rather than leaving it
+    untested: ``_REFERENCE_SUFFIXES``'s exclusion is name-shape-only (it
+    never inspects the argument), so a method whose name merely *ends*
+    in "...Parameter" is excluded unconditionally - even one that, unlike
+    Spring Security's real ``passwordParameter(String)``, hardcodes a
+    genuine secret as its argument rather than naming a form field. This
+    is not a new blind spot this fix introduces: every other word
+    already in ``_REFERENCE_SUFFIXES`` ("name"/"id"/"path"/... ) has the
+    identical property today. Pinned here so a future change to this
+    exclusion changes this test deliberately, not by accident, and so
+    the limitation stated in IMPLEMENTATION_LOG.md's 2026-10-10 entry has
+    a regression test backing it."""
+    java_file = tmp_path / "Config.java"
+    java_file.write_text(
+        "public class Config {\n"
+        "    void configure() {\n"
+        '        auth.setPasswordParameter("hunter2");\n'
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    assert detect_in_java(result) == ()
+
+
 def test_detect_in_java_does_not_flag_spring_security_password_parameter_tree_sitter(
     tmp_path: Path,
 ) -> None:

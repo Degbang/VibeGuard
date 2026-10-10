@@ -9404,14 +9404,20 @@ real false positive: its genuine `WebSecurityConfig.java` declares
 - Spring Security's own, long-standing, documented
 `AbstractAuthenticationFilterConfigurer` API: these two methods
 configure which HTTP form field *name* to read a credential from, not
-a credential *value*. VibeGuard flagged both as "Hardcoded credential-
-like value assigned to 'passwordParameter'/'usernameParameter'" -
-`_check_method_invocation`'s generic call-site heuristic treats any
-method whose *name* is credential-shaped (`_is_credential_name`) as a
-candidate, then flags any string-literal argument, with no awareness
-that these two specific, well-known methods' argument is always a
-field name. Found in exactly the same way every other real-repo gap
-this session found one: scanning real code, not guessing. (Also
+a credential *value*. VibeGuard flagged `passwordParameter` as
+"Hardcoded credential-like value assigned to 'passwordParameter'" in
+both files - `_check_method_invocation`'s generic call-site heuristic
+treats any method whose *name* is credential-shaped
+(`_is_credential_name`) as a candidate, then flags any string-literal
+argument, with no awareness that this well-known method's argument is
+always a field name. (`usernameParameter` was never itself a candidate
+either way - "username" is not one of `CREDENTIAL_KEYWORDS` to begin
+with, confirmed by an independent QA pass below rather than assumed
+from this description - so this fix's actual, verified effect is
+narrower than naming both methods together might suggest: exactly the
+two `passwordParameter` instances, one per file.) Found in exactly the
+same way every other real-repo gap this session found one: scanning
+real code, not guessing. (Also
 re-verified, before investigating further, that an earlier quick
 plausibility check via a table-grep claiming "0 of 199 CWE-284
 findings carry the centralized-authorization caveat" was itself wrong -
@@ -9492,3 +9498,56 @@ yet. Per Section 11, recommend a fresh session run adversarial QA
 against it before treating it as frozen, in particular re-deriving the
 "only WebGoat affected" claim and the `setPassword` regression test's
 premise independently rather than trusting this entry's own account.
+
+**2026-10-10 independent QA pass: clean. Freeze: the `_REFERENCE_SUFFIXES`
+"parameter" fix.**
+
+A fresh session re-derived every claim above directly, including
+reverting the fix in-process to confirm it removes a real, previously-
+present finding (not a no-op), and ran a broader search than the
+original check (every `...Parameter(...)` call across all seven
+`.qa-repos` entries matching a credential keyword nearby, not just the
+two exact method names) - confirmed the blast radius is exactly the
+two `passwordParameter` instances, nothing wider. Found and confirmed
+one real, substantive answer to the open question this entry itself
+flagged: the exclusion is based on the name's last word alone, with no
+signal tying the argument to the "slot reference" concept - a method
+named `setPasswordParameter`/`updatePasswordParameter` that hardcodes
+a genuine secret is also excluded, on both parser paths, reproduced
+directly. This is **not a new blind spot this fix introduces** - every
+other pre-existing word in `_REFERENCE_SUFFIXES` ("name"/"id"/"path"/
+"alias"/"uri"/"ref") already has the identical property, confirmed
+directly for each. This entry's own "What limitations remain" section
+already named this exact scenario and called it an accepted tradeoff
+rather than hiding it - confirmed accurate, not just asserted.
+Independently re-verified the CWE-284/centralized-authorization table-
+wrapping false-alarm claim from scratch (narrow vs. wide terminal, both
+runs' SHAP `cwe_284_count=199`/`cwe_798_count=16` cross-checked too).
+Confirmed `_is_credential_name` is a single, shared implementation (15
+call sites, 1 definition) with no javalang/Tree-sitter drift risk, and
+confirmed `cwe_287.py` never touches `_REFERENCE_SUFFIXES` at all, so
+the fix's CWE-798-only scope holds. Full suite and all four gates
+re-run independently: 481 passed, `black`/`ruff`/`mypy`/`git diff
+--check` all clean (before this entry's own two small follow-ups
+below).
+
+One documentation-accuracy nit was found (corrected above, same day):
+the entry originally implied both `passwordParameter` and
+`usernameParameter` were independently flagged pre-fix; `usernameParameter`
+was never a candidate at all ("username" is not in `CREDENTIAL_KEYWORDS`),
+so the fix's verified effect is exactly the two `passwordParameter`
+instances. Does not change the fix's correctness or the 18→16 count,
+which was already exactly right. Added one new regression test,
+`test_detect_in_java_pins_the_known_miss_on_a_parameter_suffixed_setter`,
+pinning the `setPasswordParameter("hunter2")` known-miss down
+deliberately rather than leaving it untested. Full suite after both
+small additions: 482 passed. All four gates re-confirmed clean.
+
+**Freeze: the `_REFERENCE_SUFFIXES` "parameter" fix.** No further QA
+round is indicated - reopen only if a later layer or a future real-repo
+QA pass surfaces a genuinely new, reproduced gap, per Section 8's
+freeze discipline. Section 7's next-work list is unchanged: continued
+real-repo precision/recall evaluation against `.qa-repos/`, and the
+still-open human-baseline Layer 4 miss (Case 17,
+`ai-admin-report-export-service`) and Layer 4 feature-engineering
+methodology question, both the student's own call on sequencing.
