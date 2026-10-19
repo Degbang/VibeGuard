@@ -1181,6 +1181,334 @@
           "redacted_value": null
         }
       ]
+    },
+    {
+      "project_id": "ai-weather-cache-service",
+      "source_path": "data/sample_apps/ai-weather-cache-service",
+      "label": "low",
+      "label_rationale": "Claude Sonnet 5-generated, drafted for the Layer 4 duplicate-vector-cluster expansion (IMPLEMENTATION_LOG.md 2026-10-11). Single endpoint returns cached, non-personalized public weather data for a named city - the kind of data a weather API is explicitly meant to serve to anyone, with no user-specific or business-sensitive content at all. Missing an authorization annotation here carries no real-world harm. Labelled low.",
+      "findings": [
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/weather/WeatherCacheController.java",
+          "line": 13,
+          "identifier": "getCurrentWeather",
+          "message": "Endpoint method 'getCurrentWeather' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        }
+      ]
+    },
+    {
+      "project_id": "ai-build-status-service",
+      "source_path": "data/sample_apps/ai-build-status-service",
+      "label": "medium",
+      "label_rationale": "Claude Sonnet 5-generated. Single endpoint returns the latest CI build's commit hash, branch name, and pass/fail status with no authorization check and no guard of any kind. Not a direct data breach, but real reconnaissance value for an attacker profiling internal infrastructure and recent changes - genuinely worse than a purely public-data endpoint, not severe enough for high. Labelled medium.",
+      "findings": [
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/buildstatus/BuildStatusController.java",
+          "line": 13,
+          "identifier": "getLatestBuild",
+          "message": "Endpoint method 'getLatestBuild' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        }
+      ]
+    },
+    {
+      "project_id": "ai-session-replay-service",
+      "source_path": "data/sample_apps/ai-session-replay-service",
+      "label": "high",
+      "label_rationale": "Claude Sonnet 5-generated. Single endpoint returns raw recorded user-session interaction events (click targets, form field activity) for *any* session id, with no authorization check and no guard at all. Session replay data routinely captures behavioral and sometimes typed form data; exposing it for an arbitrary, enumerable session id to an unauthenticated caller is a genuine privacy/data-exposure risk, not just reconnaissance value. Labelled high.",
+      "findings": [
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/replay/SessionReplayController.java",
+          "line": 13,
+          "identifier": "getReplayEvents",
+          "message": "Endpoint method 'getReplayEvents' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        }
+      ]
+    },
+    {
+      "project_id": "ai-feature-rollout-service",
+      "source_path": "data/sample_apps/ai-feature-rollout-service",
+      "label": "medium",
+      "label_rationale": "Claude Sonnet 5-generated. Single endpoint exposes an experimental feature's internal rollout percentage and target segment with no authorization check. This leaks internal product/targeting logic and the existence of unreleased features, which is a real but moderate information-disclosure concern - not user data, not a direct account/financial risk. Labelled medium.",
+      "findings": [
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/rollout/FeatureRolloutController.java",
+          "line": 13,
+          "identifier": "getRolloutStatus",
+          "message": "Endpoint method 'getRolloutStatus' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        }
+      ]
+    },
+    {
+      "project_id": "ai-recipe-sharing-service",
+      "source_path": "data/sample_apps/ai-recipe-sharing-service",
+      "label": "low",
+      "label_rationale": "Claude Sonnet 5-generated. Both endpoints list and fetch recipes explicitly named 'public' - genuinely public, user-contributed content meant to be read by anyone, the same intent as the existing ai-product-catalog-service/runnable-ai-orders-service examples in this same feature-vector cluster. Labelled low.",
+      "findings": [
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/recipes/RecipeController.java",
+          "line": 13,
+          "identifier": "listPublicRecipes",
+          "message": "Endpoint method 'listPublicRecipes' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        },
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/recipes/RecipeController.java",
+          "line": 18,
+          "identifier": "getPublicRecipe",
+          "message": "Endpoint method 'getPublicRecipe' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        }
+      ]
+    },
+    {
+      "project_id": "ai-batch-export-service",
+      "source_path": "data/sample_apps/ai-batch-export-service",
+      "label": "medium",
+      "label_rationale": "Claude Sonnet 5-generated. Any caller can trigger an arbitrary number of batch export jobs with no authorization check - a resource-consumption/abuse concern (each trigger presumably does real work server-side) rather than a direct data exposure, since the status endpoint reveals only a job state, not the exported data itself. Labelled medium.",
+      "findings": [
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/batchexport/BatchExportController.java",
+          "line": 13,
+          "identifier": "triggerExport",
+          "message": "Endpoint method 'triggerExport' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        },
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/batchexport/BatchExportController.java",
+          "line": 19,
+          "identifier": "getExportStatus",
+          "message": "Endpoint method 'getExportStatus' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        }
+      ]
+    },
+    {
+      "project_id": "ai-webhook-replay-service",
+      "source_path": "data/sample_apps/ai-webhook-replay-service",
+      "label": "high",
+      "label_rationale": "Claude Sonnet 5-generated. Re-delivers a previously received webhook event to its original downstream destination for any guessable/enumerable event id, with no authorization check and no guard of any kind. This lets an unauthenticated caller re-trigger real business-logic side effects (whatever the original webhook caused) an arbitrary number of times - a genuine, directly exploitable risk, not just information exposure. Labelled high.",
+      "findings": [
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/webhookreplay/WebhookReplayController.java",
+          "line": 13,
+          "identifier": "replayEvent",
+          "message": "Endpoint method 'replayEvent' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        },
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/webhookreplay/WebhookReplayController.java",
+          "line": 18,
+          "identifier": "getReplayLog",
+          "message": "Endpoint method 'getReplayLog' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        }
+      ]
+    },
+    {
+      "project_id": "ai-search-suggestions-service",
+      "source_path": "data/sample_apps/ai-search-suggestions-service",
+      "label": "low",
+      "label_rationale": "Claude Sonnet 5-generated. Both endpoints serve public-catalog search autocomplete and trending-search data - the same genuinely public, read-only intent as a storefront's own search box, which every visitor already sees unauthenticated. Labelled low.",
+      "findings": [
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/search/SearchSuggestionsController.java",
+          "line": 13,
+          "identifier": "getSuggestions",
+          "message": "Endpoint method 'getSuggestions' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        },
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/search/SearchSuggestionsController.java",
+          "line": 18,
+          "identifier": "getPopularSearches",
+          "message": "Endpoint method 'getPopularSearches' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        }
+      ]
+    },
+    {
+      "project_id": "ai-account-merge-service",
+      "source_path": "data/sample_apps/ai-account-merge-service",
+      "label": "high",
+      "label_rationale": "Claude Sonnet 5-generated. Previews a merge between any two account ids and returns another account's merge history, both with no authorization check. An unauthenticated caller can inspect the relationship between, and history of, arbitrary account pairs purely by supplying ids - a real cross-account data-exposure path, though it discloses account metadata rather than financial/credential material directly. Labelled high.",
+      "findings": [
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/accountmerge/AccountMergeController.java",
+          "line": 13,
+          "identifier": "previewMerge",
+          "message": "Endpoint method 'previewMerge' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        },
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/accountmerge/AccountMergeController.java",
+          "line": 18,
+          "identifier": "getMergeHistory",
+          "message": "Endpoint method 'getMergeHistory' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        }
+      ]
+    },
+    {
+      "project_id": "ai-user-export-service",
+      "source_path": "data/sample_apps/ai-user-export-service",
+      "label": "critical",
+      "label_rationale": "Claude Sonnet 5-generated. Exports a named user's full profile (email, physical address) for any user id with no authorization check and no guard at all - unauthenticated, enumerable bulk PII disclosure, the most severe category this thesis targets. Labelled critical.",
+      "findings": [
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/userexport/UserExportController.java",
+          "line": 13,
+          "identifier": "exportUser",
+          "message": "Endpoint method 'exportUser' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        },
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/userexport/UserExportController.java",
+          "line": 18,
+          "identifier": "getExportStatus",
+          "message": "Endpoint method 'getExportStatus' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        }
+      ]
+    },
+    {
+      "project_id": "ai-admin-feature-toggle-service",
+      "source_path": "data/sample_apps/ai-admin-feature-toggle-service",
+      "label": "medium",
+      "label_rationale": "Claude Sonnet 5-generated. Lists and inspects internal feature-toggle configuration with no authorization check, despite the admin-only intent implied by the path. Exposes internal configuration/rollout state, not user or financial data - a real but more contained information-disclosure risk than the account- or user-data-exposing projects in this same cluster. Labelled medium.",
+      "findings": [
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/admintoggle/AdminFeatureToggleController.java",
+          "line": 13,
+          "identifier": "listToggles",
+          "message": "Endpoint method 'listToggles' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        },
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/admintoggle/AdminFeatureToggleController.java",
+          "line": 18,
+          "identifier": "getToggle",
+          "message": "Endpoint method 'getToggle' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        }
+      ]
+    },
+    {
+      "project_id": "ai-report-scheduling-service",
+      "source_path": "data/sample_apps/ai-report-scheduling-service",
+      "label": "low",
+      "label_rationale": "Claude Sonnet 5-generated. All three endpoints expose only report-scheduling metadata (job names, cron expressions, next-run times) - no customer, financial, or credential data, and no indication this was ever meant to be restricted. Labelled low.",
+      "findings": [
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/scheduling/ScheduleController.java",
+          "line": 13,
+          "identifier": "listSchedules",
+          "message": "Endpoint method 'listSchedules' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        },
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/scheduling/ScheduleController.java",
+          "line": 18,
+          "identifier": "getSchedule",
+          "message": "Endpoint method 'getSchedule' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        },
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/scheduling/ScheduleController.java",
+          "line": 23,
+          "identifier": "getNextRun",
+          "message": "Endpoint method 'getNextRun' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        }
+      ]
+    },
+    {
+      "project_id": "ai-log-aggregation-service",
+      "source_path": "data/sample_apps/ai-log-aggregation-service",
+      "label": "medium",
+      "label_rationale": "Claude Sonnet 5-generated. All three endpoints expose raw application log lines with no authorization check. Application logs routinely contain stack traces, internal hostnames/paths, and occasionally accidental sensitive data in log messages - a real exposure risk, though inherently internal-tooling in intent rather than a direct customer-data breach. Labelled medium.",
+      "findings": [
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/logs/LogController.java",
+          "line": 13,
+          "identifier": "getRecentLogs",
+          "message": "Endpoint method 'getRecentLogs' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        },
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/logs/LogController.java",
+          "line": 18,
+          "identifier": "searchLogs",
+          "message": "Endpoint method 'searchLogs' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        },
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/logs/LogController.java",
+          "line": 23,
+          "identifier": "getLogById",
+          "message": "Endpoint method 'getLogById' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        }
+      ]
+    },
+    {
+      "project_id": "ai-inventory-sync-service",
+      "source_path": "data/sample_apps/ai-inventory-sync-service",
+      "label": "low",
+      "label_rationale": "Claude Sonnet 5-generated. All three endpoints expose warehouse stock-level and discrepancy data - internal operational business data with no customer or credential content, and limited competitive-intelligence value at most. Labelled low.",
+      "findings": [
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/inventory/InventoryController.java",
+          "line": 13,
+          "identifier": "getLevels",
+          "message": "Endpoint method 'getLevels' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        },
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/inventory/InventoryController.java",
+          "line": 18,
+          "identifier": "getItem",
+          "message": "Endpoint method 'getItem' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        },
+        {
+          "cwe_id": "CWE-284",
+          "file_path": "src/main/java/com/vibeguard/samples/inventory/InventoryController.java",
+          "line": 23,
+          "identifier": "getDiscrepancies",
+          "message": "Endpoint method 'getDiscrepancies' has no authorization annotation (no @RolesAllowed/@PermitAll/@Secured/@PreAuthorize/... on the method or its enclosing class)",
+          "redacted_value": null
+        }
+      ]
     }
   ]
 }

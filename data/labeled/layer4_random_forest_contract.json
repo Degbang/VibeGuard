@@ -1,6 +1,6 @@
 {
   "dataset_path": "layer4_projects.json",
-  "dataset_sha256": "31ae967ec5f761fb05e118f421190bc6b357f8c3450c87ef63a089d56ca3fa5b",
+  "dataset_sha256": "8b3b12079df265ad1b6af6eddf58ece6bdcef59cc034f36190ba5c3846afa2ca",
   "feature_names": [
     "finding_count",
     "max_rule_score",
@@ -35,5 +35,5 @@
   "model_kind": "random_forest_retrain_v1",
   "random_state": 42,
   "schema_version": 1,
-  "training_example_count": 50
+  "training_example_count": 64
 }

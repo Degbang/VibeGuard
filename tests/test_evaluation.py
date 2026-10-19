@@ -20,26 +20,27 @@ REAL_CONTRACT_PATH = REPO_ROOT / "data" / "labeled" / "layer4_random_forest_cont
 def test_build_evaluation_report_uses_real_contract_and_dataset() -> None:
     report = evaluate.build_evaluation_report(REAL_CONTRACT_PATH)
 
-    # Dataset expanded a fourth time 2026-09-04 - a held-out stress-test
-    # batch of 8 Codex-generated projects deliberately split between
-    # sensitive-vocabulary and boring-vocabulary domains, 50 projects
-    # total (the thesis's full stated target). That batch found a real
-    # Layer 4 blind spot (a project-level "low" prediction on a genuine
-    # unauthenticated account-takeover finding) and a real new Layer 1
-    # detector (cwe_287.py's unguarded-secret-return check) was built and
-    # tested in response - see IMPLEMENTATION_LOG.md. Leave-one-out
-    # accuracy (0.58) still exceeds the fixed baseline (0.40) in
-    # aggregate, but per-batch evaluation in tests/test_layer4_ml.py
-    # shows this batch specifically is where Layer 4's edge breaks down
-    # (baseline beats leave-one-out on it) - an honest, documented limit,
-    # not a universal win.
+    # Dataset expanded a fifth time 2026-10-11 - 14 Claude-generated
+    # projects targeted at the four duplicate-feature-vector clusters
+    # Case 17 traced (2026-09-10 entry). The new data alone did not give
+    # "high" severity a real majority anywhere (0/13 high recall) - but
+    # that result exposed the real bottleneck: _SENSITIVE_DOMAIN_KEYWORDS
+    # was missing several real high/critical projects entirely. Widening
+    # it (see IMPLEMENTATION_LOG.md's second 2026-10-11 entry) combined
+    # with the new data gets "high" recall to 6/13 - better than the
+    # keyword fix alone on the original 50 projects (4/10). 64 projects
+    # total; leave-one-out accuracy is 0.46875 and macro-F1 0.4995,
+    # above the original 50-project dataset's 0.498 macro-F1. Leave-one-
+    # out still exceeds the fixed baseline in aggregate (0.46875 vs
+    # 0.359375) - see tests/test_layer4_ml.py for the full confusion-
+    # matrix evidence.
     assert report.contract_path == REAL_CONTRACT_PATH.resolve()
     assert report.dataset_path.name == "layer4_projects.json"
-    assert report.example_count == 50
-    assert report.in_sample.accuracy == pytest.approx(35 / 50)
-    assert report.in_sample.macro_f1 == pytest.approx(0.6805860805860806)
-    assert report.leave_one_out.accuracy == pytest.approx(29 / 50)
-    assert report.baseline.accuracy == pytest.approx(20 / 50)
+    assert report.example_count == 64
+    assert report.in_sample.accuracy == pytest.approx(41 / 64)
+    assert report.in_sample.macro_f1 == pytest.approx(0.6669642857142857)
+    assert report.leave_one_out.accuracy == pytest.approx(30 / 64)
+    assert report.baseline.accuracy == pytest.approx(23 / 64)
     assert report.leave_one_out.accuracy > report.baseline.accuracy
     assert len(report.leave_one_out.predictions) == report.example_count
     assert len(report.baseline.predictions) == report.example_count
@@ -55,7 +56,7 @@ def test_evaluation_main_renders_summary(capsys: pytest.CaptureFixture[str]) -> 
     assert "Baseline (max Layer 3 severity, not learned)" in output
     assert "Leave-One-Out Predictions" in output
     assert "Leave-One-Out Confusion Matrix" in output
-    assert "0.700" in output
+    assert "0.469" in output
 
 
 def test_build_json_report_returns_machine_readable_summary() -> None:
@@ -67,12 +68,12 @@ def test_build_json_report_returns_machine_readable_summary() -> None:
     baseline = cast(Mapping[str, object], payload["baseline"])
 
     assert payload["contract_path"] == str(REAL_CONTRACT_PATH.resolve())
-    assert payload["example_count"] == 50
-    assert in_sample["accuracy"] == pytest.approx(35 / 50)
+    assert payload["example_count"] == 64
+    assert in_sample["accuracy"] == pytest.approx(41 / 64)
     assert leave_one_out["macro_f1"] == pytest.approx(report.leave_one_out.macro_f1)
-    assert len(cast(list[object], leave_one_out["predictions"])) == 50
-    assert baseline["accuracy"] == pytest.approx(20 / 50)
-    assert len(cast(list[object], baseline["predictions"])) == 50
+    assert len(cast(list[object], leave_one_out["predictions"])) == 64
+    assert baseline["accuracy"] == pytest.approx(23 / 64)
+    assert len(cast(list[object], baseline["predictions"])) == 64
 
 
 def test_evaluation_main_writes_json_export(tmp_path: Path) -> None:
@@ -85,7 +86,7 @@ def test_evaluation_main_writes_json_export(tmp_path: Path) -> None:
     assert exit_code == 0
     payload = json.loads(output_path.read_text(encoding="utf-8"))
     assert payload["dataset_path"].endswith("layer4_projects.json")
-    assert payload["in_sample"]["accuracy"] == pytest.approx(35 / 50)
+    assert payload["in_sample"]["accuracy"] == pytest.approx(41 / 64)
     assert payload["leave_one_out"]["confusion"]
     assert payload["baseline"]["confusion"]
 
@@ -108,7 +109,7 @@ def test_evaluation_main_writes_csv_exports(tmp_path: Path) -> None:
     with confusion_path.open(encoding="utf-8", newline="") as handle:
         confusion_rows = list(csv.DictReader(handle))
 
-    assert len(prediction_rows) == 50
+    assert len(prediction_rows) == 64
     assert prediction_rows[0].keys() == {"index", "actual", "predicted", "confidence"}
     assert confusion_rows
     assert confusion_rows[0].keys() == {"actual", "predicted", "count"}

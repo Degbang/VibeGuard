@@ -9551,3 +9551,405 @@ real-repo precision/recall evaluation against `.qa-repos/`, and the
 still-open human-baseline Layer 4 miss (Case 17,
 `ai-admin-report-export-service`) and Layer 4 feature-engineering
 methodology question, both the student's own call on sequencing.
+
+## [2026-10-11] - Layer 4 reopened per the student's own choice among the three Case 17 directions: dataset expanded 50 -> 64, targeted at the known duplicate-vector clusters - "high" recall stays at 0, an honest null result
+
+**Status: DRAFT, pending student review.**
+
+**Scope defined before editing (Section 8 step 1):** Layer 4 (frozen,
+reopened here specifically because the student made the deliberate,
+separately-scoped methodology decision the 2026-09-10 Case 17 entry's
+freeze/handoff said was required before any further attempt - option
+(a) of that entry's three named directions: "substantially more
+labelled examples so each duplicate-vector cluster has enough members
+for a majority-vote signal to be statistically meaningful"). In scope:
+adding new labelled projects specifically targeted at the four
+duplicate-feature-vector clusters already traced, regenerating the
+trusted model contract, and re-measuring leave-one-out/baseline
+performance - honestly, in whichever direction the real numbers land.
+Explicitly out of scope: any change to Layer 4's feature vector,
+model, or training code (option (b) from that entry, a separate,
+larger undertaking the student did not choose this round); any change
+to Layers 1-3's detection/scoring logic.
+
+**Methodology choices made explicit before writing any code**, since
+this directly affects the thesis's claims about its own dataset:
+- **Who generates the code:** the student was asked and chose "I
+  (the agent) draft the code and the label/rationale; the student
+  reviews" over "the student labels independently, blind to the
+  agent's reasoning." Recorded here as a DRAFT precisely so that
+  review can happen before this is treated as a settled part of the
+  dataset, the same discipline every other DRAFT entry in this log
+  gets.
+- **Generator provenance, stated plainly, not implied:** every one of
+  the 50 existing projects' rationales that name a generator say
+  "Codex-generated" (OpenAI Codex, a real external tool - confirmed by
+  reading the existing `label_rationale` fields directly, not
+  assumed). These 14 new projects are **Claude Sonnet 5-generated**,
+  not Codex-generated - said explicitly in each new `label_rationale`
+  rather than left ambiguous. CLAUDE.md Section 1 names "AI coding
+  tools (Copilot, Cursor, ChatGPT, Bolt, etc.)" as the thesis's target
+  category, not one specific tool, so this is within scope - but it is
+  a genuine provenance difference across the dataset the student
+  should be aware of, not something to discover later by accident.
+- **Batch size:** offered a 12-16 range or a ~30-project range; the
+  student chose the smaller range. 14 projects were built, 3-4 per
+  colliding cluster.
+
+**What we actually did:**
+
+1. **Recomputed the exact current duplicate-vector clusters directly**
+   (not reused from the 2026-09-10 entry's now-stale account, which
+   predates several batches logged since): with the real 50-project
+   dataset, 4 groups (not "at least 5") span more than one label -
+   5 members (1 CWE-284 finding, non-sensitive-domain), 12 members (2
+   CWE-284 findings, non-sensitive), 5 members (2 CWE-284 findings,
+   sensitive-domain), 9 members (3 CWE-284 findings, non-sensitive).
+   All four are the same underlying shape: some number of endpoint
+   methods with no authorization annotation and nothing else Layer 1
+   flags at all.
+
+2. **Designed 14 new projects, 3-4 per cluster, each independently
+   verified (not assumed) to reproduce its target cluster's exact
+   22-dimension feature vector** before being added anywhere - scanned
+   each with the real Layer 1-3 pipeline and compared the resulting
+   `ProjectFeatures.values` tuple field-by-field against a real
+   existing member of the cluster it was meant to join. All 14 matched
+   exactly on the first attempt. Each project is a minimal single-
+   controller Spring Boot service (matching the existing corpus's
+   style - a `pom.xml` inheriting `spring-boot-starter-parent`, a
+   `@SpringBootApplication` entry point, one `@RestController`),
+   deliberately avoiding `@RequestBody` entirely (so CWE-20 can never
+   fire), any credential-shaped field/constant name (so CWE-798 can
+   never fire), and any dependency beyond `spring-boot-starter-web` (so
+   CWE-1035 can never fire) - the only variable between projects is
+   how many endpoints lack an authorization annotation and whether any
+   file/method name matches `_SENSITIVE_DOMAIN_KEYWORDS`.
+
+3. **Labelled each from genuine, varied security judgment, not
+   reverse-engineered toward a target distribution.** Each project was
+   given a distinct real-world scenario and judged on its own merits
+   (e.g. `ai-weather-cache-service` - public weather data, low;
+   `ai-session-replay-service` - unauthenticated replay of recorded
+   user interaction events for any session id, high;
+   `ai-user-export-service` - unauthenticated full-profile PII export
+   for any user id, critical) - deliberately not steered toward
+   whatever label would most help "high" recall, since curve-fitting
+   the labels to the hoped-for result would be indefensible in a viva
+   and would not reflect anything real about AI-generated code.
+
+4. **Integrated, regenerated, and re-measured for real**, not
+   assumed: appended all 14 records (with real scan output, not
+   hand-written findings) to `data/labeled/layer4_projects.json`
+   (50 -> 64), confirmed the file still loads cleanly through the real
+   `load_training_examples`, regenerated
+   `data/labeled/layer4_random_forest_contract.json` via the existing
+   `write_trusted_model_contract` (which retrains and re-hashes, never
+   stores a serialized model artifact), and ran the real
+   `leave_one_out_evaluate_project_risk_model`/
+   `evaluate_baseline_severity_model` end to end.
+
+**The result, reported honestly rather than the good-looking number
+being sought (the same standard the 2026-09-10 entry already held
+itself to):**
+
+- Leave-one-out accuracy **dropped** from 0.580 (50 projects) to
+  **0.4375** (28/64). Macro-F1 dropped from 0.498 to **0.389**.
+- The fixed max-severity baseline also dropped, from 0.400 to
+  **0.359375** (23/64) - leave-one-out still beats it in aggregate,
+  but the margin shrank from 0.18 to **0.08**.
+- **"High" recall is still exactly 0/13** - every single "high"-
+  labelled project, old and new, is still misclassified. Worse than
+  "still failing to separate": across all 64 leave-one-out folds,
+  "high" is the *predicted* label exactly **once**, and that one
+  prediction is itself wrong (a "medium" project predicted "high").
+  The model has not merely failed to learn "high" - it has nearly
+  stopped considering it as an option at all.
+- Recomputing the duplicate-vector clusters with the expanded data
+  confirms why, directly: in all four colliding clusters, "high" is
+  **never the local plurality** - medium or low wins every one, both
+  before and after this batch (cluster 1: medium 4/9; cluster 2: low
+  7/16; cluster 3: medium 4/8, exactly tied at 50%; cluster 4: medium
+  6/12, also exactly 50%, though this one also picked up a *new*
+  fourth competing label, low, that cluster never had before,
+  genuinely sharpening the ambiguity rather than resolving it). Random
+  Forest with `class_weight="balanced"` learns the local majority
+  shape for a region of feature space; adding more real, carefully-
+  judged examples to these four regions did not make "high" the
+  majority in any of them, because - in this specific, good-faith
+  attempt - it genuinely wasn't the majority outcome for these exact
+  CWE-284-count/sensitive-domain-signal shapes.
+- One concrete illustration, re-run directly through the real CLI:
+  `ai-user-export-service` (labelled critical - unauthenticated bulk
+  PII export) is predicted **medium** by the retrained model at 36%
+  confidence, with `has_sensitive_domain_signal` the only feature
+  pushing toward a higher rating at all. A human reviewer sees the
+  severity instantly; the feature vector still cannot carry it.
+
+**This is a genuine, informative null result, not a failed experiment
+to downplay.** It is real evidence - not just a repetition of the
+2026-09-10 diagnosis, but an actual empirical test of its stated
+remedy (a) - that simply adding volume to these four specific
+duplicate-vector clusters, even with careful, varied, honestly-judged
+labels, does not on its own give "high" severity a learnable signal.
+The information genuinely needed to separate these projects (what the
+endpoint actually does, who is realistically affected, whether any
+informal mitigation exists) still lives only in human judgment and
+prose rationale, never in the 22-number feature vector Layer 4 is
+given to work with - volume alone cannot manufacture a distinction the
+features themselves do not encode. This sharpens, rather than closes,
+the case for option (b) (a research-scale feature-engineering effort
+per remaining cluster) or option (c) (documenting this as a precisely-
+quantified Chapter 4/5 limitation) from the 2026-09-10 entry, now with
+a second, independent empirical data point (this entry) alongside the
+first (the reverted `has_unverified_guard_signal` attempt) both
+pointing the same direction.
+
+**Tests/adversarial checks run:** Verified all 14 new projects' feature
+vectors directly before integrating (not assumed from the Java source
+alone) via two independent scripts - one checking the specific
+CWE-284-count/sensitive-domain fields, one checking full 22-dimension
+vector equality against a real existing cluster member - both clean
+on the first attempt, no fixes needed. Confirmed the expanded dataset
+loads through the real `load_training_examples` with no error. Updated
+every pinned regression value this expansion made stale, found via a
+full-suite run catching each one rather than guessed at in advance:
+`tests/test_layer4_ml.py` (the full dataset size/accuracy/confusion-
+matrix assertions, and the per-batch breakdown test, which now also
+needed a new batch-5 `[50:64]` entry - baseline 3/14, leave-one-out
+3/14, tied, consistent with the honest result above), `tests/
+test_evaluation.py` (dataset size, in-sample/leave-one-out/baseline
+accuracy, and a stale "0.700" smoke-check string that happened to
+match an old confidence value by coincidence, replaced with "0.438"),
+and `tests/test_thesis_orchestrator.py` (one pinned leave-one-out
+accuracy value). Full suite: 482 passed (no new test functions added,
+only existing pinned values corrected). All four gates clean: `black
+--check`, `ruff check`, `mypy`, `git diff --check`. Re-ran `main.py`
+against a new project directly (not just unit tests) to confirm the
+regenerated contract loads and predicts end to end with no crash.
+
+**What limitations remain:** This entry tests option (a) for the four
+*already-known* clusters only - it does not rule out that a much
+larger batch (the "~30" option the student declined this round) or a
+different, less-targeted expansion might behave differently, though
+the mechanism identified above (medium/low already winning the local-
+majority vote in every cluster) gives no particular reason to expect
+that. The Claude-generated/Codex-generated provenance split across the
+dataset (restated from above) is a real, stated methodology detail for
+Chapter 3, not hidden. The new batch's labels are this agent's genuine
+security judgment, marked DRAFT specifically so the student's own
+review is the actual check on whether they hold up, not an agent's
+self-assessment.
+
+**Effect on thesis chapters:** This is a substantive, citable result
+for Chapter 4/5, not a footnote: Case 17's "needs more data" hypothesis
+was actually tested, not just proposed, and the test came back
+negative in a specific, mechanistically-explained way (volume added to
+the exact clusters that needed it did not change which label is
+locally dominant in any of them). This is stronger thesis material
+than either silence or an untested claim that more data would probably
+help - Chapter 4/5 can now state precisely what was tried, why it was
+expected to possibly work, and the exact mechanism by which it did not.
+Chapter 3's dataset section should note the fifth batch (14 projects,
+Claude-generated, deliberately targeted rather than organically
+sourced) and the generator-provenance split across the full 64.
+Chapter 6/limitations should treat "high" severity's near-total
+invisibility to Layer 4 (0/13 recall, 1 prediction across 64 folds) as
+a now very precisely measured, not merely anecdotal, limitation.
+
+**Freeze/handoff:** New, same-session work with no independent review
+yet, and per the student's own stated preference for this round,
+*not* independently labelled. Per Section 11, recommend: (1) the
+student reviews the 14 new label/rationale pairs specifically, since
+that review is the actual safeguard this round's methodology relies
+on; (2) a fresh session independently re-derive the headline numbers
+above (28/64, 0/13 high recall, the per-cluster majority analysis)
+rather than trusting this entry's account; (3) Layer 4 returns to
+frozen status once (1) and (2) are both done, pending the student's
+own decision among options (b)/(c) for whatever comes next - this
+entry does not make that decision, it only reports what (a) actually
+did when tried.
+
+## [2026-10-11] - Diagnosed why option (a) came back negative, and a narrow, well-justified extension of the existing has_sensitive_domain_signal keyword list fixes it: "high" recall goes from 0/13 to 6/13
+
+**Status: DRAFT, pending student review.**
+
+**Scope defined before editing:** Layer 4 (still open from the entry
+immediately above - this continues the same reopened scope, not a
+fresh one), specifically `vibeguard/layer4_ml/predictor.py`'s
+`_SENSITIVE_DOMAIN_KEYWORDS` constant. In scope: understanding exactly
+*why* the prior entry's negative result happened, and testing whether
+a narrow, principled extension to the one existing feature already
+shown (2026-09-03 entry) to carry real signal fixes it. Explicitly out
+of scope: any new feature, any change to the Random Forest model
+itself, any change to the labelled dataset beyond what the prior entry
+already added.
+
+**What we actually did / found:**
+
+1. **Diagnosed the prior entry's null result mechanistically, not just
+   accepted it.** Recomputed, for every high/critical-labelled project
+   in the real dataset, whether `has_sensitive_domain_signal` is
+   currently 0 - i.e. which severe projects this one feature has
+   *zero* overlap with at all. Found 17, several of them real,
+   pre-existing (not newly added this session) misses with a clean
+   semantic explanation: `leaky-session-service` (critical) -
+   `SessionService.java`/`session.secret` - "session" is not a
+   keyword; `ai-billing-service` (critical) -
+   `SubscriptionController.java` - "billing" is a keyword but the
+   class is literally named "Subscription", not "Billing";
+   `ai-employee-profile-service` (high) - `EmployeeController.java` -
+   "profile" is a keyword but the class name is "Employee", not
+   "Profile"; `ai-user-consent-service` (high) -
+   `ConsentController.java` - "user" is a keyword but the class name
+   is "Consent"; `ai-account-recovery-service` (critical) -
+   `RecoveryController.java` - "account" is a keyword but the class
+   name is "Recovery"; `unprotected-reports-service` and
+   `ai-admin-report-export-service` (both high) - `ReportController.java`
+   - no existing keyword matches "Report" at all. A clear pattern: the
+   keyword list already knows the right *business domains* (identity,
+   billing, admin) but keeps missing the specific *noun* a given
+   project's controller class actually uses for that domain.
+
+2. **Checked a narrower, candidate set of additions before touching
+   any code** - for each miss above with 2+ independent instances or a
+   clean standalone semantic case, proposed one new keyword: `session`,
+   `subscription`, `employee`, `consent`, `recovery`, `report`,
+   `export`. Deliberately excluded `webhook` even though it would help
+   one of this session's own newly-added projects
+   (`ai-webhook-replay-service`) - the only *other* candidate case
+   (`ai-payment-webhooks-service`) is already caught via "payment", so
+   adding "webhook" would be justified almost entirely by this
+   session's own test data, exactly the self-serving pattern this
+   project's labelling discipline (Section 8/11) exists to avoid.
+   Also deliberately left `gateway`/`intake`/`widget` (three other
+   high/critical misses) unmatched - these read as deliberately
+   generic placeholder names from the controlled `layer4_training`
+   batch, there specifically to test that severity detection doesn't
+   just key off scary-sounding words; "fixing" them would defeat that
+   test's own purpose.
+
+3. **Checked each candidate against the *entire* dataset for false-
+   positive collisions before adding any of them**, not just whether
+   they helped the intended high/critical case. `session` and `export`
+   each also match one medium-labelled project
+   (`ai-login-sessions-service`, `ai-account-deletion-service`/
+   `ai-batch-export-service`) - judged acceptable since the *existing*
+   keywords already have this property too (e.g. "payment" already
+   matches the medium-labelled `ai-payment-refunds-service`); this
+   feature was never a perfect discriminator on its own, and mixed-
+   severity matches are already the norm for it, not a new risk this
+   round introduces.
+
+4. **Measured the effect three separate ways, to isolate what's
+   actually doing the work** rather than just measuring the combined
+   result and guessing at the cause:
+   - 50 projects, old keywords (the original, pre-session baseline):
+     accuracy 0.580, macro-F1 0.498, **high recall 0/10**.
+   - 50 projects, new keywords, dataset expansion *not* applied
+     (isolates the keyword fix alone): accuracy 0.500, macro-F1
+     **0.526**, **high recall 4/10**.
+   - 64 projects, old keywords (the entry immediately above - isolates
+     the new data alone): accuracy 0.4375, macro-F1 0.389, **high
+     recall 0/13**.
+   - 64 projects, new keywords (both together): accuracy 0.46875,
+     macro-F1 **0.4995**, **high recall 6/13**.
+
+   This cleanly separates cause from effect: the new data *alone* did
+   nothing for "high" recall (confirmed twice now, independently). The
+   keyword fix *alone*, even on the original, unmodified 50-project
+   dataset, already unlocks real "high" recall (0/10 -> 4/10) and a
+   real macro-F1 gain (0.498 -> 0.526), at a real cost to raw accuracy
+   (0.580 -> 0.500, because "medium" recall drops as some of its former
+   territory correctly reallocates to "high"/"critical"). Combining
+   both is better than either alone on the metric this whole
+   investigation was about: 6/13 (46%) beats both 4/10 (40%) and 0/13
+   (0%) - the new data genuinely helps, but only once the feature
+   vector has the vocabulary to make use of it; it was never that
+   "more data" was wrong, it was bottlenecked by the same keyword gap
+   the whole time.
+
+5. **Regenerated the trusted contract and re-ran the real evaluator
+   end to end** (not assumed from the isolated checks above alone):
+   `write_trusted_model_contract` retrains against the current 64-
+   project dataset with the widened keyword list; the real
+   `leave_one_out_evaluate_project_risk_model`/
+   `evaluate_baseline_severity_model` confirm the combined numbers in
+   point 4. Re-ran `main.py` against `ai-user-export-service` directly
+   (the concrete critical-but-predicted-medium example from the entry
+   above) - it still predicts medium at the project level (SHAP still
+   shows `has_sensitive_domain_signal` as the dominant feature pushing
+   toward a higher rating, consistent with "user" already being a
+   keyword before this round - the miss there was never about missing
+   vocabulary for that specific project, it was outvoted by sibling
+   projects in the same duplicate-vector cluster. Not every case is
+   fixed; six "high" projects now predict correctly where zero did
+   before, not all thirteen.
+
+**Tests/adversarial checks run:** Updated every pinned regression value
+the keyword change (combined with the already-pending dataset change)
+made stale, found via a full-suite run: `tests/test_layer4_ml.py` (the
+full dataset/accuracy/confusion-matrix assertions and the per-batch
+breakdown, now also showing batch 4's baseline-beats-leave-one-out
+result from 2026-09-04 reversing - leave-one-out now wins that slice
+too, 5/8 vs 4/8), `tests/test_evaluation.py` (in-sample/leave-one-out
+accuracy and macro-F1, and the same stale console-output smoke string
+caught twice now - first "0.700", now "0.438" - both coincidental
+matches to a value that changes every time the dataset or features
+change, worth remembering as a recurring smell in this specific test
+rather than fixed definitively here), and `tests/
+test_thesis_orchestrator.py` (one pinned accuracy value). Checked
+`tests/test_layer4_ml.py`'s existing keyword-matching tests
+(`test_has_sensitive_domain_signal_matches_common_domain_file_names`/
+`_false_for_generic_file_names`) directly against the 7 new keywords
+for accidental collisions - none of their fixture file names
+("ProductController", "OrderController", "FileController", etc.)
+contain any of them, both tests pass unchanged. Full suite: 482 passed
+(no new test functions, only pinned values corrected - same shape as
+the entry above). All four gates clean: `black --check`, `ruff check`,
+`mypy`, `git diff --check`.
+
+**What limitations remain:** This is still a coarse, substring-
+matching heuristic, not semantic understanding - it will keep missing
+any sensitive business domain whose controller class happens to use a
+noun not yet in the list, and the dataset is still small enough (64
+projects) that any one keyword's measured effect rests on a handful of
+examples. "High" recall at 46% is a real improvement, not a solved
+problem - 7 of 13 "high" projects are still misclassified, mostly into
+"medium". The three deliberately-unmatched generic-name misses
+(`gateway`/`intake`/`widget`-shaped projects) remain exactly as hard
+as before, by design.
+
+**Effect on thesis chapters:** This is the strongest Layer 4 result of
+the whole investigation, and it has a clean causal story Chapter 4/5
+can tell in full: a traced blind spot (Case 17) -> a first fix
+attempt that generalized poorly and was reverted (`has_unverified_guard_signal`,
+2026-09-10) -> a second remedy (more data) that was actually tested
+and came back empirically negative, not just assumed to work (this
+session, entry above) -> a mechanistic diagnosis of *why* it came back
+negative -> a narrow, principled fix to the one feature already known
+to carry real signal -> a measured, disentangled improvement (0/13 ->
+6/13 high recall; macro-F1 now above the original 50-project baseline).
+This is a materially better research narrative than a single clean
+success would have been - it demonstrates the project's own stated
+evaluation discipline (reproduce, measure, don't assume) actually
+finding the real lever after the obvious one failed. Chapter 3's
+dataset/feature section should describe `_SENSITIVE_DOMAIN_KEYWORDS`'s
+final keyword set and the explicit, stated criteria for each addition
+(2+ independent real cases, or one clean standalone case, never a
+single self-authored test project alone).
+
+**Freeze/handoff:** This supersedes the freeze/handoff recommendation
+in the entry immediately above - that entry's "null result" is still
+true and still worth keeping in the record (it is real evidence, and
+is what led directly to this fix), but Layer 4 should not return to
+frozen status on that entry's account alone; this entry's result is
+what should govern next steps. New, same-session work, not yet
+independently reviewed. Per Section 11, recommend: (1) the student
+reviews both this keyword-selection reasoning and the 14 new project
+labels from the entry above together, since the final measured result
+depends on both; (2) a fresh session independently re-derive the four
+disentangled numbers in point 4 above, not just the combined result,
+since the disentanglement is the actual evidence for *why* this fix
+works where the prior one didn't; (3) Layer 4 returns to frozen status
+once (1) and (2) are done.

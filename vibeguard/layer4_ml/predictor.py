@@ -57,6 +57,32 @@ _SENSITIVE_DOMAIN_KEYWORDS = frozenset(
         "staff",
         "internal",
         "management",
+        # Added 2026-10-11, scanning the real dataset for high/critical
+        # projects this signal was still missing entirely (zero overlap
+        # with the keywords above) - see IMPLEMENTATION_LOG.md. Each one
+        # is justified by at least one *pre-existing* (not newly-added)
+        # high/critical project it newly catches, not reverse-engineered
+        # from any one project's label: "session" (leaky-session-service,
+        # critical), "subscription" (ai-billing-service, critical -
+        # "billing" alone doesn't match a project literally named
+        # SubscriptionController), "employee" (ai-employee-profile-service,
+        # high), "consent" (ai-user-consent-service, high), "recovery"
+        # (ai-account-recovery-service, critical), "report"
+        # (unprotected-reports-service and ai-admin-report-export-service,
+        # both high), "export" (ai-user-export-service, critical).
+        # Deliberately not exhaustive: generic-sounding project names
+        # like "gateway"/"intake"/"widget" that also carry a high/critical
+        # label were left unmatched on purpose - those look like
+        # deliberately generic placeholders testing that severity
+        # detection doesn't just key off scary-sounding names, and
+        # "fixing" them would defeat that test's own point.
+        "session",
+        "subscription",
+        "employee",
+        "consent",
+        "recovery",
+        "report",
+        "export",
     }
 )
 

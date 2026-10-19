@@ -422,66 +422,77 @@ def test_load_trusted_model_contract_rejects_dataset_hash_mismatch(tmp_path: Pat
 
 
 def test_real_layer4_dataset_loads_and_leave_one_out_evaluates() -> None:
-    # Dataset expanded a fourth time 2026-09-04 with 8 more Codex-
-    # generated projects, deliberately split between sensitive-vocabulary
-    # and boring-vocabulary domains to stress-test whether Layer 4's edge
-    # generalizes past the has_sensitive_domain_signal keyword - see
-    # IMPLEMENTATION_LOG.md. 50 projects total (8 -> 15 -> 22 -> 32 -> 42
-    # -> 50, the thesis's full stated target); leave-one-out accuracy is
-    # 0.58 (29/50). A new Layer 1 detector (cwe_287.py's unguarded-
-    # secret-return check) was added in the same round after this batch
-    # found a genuine account-takeover finding that Layer 4 had predicted
-    # "low" risk for - it now contributes a real, tested third finding to
-    # that one project rather than the model relying on a blunt severity
-    # floor (tried and reverted - it collapsed accuracy to 0.40, see the
-    # log).
+    # Dataset expanded a fifth time 2026-10-11 with 14 more Claude-
+    # generated projects targeted at the four duplicate-feature-vector
+    # clusters Case 17 traced (2026-09-10 entry) - testing whether more
+    # carefully-labelled examples in exactly those clusters gives "high"
+    # severity a real majority anywhere. On its own it did not (0/13
+    # high recall, see IMPLEMENTATION_LOG.md's first 2026-10-11 entry).
+    # That result pointed at the real bottleneck: _SENSITIVE_DOMAIN_KEYWORDS
+    # was missing clean matches for several real high/critical projects
+    # entirely (zero keyword overlap at all). Widening it (second
+    # 2026-10-11 entry) combined with the new data gets "high" recall to
+    # 6/13 - genuinely better than the keyword fix alone on the original
+    # 50 projects (4/10) and far better than the new data alone (0/13).
+    # 64 projects total (8 -> 15 -> 22 -> 32 -> 42 -> 50 -> 64);
+    # leave-one-out accuracy is 0.46875 (30/64), macro-F1 0.4995 (up from
+    # 0.389 before the keyword fix, and above the original 50-project
+    # dataset's 0.498 baseline too).
     examples = load_training_examples(REAL_DATASET_PATH)
     result = leave_one_out_evaluate_project_risk_model(examples, random_state=42)
 
-    assert len(examples) == 50
-    assert len(result.predictions) == 50
-    assert result.accuracy == pytest.approx(29 / 50)
+    assert len(examples) == 64
+    assert len(result.predictions) == 64
+    assert result.accuracy == pytest.approx(30 / 64)
     assert [(cell.actual, cell.predicted, cell.count) for cell in result.confusion] == [
-        (MLRiskLabel.LOW, MLRiskLabel.LOW, 8),
-        (MLRiskLabel.LOW, MLRiskLabel.MEDIUM, 1),
-        (MLRiskLabel.MEDIUM, MLRiskLabel.LOW, 6),
-        (MLRiskLabel.MEDIUM, MLRiskLabel.MEDIUM, 14),
-        (MLRiskLabel.HIGH, MLRiskLabel.LOW, 4),
+        (MLRiskLabel.LOW, MLRiskLabel.LOW, 9),
+        (MLRiskLabel.LOW, MLRiskLabel.MEDIUM, 5),
+        (MLRiskLabel.MEDIUM, MLRiskLabel.LOW, 8),
+        (MLRiskLabel.MEDIUM, MLRiskLabel.MEDIUM, 8),
+        (MLRiskLabel.MEDIUM, MLRiskLabel.HIGH, 7),
+        (MLRiskLabel.MEDIUM, MLRiskLabel.CRITICAL, 2),
+        (MLRiskLabel.HIGH, MLRiskLabel.LOW, 1),
         (MLRiskLabel.HIGH, MLRiskLabel.MEDIUM, 6),
-        (MLRiskLabel.CRITICAL, MLRiskLabel.MEDIUM, 4),
+        (MLRiskLabel.HIGH, MLRiskLabel.HIGH, 6),
+        (MLRiskLabel.CRITICAL, MLRiskLabel.MEDIUM, 3),
+        (MLRiskLabel.CRITICAL, MLRiskLabel.HIGH, 2),
         (MLRiskLabel.CRITICAL, MLRiskLabel.CRITICAL, 7),
     ]
 
 
 def test_real_layer4_dataset_leave_one_out_beats_baseline_overall_but_not_on_every_batch() -> None:
-    """Layer 4's leave-one-out result (0.58, 29/50) still beats the fixed
-    max-severity baseline (0.40, 20/50) in aggregate, but the honest,
-    per-batch picture (computed directly, not just asserted) is mixed,
-    not a universal win:
+    """Layer 4's leave-one-out result (0.46875, 30/64) beats the fixed
+    max-severity baseline (0.359375, 23/64) in aggregate - a real, and
+    on macro-F1 (0.4995) actually *larger* edge than the original
+    50-project dataset's 0.498, once `_SENSITIVE_DOMAIN_KEYWORDS` was
+    widened (2026-10-11, second entry) after batch 5 alone (just the new
+    data, old keywords) first showed 0/13 "high" recall - see
+    IMPLEMENTATION_LOG.md for the full, disentangled account of why the
+    keyword fix (not the data by itself) is what unlocked "high" recall,
+    and why doing both together beats the keyword fix alone on the
+    original 50 projects (6/13 vs 4/10). Leave-one-out retrains on every
+    *other* current example each fold, so batches 2-3's own per-batch
+    counts shift once batch 5 exists, even though those projects' own
+    features never changed:
     - Original 22 (synthetic + first AI batch): baseline 15/22, LOO
-      14/22 - roughly at parity.
-    - Batch 2 (10 projects, indices 22-31): baseline 0/10, LOO 7/10.
-    - Batch 3 (10 projects, indices 32-41): baseline 1/10, LOO 6/10.
-    - Batch 4 (8 projects, indices 42-49) - a deliberately designed
-      stress-test batch, split between sensitive- and boring-vocabulary
-      domains with matched CWE-284 finding profiles: baseline 4/8, LOO
-      2/8. The baseline *beats* leave-one-out here, including missing
-      this batch's one critical (unauthenticated account-takeover)
-      project entirely (predicted low/medium, never critical) - see
-      IMPLEMENTATION_LOG.md 2026-09-04 for the full story, including a
-      severity-floor fix that was tried, made things worse in aggregate,
-      and was reverted in favor of the new cwe_287.py detector.
-    Layer 4's net advantage over the baseline is real but concentrated in
-    the sensitive-domain-with-hand-rolled-auth pattern from batches 2-3;
-    it does not generalize uniformly to every batch composition, and
-    batch 4 is documented, honest evidence of exactly where it breaks
-    down."""
+      14/22 - unchanged throughout.
+    - Batch 2 (10 projects, indices 22-31): baseline 0/10, LOO 3/10.
+    - Batch 3 (10 projects, indices 32-41): baseline 1/10, LOO 4/10.
+    - Batch 4 (8 projects, indices 42-49): baseline 4/8, LOO 5/8 - the
+      baseline no longer beats leave-one-out here, unlike on the
+      50-project/old-keyword dataset (2/8) - see IMPLEMENTATION_LOG.md
+      2026-09-04 for that original finding.
+    - Batch 5 (14 projects, indices 50-63, added 2026-10-11): baseline
+      3/14, LOO 4/14 - the same four colliding clusters Case 17 traced,
+      now with a real (if modest) leave-one-out edge over the baseline
+      once the keyword fix is in place, where there was none before it.
+    """
     examples = load_training_examples(REAL_DATASET_PATH)
     loo_result = leave_one_out_evaluate_project_risk_model(examples, random_state=42)
     baseline_result = evaluate_baseline_severity_model(examples)
 
-    assert loo_result.accuracy == pytest.approx(29 / 50)
-    assert baseline_result.accuracy == pytest.approx(20 / 50)
+    assert loo_result.accuracy == pytest.approx(30 / 64)
+    assert baseline_result.accuracy == pytest.approx(23 / 64)
     assert loo_result.accuracy > baseline_result.accuracy
 
     def _correct(result: EvaluationResult, start: int, stop: int) -> int:
@@ -494,11 +505,13 @@ def test_real_layer4_dataset_leave_one_out_beats_baseline_overall_but_not_on_eve
     assert _correct(baseline_result, 0, 22) == 15
     assert _correct(loo_result, 0, 22) == 14
     assert _correct(baseline_result, 22, 32) == 0
-    assert _correct(loo_result, 22, 32) == 7
+    assert _correct(loo_result, 22, 32) == 3
     assert _correct(baseline_result, 32, 42) == 1
-    assert _correct(loo_result, 32, 42) == 6
+    assert _correct(loo_result, 32, 42) == 4
     assert _correct(baseline_result, 42, 50) == 4
-    assert _correct(loo_result, 42, 50) == 2
+    assert _correct(loo_result, 42, 50) == 5
+    assert _correct(baseline_result, 50, 64) == 3
+    assert _correct(loo_result, 50, 64) == 4
 
 
 def test_has_sensitive_domain_signal_distinguishes_payments_from_catalog(tmp_path: Path) -> None:
@@ -557,7 +570,7 @@ def test_real_layer4_dataset_baseline_predictions_smoke() -> None:
     loo_result = leave_one_out_evaluate_project_risk_model(examples, random_state=42)
     baseline_result = evaluate_baseline_severity_model(examples)
 
-    assert len(loo_result.predictions) == len(baseline_result.predictions) == 50
+    assert len(loo_result.predictions) == len(baseline_result.predictions) == 64
     for loo_prediction, baseline_prediction in zip(
         loo_result.predictions, baseline_result.predictions, strict=True
     ):
