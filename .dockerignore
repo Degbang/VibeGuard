@@ -1,0 +1,16 @@
+.git/
+.venv/
+.qa-repos/
+dist/
+my-test-app/
+__pycache__/
+**/__pycache__/
+.pytest_cache/
+.pytest-tmp/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.vscode/
+.claude/
+.github/
+data/sample_apps/**/target/

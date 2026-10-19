@@ -28,7 +28,36 @@ PKG_CONFIG_PATH="/opt/homebrew/opt/openblas/lib/pkgconfig" \
 pip install --no-deps --force-reinstall "numpy==1.26.3"  # restore the pinned version
 ```
 
-## Run
+## Run with Docker (easiest - no local Python/venv setup needed)
+
+Requires only Docker. Scan any Java project by path, from anywhere on disk:
+
+```bash
+scripts/scan.sh /path/to/your/java/project
+```
+
+This builds the image on first use (cached after that) and runs the scan
+inside a container with the exact pinned dependencies from `requirements.txt`.
+The project being scanned is mounted **read-only** - the scanner never writes
+to, executes, or evaluates any code in the project it's scanning, the same
+guarantee the native (non-Docker) path makes. Works for a directory or a
+single supported file (`pom.xml`, `build.gradle(.kts)`, a `.java` file, or a
+conventional config file):
+
+```bash
+scripts/scan.sh ~/code/some-java-service
+scripts/scan.sh ~/code/some-java-service --timeout 10   # extra args pass through
+scripts/scan.sh ./pom.xml
+```
+
+To build and run the image manually instead of via the wrapper script:
+
+```bash
+docker build -t vibeguard .
+docker run --rm -v /absolute/path/to/project:/scan-target:ro vibeguard /scan-target
+```
+
+## Run from a local Python install
 
 From the repository root, scan a Java project through all five layers:
 
