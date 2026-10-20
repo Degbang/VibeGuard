@@ -95,6 +95,7 @@ vibeguard/
 │   ├── ast_parser.py           (javalang primary + tree-sitter fallback dispatch)
 │   ├── config_parser.py        (.properties / .yml / .yaml — CWE-798 config-side detection)
 │   ├── pom_parser.py           (Maven pom.xml — CWE-1035 dependency detection)
+│   ├── gradle_parser.py        (build.gradle(.kts) — CWE-1035 dependency detection, narrow regex heuristic)
 │   ├── scanner.py              (safe directory orchestration, path-containment, exclusions)
 │   ├── _parsing_guards.py      (shared size limit / soft timeout / safe-read helpers)
 │   ├── _java_literals.py       (shared string/text-block literal decoding, both parser paths)
@@ -120,7 +121,8 @@ vibeguard/
 │   ├── predictor.py             (project-level feature vector + Random Forest prediction)
 │   ├── trainer.py               (Random Forest training)
 │   ├── dataset.py               (labelled JSON dataset loader, project-relative paths only)
-│   └── evaluator.py             (accuracy / macro-F1 / confusion matrix)
+│   ├── evaluator.py             (accuracy / macro-F1 / confusion matrix)
+│   └── contract.py              (trusted retraining-based model contract — no serialized model artifact ever loaded)
 ├── layer5_report/
 │   ├── report.py                (ProjectRiskReport assembly + console rendering)
 │   ├── explainer.py             (SHAP attribution for the predicted risk label)
@@ -136,10 +138,18 @@ vibeguard/
 │   └── human_baseline.py        (blind human-rater survey vs. ground-truth/Layer 4/Layer 3 comparison)
 ├── tests/
 │   └── fixtures/
+├── scripts/
+│   └── scan.sh                  (Docker build+run wrapper — one-command scan of any Java project by path)
+├── .github/
+│   └── workflows/ci.yml         (pytest/mypy/ruff/black/coverage on every push)
 ├── IMPLEMENTATION_LOG.md
 ├── main.py
 ├── process_supervisor.py        (shared whole-process crash/hang supervisor; used by main.py and the evaluation/ entry points)
 ├── requirements.txt
+├── pyproject.toml               (black/ruff/mypy config)
+├── Dockerfile                   (python:3.10-slim, pinned requirements.txt, ENTRYPOINT main.py)
+├── .dockerignore
+├── LICENSE
 └── CLAUDE.md          <- this file
 ```
 
