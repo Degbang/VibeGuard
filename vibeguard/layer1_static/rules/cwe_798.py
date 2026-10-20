@@ -116,7 +116,13 @@ _PROPERTY_REFERENCE_PATTERN = re.compile(r"^[$#]\{.*\}$")
 # regardless of the field/key name - "null" is a common accidental or
 # deliberate non-value that a substring/placeholder check wouldn't
 # catch (it isn't a "changeme"-style placeholder marker either).
-_LITERAL_NON_VALUES = frozenset({"null"})
+# "true"/"false" were added after scanning Netflix/genie found
+# "cloud.aws.credentials.useDefaultAwsCredentialsChain: true" flagged
+# as a hardcoded credential - the key name matches on "credentials",
+# but a bare boolean toggle has no entropy and can never itself be
+# secret material, in config or in Java source alike - see
+# IMPLEMENTATION_LOG.md 2026-10-20.
+_LITERAL_NON_VALUES = frozenset({"null", "true", "false"})
 
 # Well-known, standard protocol/format/algorithm descriptor strings.
 # Found as two real false positives scanning AI-generated code, both the
@@ -810,6 +816,25 @@ def _is_credential_name(name: str) -> bool:
     return last_word(name) not in _REFERENCE_SUFFIXES
 
 
+# Bare credential keywords that are *also* a standard, publicly-defined
+# protocol field name - never secret material regardless of context,
+# unlike an arbitrary bare keyword such as "apiKey" (see
+# ``_is_self_referential_constant``'s own docstring for why a bare
+# keyword is otherwise still flagged). Found scanning Netflix/genie:
+# ``CLIENT_SECRET = "client_secret"`` is an OAuth2 token-request
+# field-name constant (RFC 6749), used identically to the neighboring,
+# never-flagged ``CLIENT_ID``/``GRANT_TYPE``/``SCOPE`` constants in the
+# same class - "client_secret" only differs from those in that it also
+# happens to be a ``CREDENTIAL_KEYWORDS`` entry. Deliberately a single-
+# entry allowlist, not a speculative list of every OAuth2 field name:
+# the others ("grant_type", "scope", ...) never match a credential
+# keyword in the first place, so only this one is ever at risk of the
+# bare-keyword exclusion firing on a protocol constant instead of a
+# real weak default. Extend on the next real instance found, not ahead
+# of one - see IMPLEMENTATION_LOG.md 2026-10-20.
+_KNOWN_PROTOCOL_FIELD_NAME_CONSTANTS = frozenset({"clientsecret"})
+
+
 def _is_self_referential_constant(name: str, value: str) -> bool:
     """Whether ``value`` is just ``name`` restated as a string literal -
     and ``name`` is more than merely the matched credential keyword itself.
@@ -840,10 +865,21 @@ def _is_self_referential_constant(name: str, value: str) -> bool:
     camelCase splits "apiKey" into two word-parts, but both parts
     together spell out exactly the ``apikey`` keyword, not a genuinely
     different, additional identifier like "management" or "list").
+
+    A second, narrower exception on top of that one:
+    ``_KNOWN_PROTOCOL_FIELD_NAME_CONSTANTS`` overrides the bare-keyword
+    exclusion for the specific case of a standard, publicly-defined
+    protocol field name that also happens to be a bare credential
+    keyword - unlike "apiKey", there is no "weak default value" reading
+    of ``CLIENT_SECRET = "client_secret"`` at all; the string is a wire
+    field name, identical in kind to "grant_type"/"scope" declared
+    right next to it.
     """
     if name.strip().lower() != value.strip().lower():
         return False
     normalized_name = re.sub(r"[_-]", "", name.strip().lower())
+    if normalized_name in _KNOWN_PROTOCOL_FIELD_NAME_CONSTANTS:
+        return True
     return not any(
         re.sub(r"[_-]", "", keyword) == normalized_name for keyword in CREDENTIAL_KEYWORDS
     )

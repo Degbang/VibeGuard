@@ -206,6 +206,31 @@ def test_scan_does_not_skip_a_production_package_named_it(tmp_path: Path) -> Non
     assert result.rejected_paths == ()
 
 
+def test_scan_skips_gradle_integ_test_root(tmp_path: Path) -> None:
+    """src/integTest/ (Gradle's own integration-test source-set
+    convention, distinct from Maven Failsafe's "it") is a test root too.
+
+    Found scanning Netflix/genie (IMPLEMENTATION_LOG.md 2026-10-20):
+    a throwaway local test-database password in
+    src/integTest/resources/application-db-mysql.yml was being scanned
+    as a production CWE-798 finding - the same false-positive shape
+    already fixed once for Maven, one build tool over.
+    """
+    main_sources = tmp_path / "src" / "main" / "java"
+    main_sources.mkdir(parents=True)
+    (main_sources / "RealService.java").write_text("public class RealService {}\n")
+
+    integ_test_sources = tmp_path / "src" / "integTest" / "java"
+    integ_test_sources.mkdir(parents=True)
+    (integ_test_sources / "FakeSecretIntegTest.java").write_text(
+        'public class FakeSecretIntegTest { String password = "hunter2"; }\n'
+    )
+
+    result = scan_directory(tmp_path)
+
+    assert [parsed.path.name for parsed in result.java_files] == ["RealService.java"]
+
+
 def test_scan_raises_on_non_directory(tmp_path: Path) -> None:
     not_a_dir = tmp_path / "file.txt"
     not_a_dir.write_text("hi")

@@ -10234,3 +10234,180 @@ should confirm this is the intended call before it is treated as
 settled, per Section 11's rule that log entries affecting the thesis
 narrative are not added silently. If confirmed, Layer 4 re-freezes at
 the 23-feature schema with this change included.
+
+## [2026-10-20] - Eighth real-world repository added: Netflix/genie - a real native-crash risk correction, and three new Layer 1 false-positive fixes
+
+**Status: DRAFT, pending student review.**
+
+**What the plan said:** Section 7's next-work list named continued
+real-repo evaluation as the highest-value remaining item, and an
+earlier 2026-10-10 entry explicitly named a Gradle-based project as a
+search angle that had "come up thin" and was never found.
+
+**What we actually did / found:**
+
+**1. Found and verified a real candidate, this time genuinely
+Gradle-based.** Checked each candidate directly against the GitHub API
+before cloning, not from a web-search snippet: `Netflix/conductor`
+(archived, last pushed 2023, rejected), `codecentric/spring-boot-admin`
+and `networknt/light-4j` (both real and active, but both actually
+Maven - `pom.xml` at the root, no `build.gradle` - rejected once their
+root directory listing was checked directly). `Netflix/genie`
+(`github.com/Netflix/genie`) is real: not archived, pushed
+2026-09-30, 12.7k stars, Apache-2.0, a production distributed
+job-orchestration platform Netflix open-sourced, with a `build.gradle`
+at the root and no `pom.xml` anywhere. Cloned shallow (`--depth 1`) to
+`.qa-repos/genie-20261020/` (922 Java files, 16 `build.gradle` files,
+16MB, HEAD `a7125b17`), confirmed real `@RestController` endpoints
+(`JobRestController`, `ClusterRestController`, etc.) before running
+anything.
+
+**2. Found that the documented "near-zero through the actual CLI"
+native-crash risk (2026-09-10 entry) does not hold at this file size -
+reproduced the crash through `main.py` itself, which that entry's own
+testing never did.** `python main.py` against one real file,
+`TitusAgentLauncherProperties.java` (397 lines), crashed with signal 10
+in **9 of 10** runs. Bisected properly before concluding anything:
+module-level (`genie-web` crashed, 14 siblings did not) -> package-
+level (`properties`/`data` crashed) -> file-level (this one file,
+crashing standalone) -> syntax-level. The trigger: `List<@NotBlank
+String>` (a JSR 308 type-use annotation inside a generic type
+argument) - confirmed directly that `javalang.parse.parse()` raises
+`JavaSyntaxError` on this syntax alone, forcing the Tree-sitter
+fallback. Isolated which half of that forced two-factor combination
+actually matters, not just which factor is present: a *minimal* file
+with only this one line, also forced onto the Tree-sitter path, never
+crashed in 10/10 runs; the *same real 397-line file* with only the
+annotation text removed (javalang now succeeds directly, no fallback)
+also never crashed in 10/10 runs. Only "Tree-sitter fallback" *and*
+"a realistically-sized file" together produce the crash - a
+combination the 2026-09-10 testing never actually exercised, since
+every file it used either didn't need the fallback or was far smaller
+when it did. The supervisor itself worked correctly throughout -
+every crash produced the documented clean exit-code-3 message, never
+a silent failure - so this is a correction to a risk *characterization*
+in the existing log, not a new fail-closed bug.
+
+**3. Fixed at the root, not just documented, by widening javalang's
+own coverage rather than chasing the native crash.** Added
+`strip_generic_type_annotations` to
+`_modern_java_preprocessor.py`: finds a generic-opening `<` immediately
+(mod whitespace) followed by `@` - unambiguous Java, since an
+annotation can never otherwise follow a `<` used as a comparison
+operator - locates its matching `>` via depth-tracking, and within
+that span strips an annotation run found at the span's own start or
+immediately after any comma at that span's own top level (handling
+`Map<@Valid A, @NotEmpty B>`), while leaving a nested generic's own
+annotation to be found and stripped independently by its own, separate
+trigger match (`Map<..., @NotEmpty Set<@Valid Cluster>>` - the outer
+span's own comma-scan never looks inside the nested one, so the two
+never double-process the same text). Verified this is unambiguous and
+cannot misfire on a normal parameter-declaration annotation
+(`foo(String a, @NotNull String b)`) by checking real usage across all
+`.qa-repos` first: every comma-followed-by-`@` match that *wasn't*
+already inside a confirmed `<...@` span was a declaration annotation
+(`@RequestParam`, `@Nullable`, `@PathVariable`, ...), never a type-use
+one - confirming a bare "any comma before `@`" rule would have been
+unsafe, and that confining this to depth-tracked, already-confirmed
+generic spans is the correct scope, not an arbitrary restriction.
+Re-ran the originally-crashing file 10/10 clean afterward, plus the
+full repo 3/3 clean.
+
+**4. Also found and fixed three real CWE-798 false positives surfaced
+by the same scan, scoped and approved explicitly before touching
+anything (the crash fix alone was the first, narrower approval; fixing
+all three was a second, separate approval once found):**
+   - `src/integTest/resources/application-db-mysql.yml` /
+     `-postgresql.yml` carry a throwaway local test-database password
+     (`password: password` against `jdbc:mysql://127.0.0.1/genie`) -
+     flagged because `scanner.py`'s `_TEST_DIR_NAMES` already excludes
+     Maven Failsafe's `src/it/` (WebGoat, 2026-09-04) but didn't know
+     Gradle's own, differently-named `src/integTest/` convention.
+     Added `"integtest"` to `_TEST_DIR_NAMES`.
+   - `cloud.aws.credentials.useDefaultAwsCredentialsChain: true` -
+     flagged because the key contains "credentials", but the value is
+     a bare boolean with no entropy, which can never itself be secret
+     material in config *or* Java source. Added `"true"`/`"false"` to
+     `cwe_798.py`'s `_LITERAL_NON_VALUES` (previously just `"null"`).
+   - `CLIENT_SECRET = "client_secret"` in `TokenFetcher.java` - an
+     OAuth2 wire field-name constant (RFC 6749), used as a map key
+     identically to the never-flagged `CLIENT_ID`/`GRANT_TYPE`/`SCOPE`
+     beside it, not a credential value. Not already excluded by
+     `_is_self_referential_constant`'s existing name/value-equality
+     check, because that check *deliberately* still flags a bare
+     credential keyword assigned to itself (to keep catching real cases
+     like `apiKey = "apiKey"` - see its own docstring). Added a single-
+     entry allowlist, `_KNOWN_PROTOCOL_FIELD_NAME_CONSTANTS =
+     frozenset({"clientsecret"})`, checked *before* the bare-keyword
+     exclusion, rather than loosening that exclusion generally -
+     deliberately not a speculative list of every OAuth2 field name,
+     since the others (`grant_type`, `scope`, ...) never match a
+     credential keyword to begin with and were never at risk.
+
+**Tests/adversarial checks run:** 15 new tests:
+`test_modern_java_preprocessor.py` gained 9 (single annotation,
+stacked annotations, a parenthesized annotation argument containing a
+comma, nested generics with comma-separated annotated arguments,
+newline-count preservation across a line break inside the stripped
+span, a parameter-declaration annotation after a comma confirmed
+*untouched*, a bare `<` comparison confirmed untouched, the pattern
+inside a string literal and inside a comment both confirmed untouched,
+and an end-to-end test proving `ast_parser.parse_file` now sets `tree`
+and leaves `tree_sitter` as `None` for the exact crashing pattern);
+`test_scanner.py` gained 1 (`src/integTest/` exclusion, mirroring the
+existing Maven `src/it/` test exactly); `test_cwe_798.py` gained 5 (the
+OAuth2 constant suppressed; `apiKey = "apiKey"` confirmed *still*
+flagged, protecting against this change over-widening; a boolean-
+valued credential-shaped field in Java source; the same in config YAML;
+and the config-side boolean test uses the real `useDefaultAwsCredentialsChain`
+key verbatim). Full suite: 509 passed (494 + 15 new). All four gates
+clean: `black --check`, `ruff check`, `mypy`, `git diff --check`. Real-
+scan verification beyond the unit tests: the originally-crashing file
+confirmed 10/10 clean (was 9/10 crashing); the full repo confirmed 3/3
+clean with the 4 original CWE-798 findings reduced to 0 and every
+other finding category unchanged.
+
+**What limitations remain:** The native Tree-sitter binding's crash
+itself is still not explained at the C-extension level - this fix
+closes the specific, now-understood trigger (type-use annotations in
+generics forcing the fallback on a realistically-sized file), not the
+underlying native bug, which could in principle still be reached by
+some other syntax pattern this project hasn't found yet. The
+`_KNOWN_PROTOCOL_FIELD_NAME_CONSTANTS` allowlist is a single entry by
+design, not a general OAuth2-awareness feature - another standard
+protocol field name colliding with a bare credential keyword would need
+its own, separately-justified addition, not an assumption that this
+list is now complete.
+
+**Effect on thesis chapters:** Chapter 4/5's robustness discussion
+gains a materially more honest version of the native-crash story: the
+2026-09-10 entry's "near-zero through the actual CLI" conclusion did
+not hold at a file size and syntax combination that entry never tested,
+found via real-world QA on an 8th independent repository - and unlike
+every prior real-world false-positive fix this session, the resolution
+here is a genuine *parser-coverage* improvement (javalang now succeeds
+directly on a common Hibernate Validator pattern) with the crash-risk
+reduction following as a direct consequence, not a crash-specific
+workaround. Chapter 4/5 also gain three more honestly-traced real-
+world CWE-798 false-positive fixes, continuing the same pattern as
+every prior repo addition (Syncope's enterprise-constant idiom, the
+Spring Security `.passwordParameter` fix, WebGoat's `src/it/` fix) -
+each found, root-caused against the actual file content, and fixed
+with a regression test protecting the exact case the fix must not
+also suppress.
+
+**Freeze/handoff:** New, same-session work with no independent review
+yet. Per Section 11, recommend a fresh session run adversarial QA
+against this before treating it as frozen - in particular: (a) confirm
+`strip_generic_type_annotations` cannot misfire on a real file beyond
+what this entry's `.qa-repos` grep already checked (e.g. a generic
+bound like `<T extends @Valid Foo>`, not seen in any available repo);
+(b) consider whether `_KNOWN_PROTOCOL_FIELD_NAME_CONSTANTS` should ever
+grow, and under what evidence bar. Also note: Section 7's build-order
+list still describes only "four" `.qa-repos` entries by name
+(`spring-petclinic-rest`, `quarkus-super-heroes`, the RealWorld
+reference backend, WebGoat) - stale since at least the fifth addition
+(2026-10-03); there are now eight. Left uncorrected in this entry since
+fixing Section 7's prose was out of this entry's own scope, but flagged
+here explicitly per Section 9's "flag staleness to the student" rule
+rather than silently left for the next session to rediscover.

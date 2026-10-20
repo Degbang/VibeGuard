@@ -131,6 +131,23 @@ def test_detect_in_config_does_not_flag_property_reference(tmp_path: Path) -> No
     assert detect_in_config(result) == ()
 
 
+def test_detect_in_config_does_not_flag_a_boolean_valued_credential_shaped_key(
+    tmp_path: Path,
+) -> None:
+    """Found scanning Netflix/genie (IMPLEMENTATION_LOG.md 2026-10-20):
+    cloud.aws.credentials.useDefaultAwsCredentialsChain: true matched
+    on "credentials" in the key, but a bare boolean toggle has no
+    entropy and can never be secret material."""
+    yaml_file = tmp_path / "application.yml"
+    yaml_file.write_text(
+        "cloud:\n  aws:\n    credentials:\n      useDefaultAwsCredentialsChain: true\n"
+    )
+
+    result = parse_config_file(yaml_file)
+
+    assert detect_in_config(result) == ()
+
+
 def test_detect_in_config_does_not_flag_empty_or_placeholder_values(tmp_path: Path) -> None:
     props_file = tmp_path / "application.properties"
     props_file.write_text("quarkus.datasource.password=\nquarkus.oidc.client-secret=CHANGE_ME\n")
@@ -765,6 +782,64 @@ def test_detect_in_java_still_excludes_a_static_final_multi_keyword_fragment_com
         "public class Concat {\n"
         '    public static final String clientSecretKey = "clientSecretKey";\n'
         "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    assert detect_in_java(result) == ()
+
+
+def test_detect_in_java_does_not_flag_an_oauth2_client_secret_field_name_constant(
+    tmp_path: Path,
+) -> None:
+    """CLIENT_SECRET = "client_secret" is an OAuth2 wire field-name
+    constant (RFC 6749), used as a map key the same way as the never-
+    flagged GRANT_TYPE/SCOPE constants beside it - not a credential
+    value. Found scanning Netflix/genie (IMPLEMENTATION_LOG.md
+    2026-10-20): the bare-keyword exclusion that correctly still flags
+    ``apiKey = "apiKey"`` was also, incorrectly, catching this."""
+    java_file = tmp_path / "TokenFetcher.java"
+    java_file.write_text(
+        "public class TokenFetcher {\n"
+        '    private static final String CLIENT_ID = "client_id";\n'
+        '    private static final String CLIENT_SECRET = "client_secret";\n'
+        '    private static final String GRANT_TYPE = "grant_type";\n'
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+
+    assert detect_in_java(result) == ()
+
+
+def test_detect_in_java_still_flags_a_bare_keyword_self_referential_constant(
+    tmp_path: Path,
+) -> None:
+    """The OAuth2 field-name exception above must not widen into a
+    general exception for every bare-keyword self-referential constant
+    - apiKey = "apiKey" has no standard-protocol-constant reading and
+    must stay flagged, exactly as before this change."""
+    java_file = tmp_path / "Config.java"
+    java_file.write_text(
+        'public class Config {\n    public static final String apiKey = "apiKey";\n}\n'
+    )
+
+    result = parse_file(java_file)
+
+    assert {f.identifier for f in detect_in_java(result)} == {"apiKey"}
+
+
+def test_detect_in_java_does_not_flag_a_boolean_valued_credential_shaped_key(
+    tmp_path: Path,
+) -> None:
+    """A bare boolean value can never be secret material, regardless of
+    how credential-shaped the field/key name is. Found scanning
+    Netflix/genie (IMPLEMENTATION_LOG.md 2026-10-20):
+    useDefaultAwsCredentialsChain's name matches on "credentials", but
+    its value is just a toggle."""
+    java_file = tmp_path / "Config.java"
+    java_file.write_text(
+        "public class Config {\n    private boolean useDefaultAwsCredentialsChain = true;\n}\n"
     )
 
     result = parse_file(java_file)

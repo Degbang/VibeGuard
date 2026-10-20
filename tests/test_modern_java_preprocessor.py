@@ -10,6 +10,7 @@ from vibeguard.layer1_static._modern_java_preprocessor import (
     desugar_simple_records,
     desugar_text_blocks,
     preprocess,
+    strip_generic_type_annotations,
     strip_pattern_matching_bindings,
     strip_sealed_modifiers,
 )
@@ -382,6 +383,116 @@ def test_text_block_with_embedded_secret_is_detected_by_cwe_798(tmp_path: Path) 
 
     findings = cwe_798.detect_in_java(parsed)
     assert any("password" in f.identifier.lower() for f in findings)
+
+
+def test_generic_type_use_annotation_is_stripped() -> None:
+    rewritten = strip_generic_type_annotations("class X { private List<@NotBlank String> names; }")
+    tree = javalang.parse.parse(rewritten)
+
+    field = tree.types[0].body[0]
+    assert field.type.name == "List"
+    assert field.type.arguments[0].type.name == "String"
+
+
+def test_generic_type_use_annotation_with_stacked_annotations_is_stripped() -> None:
+    rewritten = strip_generic_type_annotations(
+        "class X { private List<@NotEmpty @Size(max = 1024) String> executable; }"
+    )
+    tree = javalang.parse.parse(rewritten)
+
+    field = tree.types[0].body[0]
+    assert field.type.arguments[0].type.name == "String"
+
+
+def test_generic_type_use_annotation_with_parenthesized_comma_argument_is_stripped() -> None:
+    """An annotation argument itself containing a comma (a validation
+    message) must not confuse the top-level comma scan."""
+    rewritten = strip_generic_type_annotations(
+        'class X { private Set<@Size(max = 255, message = "too long") String> tags; }'
+    )
+    tree = javalang.parse.parse(rewritten)
+
+    field = tree.types[0].body[0]
+    assert field.type.arguments[0].type.name == "String"
+
+
+def test_nested_generic_with_comma_separated_annotated_arguments_is_stripped() -> None:
+    """Both a top-level comma-separated argument and a nested generic's
+    own leading annotation must be stripped, independently."""
+    rewritten = strip_generic_type_annotations(
+        "class X { private Map<@Valid Command, @NotEmpty Set<@Valid Cluster>> m; }"
+    )
+    tree = javalang.parse.parse(rewritten)
+
+    field = tree.types[0].body[0]
+    first_arg, second_arg = field.type.arguments
+    assert first_arg.type.name == "Command"
+    assert second_arg.type.name == "Set"
+    assert second_arg.type.arguments[0].type.name == "Cluster"
+
+
+def test_generic_type_use_annotation_preserves_total_newline_count() -> None:
+    source = "class X {\n    private List<@NotBlank\n        String> names;\n}\n"
+    rewritten = strip_generic_type_annotations(source)
+    assert rewritten.count("\n") == source.count("\n")
+    javalang.parse.parse(rewritten)  # must still parse after the rewrite
+
+
+def test_parameter_declaration_annotation_after_comma_is_not_touched() -> None:
+    """A normal parameter-declaration annotation (already valid, pre-
+    JSR-308 syntax javalang already parses fine) must survive
+    untouched - that comma was never found inside a confirmed generic
+    span, unlike a type-use annotation's comma."""
+    source = "class X { void foo(String a, @NotNull String b) {} }"
+    assert strip_generic_type_annotations(source) == source
+
+
+def test_less_than_comparison_followed_by_annotation_like_text_is_left_alone() -> None:
+    """A bare '<' with no '@' immediately after it is never touched -
+    this only fires on the unambiguous '<@' sequence."""
+    source = "class X { void f() { if (a < b) { g(); } } }"
+    assert strip_generic_type_annotations(source) == source
+
+
+def test_generic_type_use_annotation_text_inside_string_literal_is_not_stripped() -> None:
+    source = 'class X { String s = "List<@NotBlank String>"; }'
+    assert strip_generic_type_annotations(source) == source
+
+
+def test_generic_type_use_annotation_text_inside_comment_is_not_stripped() -> None:
+    source = "class X {\n    // List<@NotBlank String>\n    int x;\n}\n"
+    assert strip_generic_type_annotations(source) == source
+
+
+def test_generic_type_use_annotation_lets_javalang_parse_without_tree_sitter_fallback(
+    tmp_path: Path,
+) -> None:
+    """End-to-end proof this closes the crash-risk gap it was built for.
+
+    IMPLEMENTATION_LOG.md (2026-10-20): scanning Netflix/genie found
+    this exact syntax forces the Tree-sitter fallback, which then
+    crashed the native binding at a ~90% rate on a realistically sized
+    file - a risk the fallback design never measured at this size.
+    Confirming javalang succeeds directly (``tree`` set, ``tree_sitter``
+    left ``None``) is the actual fix, not merely "it still parses
+    somehow."
+    """
+    from vibeguard.layer1_static import ast_parser
+
+    source = (
+        "public class TitusAgentLauncherProperties {\n"
+        "    private java.util.List<@NotBlank String> entryPointTemplate ="
+        ' java.util.Arrays.asList("/bin/genie-agent");\n'
+        "}\n"
+    )
+    java_file = tmp_path / "TitusAgentLauncherProperties.java"
+    java_file.write_text(source)
+
+    parsed = ast_parser.parse_file(java_file)
+
+    assert parsed.status == ast_parser.ParseStatus.OK
+    assert parsed.tree is not None
+    assert parsed.tree_sitter is None
 
 
 def test_preprocess_pipeline_handles_all_modern_constructs_together() -> None:

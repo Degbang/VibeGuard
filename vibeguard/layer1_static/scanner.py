@@ -86,7 +86,13 @@ _EXCLUDED_DIR_NAMES = frozenset(
 # "test"/"tests" above: a package segment named "it" *nested* deeper in
 # the tree is left alone, only a top-level "src/it/" or "<root>/it/" is
 # excluded.
-_TEST_DIR_NAMES = frozenset({"test", "tests", "it"})
+# "integtest" (Gradle's own integration-test source-set convention,
+# distinct from Maven Failsafe's "it") was added after scanning
+# Netflix/genie found the identical false-positive shape one build tool
+# over: "src/integTest/resources/application-db-mysql.yml" carrying a
+# throwaway local test-database password ("password") flagged as a
+# production CWE-798 finding - see IMPLEMENTATION_LOG.md 2026-10-20.
+_TEST_DIR_NAMES = frozenset({"test", "tests", "it", "integtest"})
 
 
 @dataclass(frozen=True)

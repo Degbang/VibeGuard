@@ -49,6 +49,18 @@ Current coverage, and why each one either is or isn't handled this way:
   substitution - getting it wrong risks silently corrupting the AST
   structure itself, a materially worse failure mode than a clean
   ``PARSE_FAILED``. Remains an explicit, documented gap.
+- **Type-use annotations on generic type arguments** (JSR 308, e.g.
+  ``List<@NotBlank String>``, the dominant Hibernate Validator
+  field-validation pattern): the annotation(s) are stripped, leaving
+  the bare type argument. Not just a parse-coverage gap - real-world
+  QA (IMPLEMENTATION_LOG.md, 2026-10-20, scanning Netflix/genie) found
+  the Tree-sitter fallback this syntax otherwise forces natively
+  crashes at a ~90% rate on a realistically-sized file, a risk never
+  measured at this file size when the two-parser fallback design was
+  first built and verified. Safe to drop for the same reason pattern-
+  matching bindings are: javalang has no semantic resolution, and no
+  current CWE rule reads a validation annotation's own presence as a
+  signal, so losing it changes nothing any rule observes.
 """
 
 from __future__ import annotations
@@ -62,6 +74,8 @@ _PATTERN_INSTANCEOF_PATTERN = re.compile(
     r"(instanceof\s+[A-Za-z_][\w.]*(?:<[^>]*>)?(?:\[\])*)\s+[A-Za-z_]\w*" r"(?=\s*(?:[)&|;,?:{]|$))"
 )
 _TEXT_BLOCK_PATTERN = re.compile(r'"""[ \t]*\r?\n(?P<content>.*?)"""', re.DOTALL)
+_GENERIC_ANNOTATION_TRIGGER = re.compile(r"<(?=\s*@)")
+_TYPE_USE_ANNOTATION_RUN = re.compile(r"\s*(?:@[A-Za-z_][\w.]*(?:\([^()]*\))?\s*)+")
 
 _RECORD_PATTERN = re.compile(
     r"""
@@ -189,6 +203,7 @@ def preprocess(source: str) -> str:
     only ever operate on genuine code.
     """
     source = desugar_text_blocks(source)
+    source = strip_generic_type_annotations(source)
     source = strip_sealed_modifiers(source)
     source = strip_pattern_matching_bindings(source)
     return desugar_simple_records(source)
@@ -319,6 +334,106 @@ def _blank_until_quoted_literal_end(result: list[str], source: str, start: int, 
             return index + 1
         index += 1
     return index
+
+
+def strip_generic_type_annotations(source: str) -> str:
+    """Strip JSR 308 type-use annotations from generic type arguments.
+
+    ``List<@NotBlank String>`` is syntax javalang 0.13.0 cannot parse at
+    all - the ``<`` immediately followed by ``@`` (modulo whitespace) is
+    unambiguous Java: nowhere else can an annotation legally follow a
+    ``<``, since that would require it to appear as an operand of a
+    less-than comparison. Each matched generic span is scanned once
+    more, depth-tracked on nested ``<``/``>``, to also strip an
+    annotation run immediately after any comma that sits at that span's
+    own top level (``Map<@Valid A, @NotEmpty B>``) - never a bare comma
+    elsewhere, so a parameter-declaration annotation
+    (``foo(String a, @NotNull String b)``) is left untouched, since
+    that comma was never found inside a confirmed generic span to begin
+    with. A nested generic's own leading annotation
+    (``Set<@Valid Cluster>`` inside ``Map<..., Set<@Valid Cluster>>``)
+    is handled independently by its own, separately-triggered match -
+    depth-tracking means an outer span's own comma scan never looks
+    inside a nested one, so the two never double-process the same text.
+    Dropping the matched text (rather than blanking it to spaces, like
+    every other rewrite in this module) is still newline-count-safe:
+    the replacement is exactly as many ``\\n`` characters as the
+    dropped text contained, nothing more.
+    """
+    masked = _mask_protected_regions(source)
+    spans = _type_use_annotation_spans(masked)
+    if not spans:
+        return source
+    pieces: list[str] = []
+    last_end = 0
+    for start, end in spans:
+        pieces.append(source[last_end:start])
+        pieces.append("\n" * source.count("\n", start, end))
+        last_end = end
+    pieces.append(source[last_end:])
+    return "".join(pieces)
+
+
+def _type_use_annotation_spans(masked: str) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    for trigger in _GENERIC_ANNOTATION_TRIGGER.finditer(masked):
+        open_index = trigger.start()
+        close_index = _find_matching_angle_bracket(masked, open_index)
+        if close_index is None:
+            continue
+        spans.extend(_annotation_runs_at_span_top_level(masked, open_index + 1, close_index))
+    return spans
+
+
+def _find_matching_angle_bracket(masked: str, open_index: int) -> int | None:
+    depth = 1
+    index = open_index + 1
+    while index < len(masked):
+        char = masked[index]
+        if char == "<":
+            depth += 1
+        elif char == ">":
+            depth -= 1
+            if depth == 0:
+                return index
+        index += 1
+    return None
+
+
+def _annotation_runs_at_span_top_level(masked: str, start: int, end: int) -> list[tuple[int, int]]:
+    """Find annotation-run spans at this generic span's own top level.
+
+    "Top level" means: right at ``start`` (immediately after the
+    span's own opening ``<``), or immediately after a comma found at
+    depth 0 relative to this span - never inside a nested ``<...>``
+    found along the way, which this function steps over without
+    looking inside (that nested span gets its own independent match
+    from ``_type_use_annotation_spans``'s own top-level scan instead).
+    """
+    spans: list[tuple[int, int]] = []
+    index = _consume_annotation_run_if_present(masked, start, spans)
+    depth = 0
+    while index < end:
+        char = masked[index]
+        if char == "<":
+            depth += 1
+        elif char == ">":
+            depth -= 1
+        elif char == "," and depth == 0:
+            index = _consume_annotation_run_if_present(masked, index + 1, spans)
+            continue
+        index += 1
+    return spans
+
+
+def _consume_annotation_run_if_present(
+    masked: str, position: int, spans: list[tuple[int, int]]
+) -> int:
+    match = _TYPE_USE_ANNOTATION_RUN.match(masked, position)
+    if match is None:
+        return position
+    spans.append((position, match.end()))
+    return match.end()
 
 
 def desugar_text_blocks(source: str) -> str:
