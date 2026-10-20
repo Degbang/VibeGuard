@@ -9953,3 +9953,21 @@ disentangled numbers in point 4 above, not just the combined result,
 since the disentanglement is the actual evidence for *why* this fix
 works where the prior one didn't; (3) Layer 4 returns to frozen status
 once (1) and (2) are done.
+
+## [2026-10-20] - Dependency hygiene re-run: pip CVE fixed, nltk CVE recurs with no fix available yet - third occurrence of the same transitive-dependency pattern
+
+**What the plan said:** CLAUDE.md's Section 5 commitment is to "periodically check for known-vulnerable dependencies with `safety check`," explicitly treating the 2026-10-02 "0 vulnerabilities, clean" claim as a snapshot, not a permanent one, and calling for re-verification before citing a count in Chapter 5.
+
+**What we actually did / found:** Re-ran `safety check` for real (not assumed still clean) while answering an unrelated question about overall project state. Found 2 vulnerabilities, not 0:
+- `pip` 26.1.2 (`CVE-2026-13346`, path traversal via doubly-encoded package URLs, affected spec `<26.2.0`) - a real fix existed (`26.2.1` on PyPI). Fixed immediately: `pip install --upgrade pip` inside `.venv`, re-ran `safety check`, confirmed this finding is gone.
+- `nltk` 3.10.3 (`CVE-2026-81726`, path traversal via caller-controlled `open()`, affected spec `<=3.10.3`) - checked directly whether a newer release exists (`pip index versions nltk`): `3.10.3` is still the newest version on PyPI. No fix to pin to. Left open, logged honestly rather than silently dropped or guessed at.
+
+Both are transitive dependencies of `safety` itself (confirmed by `requirements.txt` - neither `pip`'s own version nor `nltk` is a direct VibeGuard import), the identical shape as the 2026-09-10 finding (`pip` + `cryptography` that time) and its later resolution (`nltk` + `cryptography` upgrades clearing them). This is now the **third** time this exact pattern has recurred: a `safety`-internal transitive dependency going stale, never anything VibeGuard's own code actually uses. Worth naming as a pattern, not three unrelated incidents - the dependency *being audited* keeps needing its own audit.
+
+**Tests/adversarial checks run:** Re-ran `safety check` before and after the `pip` upgrade to confirm the fix took effect and introduced nothing new. Did not touch `requirements.txt` (neither package is pinned there) or any VibeGuard source - this is purely a local `.venv` interpreter-environment fix, scoped exactly to what `safety check` flagged.
+
+**Why:** Caught while giving an honest overall-project assessment that explicitly needed to check whether CLAUDE.md's dependency-hygiene claim still held, rather than repeat a now-18-days-stale "clean" claim as if it were still current.
+
+**Effect on thesis chapters:** Chapter 5's dependency-hygiene discussion should state the current count (1 open, transitive, no-fix-available finding, not 0) and should frame the audit itself as a recurring, living process - three real occurrences of the same "safety's own tree goes stale" pattern over the life of this project is itself a small, honest data point about dependency-hygiene practice worth a sentence, not just a one-line "0 vulnerabilities" claim that will go stale again by submission time regardless.
+
+**Freeze/handoff:** This is routine maintenance, not a design change - no QA round needed, Section 8's freeze discipline doesn't apply here. Re-run `safety check` again close to actual submission, since this has now changed direction three separate times across the life of the project.
