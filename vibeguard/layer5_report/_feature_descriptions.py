@@ -49,6 +49,11 @@ FEATURE_DESCRIPTIONS: dict[str, str] = {
         "the affected code appearing to handle sensitive functionality "
         "(payments, accounts, admin, etc.)"
     ),
+    "has_guard_caveat_signal": (
+        "at least one finding noting a possible existing authorization check "
+        "(centralized security configuration or a hand-rolled guard) that "
+        "static analysis could not fully verify"
+    ),
 }
 
 

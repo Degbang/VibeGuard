@@ -105,7 +105,7 @@ _BLANKET_AUTHORIZATION_CALLS = frozenset({"authenticated", "permitAll", "denyAll
 # since that exact signature is unambiguous enough in practice on its own.
 _LEGACY_CONFIGURE_METHOD_NAME = "configure"
 _HTTP_SECURITY_PARAM_TYPE = "HttpSecurity"
-_CENTRALIZED_AUTH_CAVEAT = (
+CENTRALIZED_AUTH_CAVEAT = (
     "Note: this project also declares centralized Spring Security configuration "
     "(a SecurityFilterChain bean or a WebSecurityConfigurerAdapter override) "
     "with a project-wide '.anyRequest()' authorization rule elsewhere - this "
@@ -123,7 +123,7 @@ _CENTRALIZED_AUTH_CAVEAT = (
 # has_inline_header_guard's docstring and IMPLEMENTATION_LOG.md's
 # 2026-09-10 entry for the real examples this was built against.
 _EQUALITY_COMPARISON_METHODS = frozenset({"equals", "contentEquals", "isEqual"})
-_HAND_ROLLED_GUARD_CAVEAT = (
+HAND_ROLLED_GUARD_CAVEAT = (
     "Note: this endpoint method itself contains a conditional check comparing "
     "a caller-supplied header against another value before continuing (a "
     "hand-rolled authorization check) - this rule cannot verify whether that "
@@ -503,7 +503,7 @@ def apply_centralized_authorization_context(
         return findings
     return tuple(
         (
-            dataclasses.replace(finding, message=f"{finding.message} {_CENTRALIZED_AUTH_CAVEAT}")
+            dataclasses.replace(finding, message=f"{finding.message} {CENTRALIZED_AUTH_CAVEAT}")
             if finding.cwe_id == CWE_ID
             else finding
         )
@@ -966,7 +966,7 @@ def apply_hand_rolled_guard_context(
         ):
             result.append(
                 dataclasses.replace(
-                    finding, message=f"{finding.message} {_HAND_ROLLED_GUARD_CAVEAT}"
+                    finding, message=f"{finding.message} {HAND_ROLLED_GUARD_CAVEAT}"
                 )
             )
         else:

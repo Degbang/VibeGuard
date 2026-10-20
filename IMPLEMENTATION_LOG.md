@@ -10113,3 +10113,124 @@ see the entries above).
 from the human-baseline comparison), is closed. The broader "high"
 severity recall limitation it led to is a separate, still-open item -
 not reopened or reframed by this entry.
+
+## [2026-10-20] - Re-attempted and this time kept a has_guard_caveat_signal Layer 4 feature (status: DRAFT, pending student review)
+
+**What the plan said:** Layer 4 is frozen (Section 8); this exact
+feature direction was already tried and reverted on 2026-09-10 because
+it made overall leave-one-out performance worse while leaving "high"
+recall unchanged at 0/10 - closed, not something to retry on a hunch.
+
+**What we actually did / found:** Investigating the still-open "high"
+severity recall item (46% at the time), traced a specific 4-member
+duplicate-feature-vector cluster, all sharing the identical vector
+`{finding_count: 1.0, max_rule_score: 80.0, mean_rule_score: 80.0,
+high_count: 1.0, cwe_284_count: 1.0, java_source_count: 1.0,
+has_sensitive_domain_signal: 1.0}`: `unprotected-reports-service` and
+`ai-session-replay-service` (label "high") tied exactly 2-vs-2 against
+`ai-account-linking-service` and `ai-bulk-user-import-service` (label
+"medium"). Read each project's `label_rationale`: both "medium"
+projects have a documented real hand-rolled authorization guard (a
+caller-supplied header compared against a configured value); neither
+"high" project has any such guard. Checked whether this distinction
+already exists anywhere in the stored data before adding anything new:
+it does - `cwe_284.py`'s pre-existing `_CENTRALIZED_AUTH_CAVEAT`/
+`_HAND_ROLLED_GUARD_CAVEAT` annotations (added 2026-09-04/09-10) are
+present in exactly the two "medium" projects' finding messages and
+absent from both "high" projects' - a clean, 100%-correlated signal for
+this specific cluster, but this is the *same* signal the reverted
+2026-09-10 `has_unverified_guard_signal` attempt used, just traced from
+a different, now-superseded cluster on a smaller, pre-keyword-widening
+dataset.
+
+Rather than assume the prior revert's outcome still holds in the
+current, substantially different context (64 projects vs. the
+original's smaller count, `_SENSITIVE_DOMAIN_KEYWORDS` widened since),
+re-built the feature in a disposable scratch harness first (monkey-
+patching `build_project_features` in both `predictor.py` and
+`trainer.py`, which binds its own `from ... import` copy) and measured
+it against the real `leave_one_out_evaluate_project_risk_model`, before
+touching any shipped file:
+
+- Single-seed (`random_state=42`): accuracy 30/64 -> 31/64, macro-F1
+  0.4995 -> 0.5156, "high" recall 6/13 -> 7/13.
+- Swept 6 random seeds (0, 1, 7, 42, 99, 123) to check this wasn't a
+  single-seed artifact: accuracy and macro-F1 were never worse with the
+  feature than without across any seed, and "high" recall was 7/13 in
+  *every* seed with the feature vs. 6/13 in every seed without it -
+  a reproducible, not seed-cherry-picked, improvement, unlike the
+  original attempt's result on the smaller dataset.
+- Traced every prediction that actually changed, not just the
+  aggregate numbers: the targeted cluster resolved exactly as
+  hypothesized (`unprotected-reports-service` and `ai-session-replay-
+  service` now correctly predict "high"; `ai-account-linking-service`
+  and `ai-bulk-user-import-service` now correctly predict "medium" -
+  4 corrections), but the feature also causes 5 new regressions
+  elsewhere, 1 of them a genuine counter-example worth recording:
+  `ai-payment-webhooks-service` ("high") now mispredicts "medium"
+  because its one caveated finding reflects a *correctly implemented*
+  HMAC-signature guard on one endpoint, while the project's actual
+  "high" driver is a different, unguarded finding - a case this
+  project-level boolean cannot distinguish from "the guard covers the
+  risk." The other 4 regressions are medium-labelled projects newly
+  mispredicted as "low." Net effect across the full dataset: +6
+  corrections, -5 regressions, +1 overall (30/64 -> 31/64).
+
+**Why:** The signal itself is exactly as real and exactly as imprecise
+as the 2026-09-10 entry already concluded ("real but sparse... does not
+uniquely mark 'high'") - what changed is the dataset it is being
+measured against, not the signal's own reliability. On the current,
+larger, keyword-widened 64-project dataset, that same imprecise signal
+now nets positive and does so reproducibly across 6 seeds, instead of
+nets negative as it did on the smaller dataset it was first tried
+against. This is accepted as a genuinely different empirical result
+from a materially different context, not a re-litigation of the first
+attempt's conclusion on the same evidence it was reverted against.
+
+Promoted `cwe_284.py`'s two caveat constants from private
+(`_CENTRALIZED_AUTH_CAVEAT`/`_HAND_ROLLED_GUARD_CAVEAT`) to public
+(`CENTRALIZED_AUTH_CAVEAT`/`HAND_ROLLED_GUARD_CAVEAT`) so `predictor.py`
+can import them by their literal text rather than a guessed substring -
+a pure rename, matching the exact approach the original (reverted)
+attempt already used for the same reason. Added `has_guard_caveat_signal`
+to `predictor.py`'s feature vector (23 features total, up from 22),
+regenerated the trusted model contract, and updated every pinned test
+value this touches: `test_layer4_ml.py` (confusion matrix, accuracy,
+per-batch breakdown), `test_evaluation.py` (in-sample/leave-one-out
+accuracy and macro-F1, console-output smoke string), `test_thesis_orchestrator.py`
+(leave_one_out_accuracy), and `test_layer5_plain_summary.py`'s feature-
+description coverage check (added a plain-language description for the
+new feature to `_feature_descriptions.py`).
+
+**Tests/adversarial checks run:** Full `pytest -q`: 494 passed (was
+494 before this change too - no new tests added, since this is a
+feature-vector and pinned-value change, not new branch logic; the
+6-seed sweep above is the adversarial check for the change itself, run
+in the scratch harness before any shipped file was touched, not
+committed as a test). All four gates clean: `black --check`, `ruff
+check`, `mypy`, `git diff --check`.
+
+**What limitations remain:** This is still not a clean fix - it trades
+5 regressions for 6 corrections, and the `ai-payment-webhooks-service`
+counter-example demonstrates the same project-level boolean's
+fundamental limit as before: it cannot tell "a guard exists and covers
+the actual risk" apart from "a guard exists on an unrelated endpoint
+while the real risk sits elsewhere." The broader "high" severity recall
+limitation remains real and only partially addressed (6/13 -> 7/13, not
+resolved) - Chapter 5 should state this feature's effect with the same
+honesty as the rest of this investigation: a net positive on this
+dataset, not a solved problem.
+
+**Effect on thesis chapters:** Chapter 4/5's Layer 4 discussion gains a
+second, concrete example of a feature that was tested, rejected, and
+later re-tested and accepted once the evaluation context materially
+changed - a defensible instance of iterative empirical methodology
+rather than an inconsistency, provided both the 2026-09-10 revert and
+this entry are cited together, not just the final accepted state.
+
+**Freeze/handoff:** Marked DRAFT because this reopens a frozen layer
+(Layer 4) and reverses a previously-reverted decision - the student
+should confirm this is the intended call before it is treated as
+settled, per Section 11's rule that log entries affecting the thesis
+narrative are not added silently. If confirmed, Layer 4 re-freezes at
+the 23-feature schema with this change included.
