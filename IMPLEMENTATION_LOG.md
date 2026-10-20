@@ -10071,3 +10071,45 @@ reviewed. Routine test-coverage improvement with no detection-logic
 behavior change - low risk, but per Section 11 a fresh session could
 still usefully re-derive the two percentage changes independently
 rather than trust this entry's numbers alone.
+
+## [2026-10-20] - Case 17 closed for real: the original motivating example now predicts correctly
+
+**What we actually did / found:** Case 17's entire investigation
+(2026-09-10 root-cause entry, the two 2026-10-11 Layer 4 entries above)
+was motivated by one specific miss: the human-baseline comparison
+found `ai-admin-report-export-service` (ground truth "high" -
+unauthenticated admin-only report export, a stated requirement
+silently dropped by the AI generator) was being predicted "low" by
+Layer 4. Verified directly, not assumed from the aggregate recall
+number alone: ran `leave_one_out_evaluate_project_risk_model` against
+the current 64-project dataset and the widened keyword list, and
+checked this one project's own prediction specifically.
+
+```
+ai-admin-report-export-service: actual=high predicted=high confidence=0.46
+```
+
+It now predicts correctly. This is a direct, traceable consequence of
+the `_SENSITIVE_DOMAIN_KEYWORDS` widening - `report` was added
+specifically because `unprotected-reports-service` and
+`ai-admin-report-export-service` (the same `ReportController.java`
+shape) both matched zero existing keywords despite being high-severity.
+Confirmed here, after the fact, that the fix's effect reached the exact
+project that started the whole investigation, not just the aggregate
+metric.
+
+**Effect on thesis chapters:** Chapter 4/5 can now close the Case 17
+narrative with a clean, concrete bookend: traced in the human-baseline
+comparison -> root-caused -> a first fix attempt reverted as net-
+negative -> more data alone tested and found insufficient -> a
+mechanistic diagnosis -> a targeted keyword fix -> the exact originally-
+flagged project now predicts correctly. That is a complete, defensible
+story for a single named case, independent of whatever Chapter 4/5
+decides to state about "high" severity's remaining 46% recall more
+generally (still a real, separate, honestly-quantified limitation -
+see the entries above).
+
+**Freeze/handoff:** Case 17, as originally posed (the one named project
+from the human-baseline comparison), is closed. The broader "high"
+severity recall limitation it led to is a separate, still-open item -
+not reopened or reframed by this entry.
