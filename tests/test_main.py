@@ -94,6 +94,159 @@ def test_main_returns_nonzero_when_config_file_fails_to_parse() -> None:
     assert exit_code == 1
 
 
+def test_main_returns_nonzero_when_path_does_not_exist(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    missing = tmp_path / "does-not-exist"
+
+    exit_code = main.main([str(missing)])
+
+    assert exit_code == 1
+    assert "is not a file or directory" in capsys.readouterr().err
+
+
+def test_main_skips_a_config_file_that_failed_to_parse_during_rule_running(
+    tmp_path: Path,
+) -> None:
+    """A malformed config file alongside a valid Java file must not
+    crash ``_run_rules`` - it's skipped, not dropped silently: the
+    overall scan still fails closed (exit 1) because the config file
+    itself didn't parse, same as scanning it alone."""
+    (tmp_path / "Clean.java").write_text("public class Clean {}\n")
+    (tmp_path / "application.yml").write_text("a: [1, 2\nb: {\n")
+
+    exit_code = main.main([str(tmp_path)])
+
+    assert exit_code == 1
+
+
+def test_main_skips_a_pom_file_that_failed_to_parse_during_rule_running(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "Clean.java").write_text("public class Clean {}\n")
+    (tmp_path / "pom.xml").write_text("<project><not-closed>\n")
+
+    exit_code = main.main([str(tmp_path)])
+
+    assert exit_code == 1
+
+
+def test_main_skips_a_gradle_file_that_failed_to_parse_during_rule_running(
+    tmp_path: Path,
+) -> None:
+    """An empty build.gradle (EMPTY_FILE, not OK) alongside a valid Java
+    file must not crash ``_run_rules`` either."""
+    (tmp_path / "Clean.java").write_text("public class Clean {}\n")
+    (tmp_path / "build.gradle").write_text("")
+
+    exit_code = main.main([str(tmp_path)])
+
+    assert exit_code == 1
+
+
+def test_main_scans_a_single_pom_xml_file_directly(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A pom.xml named directly on the command line, not discovered by
+    walking a directory - the single-file dispatch path requires the
+    exact literal filename "pom.xml", so vulnerable-pom.xml itself
+    can't be reused by path alone. Copying its content also exercises
+    the "unresolved dependency" disclosure in the same run (it has one
+    unresolvable property reference)."""
+    pom_file = tmp_path / "pom.xml"
+    pom_file.write_text(
+        (FIXTURES_DIR / "vulnerable-pom.xml").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+
+    exit_code = main.main([str(pom_file)])
+
+    assert exit_code == 1
+    output = capsys.readouterr().out
+    assert "CWE-1035" in output
+    assert "could not be checked against CWE-1035" in output
+
+
+def test_main_scans_a_single_build_gradle_file_directly(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    gradle_file = tmp_path / "build.gradle"
+    gradle_file.write_text(
+        "dependencies {\n"
+        '    implementation "com.fasterxml.jackson.core:jackson-databind:2.9.8"\n'
+        "}\n"
+    )
+
+    exit_code = main.main([str(gradle_file)])
+
+    assert exit_code == 1
+    # Not asserting on the dependency coordinate text itself: Rich wraps
+    # a long identifier cell across lines under capsys's narrow default
+    # test-capture width, which would otherwise split this exact
+    # substring - CWE-1035 alone is enough to confirm the single-file
+    # Gradle dispatch path produced a real finding.
+    assert "CWE-1035" in capsys.readouterr().out
+
+
+def test_main_discloses_unresolved_gradle_dependency_versions(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A variable-interpolated version (gradle_parser.py never resolves
+    one) must surface the same "could not be checked" disclosure
+    _print_pom_report already has, scoped to the Gradle report."""
+    gradle_file = tmp_path / "build.gradle"
+    gradle_file.write_text(
+        "dependencies {\n"
+        '    implementation "com.fasterxml.jackson.core:jackson-databind:2.9.8"\n'
+        '    api "org.apache.logging.log4j:log4j-core:$log4jVersion"\n'
+        "}\n"
+    )
+
+    exit_code = main.main([str(gradle_file)])
+
+    assert exit_code == 1
+    output = capsys.readouterr().out
+    assert "could not be checked against CWE-1035" in output
+
+
+def test_main_returns_nonzero_when_a_rejected_path_sits_alongside_a_valid_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A rejected (symlink-escape) path must be reported, not just
+    cause an early "nothing found" exit - that check only looks at
+    java/config/pom/gradle files, so a rejected path needs a valid file
+    alongside it to prove the rejected-paths report itself still
+    renders."""
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    (outside_dir / "Secret.java").write_text("public class Secret {}\n")
+
+    scan_root = tmp_path / "root"
+    scan_root.mkdir()
+    (scan_root / "Clean.java").write_text("public class Clean {}\n")
+    (scan_root / "SneakyFile.java").symlink_to(outside_dir / "Secret.java")
+
+    exit_code = main.main([str(scan_root)])
+
+    assert exit_code == 1
+    output = capsys.readouterr().out
+    assert "Rejected Paths" in output
+
+
+def test_main_returns_nonzero_when_scoring_raises_value_error(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Layer 2/3 validation failing must fail closed with a clear
+    message, not propagate an unhandled exception - mirrors the
+    existing ML/reporting-failure test's mocking technique for a
+    failure mode that can't be reached through any real, well-formed
+    Layer 1 finding."""
+    with patch("main.extract_features", side_effect=ValueError("boom")):
+        exit_code = main.main([str(FIXTURES_DIR / "HardcodedSecretService.java")])
+
+    assert exit_code == 1
+    assert "Scoring failed: boom" in capsys.readouterr().err
+
+
 def test_main_returns_nonzero_when_a_path_is_rejected_on_containment_grounds(
     tmp_path: Path,
 ) -> None:

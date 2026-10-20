@@ -10411,3 +10411,115 @@ reference backend, WebGoat) - stale since at least the fifth addition
 fixing Section 7's prose was out of this entry's own scope, but flagged
 here explicitly per Section 9's "flag staleness to the student" rule
 rather than silently left for the next session to rediscover.
+
+## [2026-10-20] - Closed main.py's and human_baseline.py's test-coverage gaps: 78%/70% -> 99%/99%
+
+**What the plan said:** The last item on the "closed vs. pending"
+inventory from earlier this session - `main.py` and
+`evaluation/human_baseline.py` test coverage (78%/70%) - explicitly
+flagged as lower priority than detection logic per Section 4's own
+stated rule ("coverage on glue code matters less than coverage on the
+parts making security judgments"), but still on the list.
+
+**What we actually did / found:** Read every missing line in both
+files' coverage reports before writing anything, rather than chasing
+the percentage blindly - triaging each gap into one of three
+categories, matching Section 4's own priority:
+
+1. **Pure Rich-table rendering** (`main.py`'s `_print_pom_report`/
+   `_print_rejected_report`'s bodies, `human_baseline.py`'s
+   `render_console_report`) - genuinely "glue code" with no decision
+   logic, exactly the category Section 4 deprioritizes. Left these
+   mostly as-is; one `main()` smoke test per file now exercises each
+   function at least once as a side effect of testing a real CLI path,
+   without chasing full branch coverage inside them.
+2. **A measurement artifact, not a real gap**: both files' `__main__`
+   supervisor-dispatch blocks (`main.py` 522-526, `human_baseline.py`
+   552-556) show as uncovered because each is already tested via a
+   genuine subprocess invocation (`test_real_script_invocation_is_
+   supervised_and_transparent_on_success` and its `main.py` mirror) -
+   `pytest-cov` doesn't attribute a child process's execution back to
+   the parent's coverage report by default. Confirmed this is the
+   actual explanation, not assumed: these are the *only* lines left
+   uncovered in either file after everything below, and both already
+   have a real, passing subprocess-level test exercising them.
+3. **Real decision/fail-closed paths with no test at all** - the
+   actual target. In `main.py`: a nonexistent scan path; `_run_rules`'s
+   three skip-on-parse-failure branches (config/pom/gradle); the
+   single-file CLI dispatch for a literal `pom.xml`/`build.gradle`
+   named directly on the command line (distinct from discovering one
+   while walking a directory); a rejected (symlink-escape) path
+   reported *alongside* a valid file (the existing rejected-path test
+   never reached `_print_rejected_report` at all - a rejected path with
+   nothing else found exits via the earlier "nothing found" check
+   instead, which doesn't inspect `rejected_paths`); the Gradle
+   "unresolved dependency version" disclosure (`_print_pom_report`
+   already had this covered, `_print_gradle_report` didn't); and the
+   Layer 2/3 scoring-failure branch (mocked via `patch("main.
+   extract_features", ...)`, mirroring the existing SHAP-failure test's
+   own technique, since no real, well-formed Layer 1 finding can
+   actually trigger this invariant check). `human_baseline.py` mirrors
+   several of the same gaps in its own independently-duplicated
+   `_run_all_rules` (by design - see its own docstring), plus two
+   genuinely new ones specific to this file: `load_survey_responses`'s
+   empty-file and wrong-column-count rejections, a blank trailing CSV
+   row being skipped, `build_json_report`'s JSON shape, and `main()`'s
+   own `--json-out` write path, default console-render path, and
+   survey-file-missing failure path - none of which had any test
+   exercising `main()` itself before, only the underlying functions.
+
+**Tests/adversarial checks run:** 20 new tests (9 in `test_main.py`, 11
+in `test_human_baseline.py`). Two real bugs caught and fixed in the new
+tests themselves before they were correct, not in the production code:
+the single-file pom.xml test initially reused `vulnerable-pom.xml` by
+path, which silently fails `_scan_single_file`'s literal `"pom.xml"`
+filename check and was caught as a `"No ... files found"` empty-output
+assertion failure, not a crash - fixed by copying that fixture's content
+into a correctly-named file; the single-file gradle test asserted on
+the full `"jackson-databind"` dependency-coordinate substring, which
+Rich wraps across lines under `capsys`'s narrow default test-capture
+width (the same wrapping gotcha already documented earlier this session
+for a different false alarm) - fixed by asserting only on `"CWE-1035"`,
+sufficient to prove the finding rendered. Full suite: 529 passed (509 +
+20 new). All four gates clean: `black --check`, `ruff check`, `mypy`
+(one real catch: `build_json_report`'s return type is `dict[str,
+object]`, so indexing into a nested value needs `typing.cast`, mirroring
+`test_evaluation.py`'s own existing pattern for the same contract
+shape), `git diff --check`. Coverage re-measured directly, not
+estimated: `main.py` 78% -> 99% (46 -> 3 missing lines), `evaluation/
+human_baseline.py` 70% -> 99% (61 -> 3 missing lines) - the 3 remaining
+in each are exactly the subprocess-dispatch lines from category 2
+above.
+
+**What limitations remain:** The pure-rendering functions in category 1
+are not branch-complete and were deliberately left that way, consistent
+with Section 4's own stated priority - a cosmetic regression inside one
+of their Rich table columns (e.g. a wrong header label) would not
+necessarily be caught by the one smoke-test-per-function level of
+coverage added here. The subprocess-dispatch lines in category 2 will
+likely always show as "missing" under this coverage setup; achieving a
+literal 100% would need `COVERAGE_PROCESS_START`-style subprocess
+instrumentation, a disproportionate setup for 3 lines already covered
+by a real, passing test.
+
+**Effect on thesis chapters:** Closes the lowest-priority item from the
+session's own closed/pending inventory, with an honest demonstration of
+why it was deprioritized in the first place: every gap worth finding
+here was glue code or a measurement artifact, not a missed detection-
+logic branch - Chapter 3/5 can cite this as a concrete instance of
+Section 4's "coverage on glue code matters less" policy being applied
+deliberately, not as an excuse to skip testing altogether (the real
+fail-closed paths found were still closed, and found two genuine test-
+construction mistakes of this entry's own along the way, consistent
+with this project's "verify directly, don't assume" standard applied to
+its own new tests, not just production code).
+
+**Freeze/handoff:** Routine test-coverage improvement with no
+detection/scoring/ML-logic behavior change - not marked DRAFT, matching
+the precedent set by the 2026-10-20 "two real coverage gaps closed"
+entry earlier this session for the same reason. All four pending items
+from this session's closed/pending inventory are now closed. Per
+Section 11, the next session should pick up from Section 7's
+"Next actual piece of work" line, correcting its own stale "four
+`.qa-repos` repositories" count while there (flagged, not fixed, by the
+immediately preceding entry).
