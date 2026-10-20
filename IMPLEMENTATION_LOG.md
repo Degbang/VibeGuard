@@ -9971,3 +9971,103 @@ Both are transitive dependencies of `safety` itself (confirmed by `requirements.
 **Effect on thesis chapters:** Chapter 5's dependency-hygiene discussion should state the current count (1 open, transitive, no-fix-available finding, not 0) and should frame the audit itself as a recurring, living process - three real occurrences of the same "safety's own tree goes stale" pattern over the life of this project is itself a small, honest data point about dependency-hygiene practice worth a sentence, not just a one-line "0 vulnerabilities" claim that will go stale again by submission time regardless.
 
 **Freeze/handoff:** This is routine maintenance, not a design change - no QA round needed, Section 8's freeze discipline doesn't apply here. Re-run `safety check` again close to actual submission, since this has now changed direction three separate times across the life of the project.
+
+## [2026-10-20] - Coverage audit found and closed two real test gaps: cwe_798.py's Tree-sitter path and contract.py's trust-validation checks
+
+**What the plan said:** Asked directly whether there were concrete code
+improvements available, not just thesis-writing ones. Scope: run real
+coverage measurement, read what's actually missing (not infer from the
+percentage alone), and fix anything that's a genuine gap rather than
+noise.
+
+**What we actually did / found:**
+
+1. **`cwe_798.py`: 82% coverage, the lowest of any detection-rule
+   module** - worth investigating specifically because CLAUDE.md's own
+   stated priority is "coverage on detection logic... matters more than
+   coverage on glue code." Read the missing lines directly rather than
+   trusting the number: `_check_tree_sitter_method_invocation`'s
+   `System.setProperty`/`Map.put`/generic-credential-call branches,
+   `_check_tree_sitter_object_creation`'s entire body, and
+   `_check_tree_sitter_annotation`'s entire body (the Spring `@Value`
+   default-value check) had **zero** tests reaching them - confirmed by
+   checking `tests/test_cwe_798.py` directly: the javalang-path
+   equivalents of all three are well-tested
+   (`test_detect_in_java_finds_secret_passed_to_map_put`/
+   `..._to_system_set_property`/`..._to_credential_constructor`/
+   `..._finds_spring_value_default_secret`), but none of the existing
+   Tree-sitter-tagged tests happened to exercise these same shapes.
+   Also found `tests/test_java_rule_fallback_coverage.py` - the test
+   CLAUDE.md's own locked-decisions section names as "enforcing"
+   fallback coverage - only checks `hasattr(module,
+   "_detect_in_tree_sitter_java")`, i.e. that the function exists, not
+   that any branch of it ever runs. CLAUDE.md's claim overstated what
+   this test actually delivers; corrected it in both CLAUDE.md and
+   AGENTS.md and in the test's own docstring, rather than leaving the
+   gap between stated and actual behaviour undocumented.
+
+2. **`vibeguard/layer4_ml/contract.py`: 82% coverage** - the trust
+   boundary that stops `load_trusted_model_contract` from silently
+   accepting a tampered or mismatched model contract. Only its
+   dataset-hash-mismatch check had a test
+   (`test_load_trusted_model_contract_rejects_dataset_hash_mismatch`).
+   The other four integrity checks it performs - training-example-count
+   mismatch, feature-schema mismatch, label-set mismatch, and
+   `_read_contract`'s own `schema_version`/`model_kind`/malformed-JSON/
+   missing-required-field error paths - had none at all. An inverted
+   condition or wrong field name in any of these would have gone
+   unnoticed by the test suite.
+
+**Fixed**: 5 new Tree-sitter-fallback tests added to
+`tests/test_cwe_798.py` (`System.setProperty`, `Map.put`, a credential-
+named constructor call, a Spring `@Value` default, and - found while
+already in this area - `_tree_sitter_char_array_literal_value`/
+`_tree_sitter_character_literal_value`, which also had zero coverage),
+each the direct Tree-sitter mirror of an existing, already-passing
+javalang-path test, using the same `record`-with-a-compact-constructor
+fallback trigger already established elsewhere in that file. 7 new
+tests added to `tests/test_layer4_ml.py` covering each of
+`load_trusted_model_contract`'s and `_read_contract`'s previously-
+untested failure branches, built by writing a real contract via
+`write_trusted_model_contract` and then tampering with one specific
+field in the written JSON per test - the same "build it for real, then
+mutate one thing" pattern the existing hash-mismatch test already used.
+
+**Tests/adversarial checks run:** Ran all 12 new tests in isolation
+first to confirm each one actually exercises the line it claims to -
+all passed on the first attempt, confirming the reasoning about each
+branch's trigger condition was correct, not just lucky. Re-ran coverage
+before and after: `cwe_798.py` 82% -> 89% (76 -> 48 missing lines),
+`contract.py` 82% -> 89% (18 -> 11 missing lines) - the remaining gaps
+in both are OS-level read-failure branches and a few other low-value
+edges, not further instances of the same pattern. Full suite: 494
+passed (482 + 12 new). All four gates clean: `black --check`, `ruff
+check`, `mypy`, `git diff --check`.
+
+**What limitations remain:** This closes the two most significant,
+highest-priority gaps found by the audit, not every gap in the
+codebase - `evaluation/human_baseline.py` (70% coverage) and `main.py`
+(78%) are both lower, but per CLAUDE.md's own stated priority ("glue
+code matters less"), neither is detection/scoring/ML logic, so neither
+was pursued this round. `test_java_rule_fallback_coverage.py` itself
+was only corrected to state its actual scope honestly, not strengthened
+into something that would catch the next instance of this exact gap
+automatically - a genuinely stronger version of that guardrail (e.g.
+asserting a minimum branch-coverage threshold specifically for each
+rule's Tree-sitter path) would be a reasonable, larger follow-up, not
+attempted here.
+
+**Effect on thesis chapters:** A concrete, honest example for Chapter
+5's testing-methodology discussion: the project's own coverage claim
+("every rule supports both parser paths, enforced by a test") was more
+specific than what the enforcing test actually checked, found by
+direct audit rather than assumed correct, and both the gap and the
+over-stated claim were fixed in the same pass - the same "verify, don't
+assume" standard this project has applied to its own larger findings
+all session, applied here to its own test suite's claims about itself.
+
+**Freeze/handoff:** New, same-session work, not yet independently
+reviewed. Routine test-coverage improvement with no detection-logic
+behavior change - low risk, but per Section 11 a fresh session could
+still usefully re-derive the two percentage changes independently
+rather than trust this entry's numbers alone.

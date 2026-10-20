@@ -1205,3 +1205,126 @@ def test_detect_in_java_does_not_flag_spring_security_password_parameter_tree_si
     assert result.tree_sitter is not None
 
     assert detect_in_java(result) == ()
+
+
+# The five tests below close a real coverage gap found by direct
+# inspection, not assumed from the percentage alone: _check_method_invocation,
+# _check_class_creator, and _check_annotation's javalang-path behaviors
+# (System.setProperty, Map.put, a credential-named constructor call, and
+# a Spring @Value default) were each already tested on the javalang
+# path, but none of their Tree-sitter mirrors
+# (_check_tree_sitter_method_invocation/_check_tree_sitter_object_creation/
+# _check_tree_sitter_annotation) had a single test exercising them -
+# test_java_rule_fallback_coverage.py only asserts the function exists,
+# not that any of its branches ever run.
+
+
+def test_detect_in_java_finds_secret_passed_to_map_put_tree_sitter_fallback(
+    tmp_path: Path,
+) -> None:
+    java_file = tmp_path / "MapPutSecret.java"
+    java_file.write_text(
+        "import java.util.Map;\n"
+        "public record MapPutSecret(String username) {\n"
+        "    public MapPutSecret { username = username.trim(); }\n"
+        "    void configure(Map<String, String> values) {\n"
+        '        values.put("password", "hunter2");\n'
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+    assert result.tree_sitter is not None
+
+    findings = detect_in_java(result)
+    assert [(finding.identifier, finding.line) for finding in findings] == [("password", 5)]
+
+
+def test_detect_in_java_finds_secret_passed_to_system_set_property_tree_sitter_fallback(
+    tmp_path: Path,
+) -> None:
+    java_file = tmp_path / "SystemPropertySecret.java"
+    java_file.write_text(
+        "public record SystemPropertySecret(String username) {\n"
+        "    public SystemPropertySecret { username = username.trim(); }\n"
+        "    void configure() {\n"
+        '        System.setProperty("db.password", "hunter2");\n'
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+    assert result.tree_sitter is not None
+
+    findings = detect_in_java(result)
+    assert [(finding.identifier, finding.line) for finding in findings] == [("db.password", 4)]
+
+
+def test_detect_in_java_finds_spring_value_default_secret_tree_sitter_fallback(
+    tmp_path: Path,
+) -> None:
+    java_file = tmp_path / "SpringValueSecret.java"
+    java_file.write_text(
+        "public class SpringValueSecret {\n"
+        '    @org.springframework.beans.factory.annotation.Value("${db.password:hunter2}")\n'
+        "    String password;\n"
+        "    int helper(int level) {\n"
+        "        return switch (level) {\n"
+        "            case 1 -> 1;\n"
+        "            default -> 0;\n"
+        "        };\n"
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+    assert result.tree_sitter is not None
+
+    findings = detect_in_java(result)
+    assert [(finding.identifier, finding.line) for finding in findings] == [("db.password", 2)]
+
+
+def test_detect_in_java_finds_secret_passed_to_credential_constructor_tree_sitter_fallback(
+    tmp_path: Path,
+) -> None:
+    java_file = tmp_path / "ConstructorSecret.java"
+    java_file.write_text(
+        "public record ConstructorSecret(String username) {\n"
+        "    public ConstructorSecret { username = username.trim(); }\n"
+        "    void configure() {\n"
+        '        new PasswordAuthentication("admin", "hunter2".toCharArray());\n'
+        "    }\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+    assert result.tree_sitter is not None
+
+    findings = detect_in_java(result)
+    assert [(finding.identifier, finding.line) for finding in findings] == [
+        ("PasswordAuthentication", 4)
+    ]
+    assert findings[0].redacted_value == "h*****2"
+
+
+def test_detect_in_java_finds_secret_in_char_array_initializer_tree_sitter_fallback(
+    tmp_path: Path,
+) -> None:
+    """Mirrors test_detect_in_java_finds_secret_in_char_array_initializer
+    on the Tree-sitter path - _tree_sitter_char_array_literal_value and
+    _tree_sitter_character_literal_value had no test reaching them at
+    all before this one."""
+    java_file = tmp_path / "CharArraySecret.java"
+    java_file.write_text(
+        "public record CharArraySecret(String username) {\n"
+        "    public CharArraySecret { username = username.trim(); }\n"
+        "    static char[] password = {'h','u','n','t','e','r','2'};\n"
+        "}\n"
+    )
+
+    result = parse_file(java_file)
+    assert result.tree_sitter is not None
+
+    findings = detect_in_java(result)
+    assert [(finding.identifier, finding.line) for finding in findings] == [("password", 3)]
+    assert findings[0].redacted_value == "h*****2"

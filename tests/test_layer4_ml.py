@@ -421,6 +421,144 @@ def test_load_trusted_model_contract_rejects_dataset_hash_mismatch(tmp_path: Pat
         load_trusted_model_contract(contract_path)
 
 
+def _write_minimal_dataset(dataset_path: Path) -> None:
+    """Shared two-project fixture for the contract-tampering tests below -
+    the exact content doesn't matter for any of them, only that it loads
+    and trains cleanly before the contract itself gets tampered with."""
+    dataset_path.write_text(
+        json.dumps(
+            {
+                "projects": [
+                    {"project_id": "clean-service", "label": "low", "findings": []},
+                    {
+                        "project_id": "critical-service",
+                        "label": "critical",
+                        "findings": [
+                            {
+                                "cwe_id": "CWE-798",
+                                "file_path": "src/main/resources/application.properties",
+                                "line": 4,
+                                "identifier": "spring.datasource.password",
+                                "message": "Hardcoded credential-like config value",
+                                "redacted_value": "h*****2",
+                            }
+                        ],
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+# The six tests below close a real coverage gap found by direct
+# inspection of contract.py, not assumed from the percentage alone:
+# load_trusted_model_contract's dataset-hash check
+# (test_load_trusted_model_contract_rejects_dataset_hash_mismatch above)
+# was tested, but its other four integrity checks - example-count
+# mismatch, feature-schema mismatch, label-set mismatch, and
+# _read_contract's own schema_version/model_kind/malformed-JSON/
+# missing-field error paths - had no test reaching them at all. This is
+# the trust boundary that lets Layer 4 avoid loading an arbitrary
+# serialized model artifact; an untested comparison here is exactly the
+# kind of place a subtle bug (an inverted condition, a wrong field)
+# would go unnoticed.
+
+
+def test_load_trusted_model_contract_rejects_example_count_mismatch(tmp_path: Path) -> None:
+    dataset_path = tmp_path / "labels.json"
+    _write_minimal_dataset(dataset_path)
+    contract_path = tmp_path / "model_contract.json"
+    write_trusted_model_contract(contract_path, dataset_path)
+
+    contract_data = json.loads(contract_path.read_text(encoding="utf-8"))
+    contract_data["training_example_count"] = 999
+    contract_path.write_text(json.dumps(contract_data), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="example count does not match"):
+        load_trusted_model_contract(contract_path)
+
+
+def test_load_trusted_model_contract_rejects_feature_schema_mismatch(tmp_path: Path) -> None:
+    dataset_path = tmp_path / "labels.json"
+    _write_minimal_dataset(dataset_path)
+    contract_path = tmp_path / "model_contract.json"
+    write_trusted_model_contract(contract_path, dataset_path)
+
+    contract_data = json.loads(contract_path.read_text(encoding="utf-8"))
+    contract_data["feature_names"] = ["not", "the", "real", "schema"]
+    contract_path.write_text(json.dumps(contract_data), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="feature schema does not match"):
+        load_trusted_model_contract(contract_path)
+
+
+def test_load_trusted_model_contract_rejects_label_set_mismatch(tmp_path: Path) -> None:
+    dataset_path = tmp_path / "labels.json"
+    _write_minimal_dataset(dataset_path)
+    contract_path = tmp_path / "model_contract.json"
+    write_trusted_model_contract(contract_path, dataset_path)
+
+    contract_data = json.loads(contract_path.read_text(encoding="utf-8"))
+    contract_data["label_names"] = ["low", "medium", "high", "critical", "extra"]
+    contract_path.write_text(json.dumps(contract_data), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="label set does not match"):
+        load_trusted_model_contract(contract_path)
+
+
+def test_load_trusted_model_contract_rejects_unsupported_schema_version(
+    tmp_path: Path,
+) -> None:
+    dataset_path = tmp_path / "labels.json"
+    _write_minimal_dataset(dataset_path)
+    contract_path = tmp_path / "model_contract.json"
+    write_trusted_model_contract(contract_path, dataset_path)
+
+    contract_data = json.loads(contract_path.read_text(encoding="utf-8"))
+    contract_data["schema_version"] = 999
+    contract_path.write_text(json.dumps(contract_data), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="unsupported trusted model contract schema_version"):
+        load_trusted_model_contract(contract_path)
+
+
+def test_load_trusted_model_contract_rejects_unsupported_model_kind(tmp_path: Path) -> None:
+    dataset_path = tmp_path / "labels.json"
+    _write_minimal_dataset(dataset_path)
+    contract_path = tmp_path / "model_contract.json"
+    write_trusted_model_contract(contract_path, dataset_path)
+
+    contract_data = json.loads(contract_path.read_text(encoding="utf-8"))
+    contract_data["model_kind"] = "gradient_boosted_tree"
+    contract_path.write_text(json.dumps(contract_data), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="unsupported trusted model contract model_kind"):
+        load_trusted_model_contract(contract_path)
+
+
+def test_load_trusted_model_contract_rejects_malformed_json(tmp_path: Path) -> None:
+    contract_path = tmp_path / "model_contract.json"
+    contract_path.write_text("{not valid json", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="not valid JSON"):
+        load_trusted_model_contract(contract_path)
+
+
+def test_load_trusted_model_contract_rejects_a_missing_required_field(tmp_path: Path) -> None:
+    dataset_path = tmp_path / "labels.json"
+    _write_minimal_dataset(dataset_path)
+    contract_path = tmp_path / "model_contract.json"
+    write_trusted_model_contract(contract_path, dataset_path)
+
+    contract_data = json.loads(contract_path.read_text(encoding="utf-8"))
+    del contract_data["dataset_path"]
+    contract_path.write_text(json.dumps(contract_data), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="dataset_path"):
+        load_trusted_model_contract(contract_path)
+
+
 def test_real_layer4_dataset_loads_and_leave_one_out_evaluates() -> None:
     # Dataset expanded a fifth time 2026-10-11 with 14 more Claude-
     # generated projects targeted at the four duplicate-feature-vector
