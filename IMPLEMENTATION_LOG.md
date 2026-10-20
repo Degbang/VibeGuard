@@ -10237,7 +10237,10 @@ the 23-feature schema with this change included.
 
 ## [2026-10-20] - Eighth real-world repository added: Netflix/genie - a real native-crash risk correction, and three new Layer 1 false-positive fixes
 
-**Status: DRAFT, pending student review.**
+**Status: confirmed by independent fresh-session QA (2026-10-20, see this
+entry's own addendum below) - frozen.** Originally logged as DRAFT,
+pending student review; superseded by that review's own explicit
+verdict ("freeze as-is, no revert needed"), not left open.
 
 **What the plan said:** Section 7's next-work list named continued
 real-repo evaluation as the highest-value remaining item, and an
@@ -10416,21 +10419,22 @@ each found, root-caused against the actual file content, and fixed
 with a regression test protecting the exact case the fix must not
 also suppress.
 
-**Freeze/handoff:** New, same-session work with no independent review
-yet. Per Section 11, recommend a fresh session run adversarial QA
-against this before treating it as frozen - in particular: (a) confirm
-`strip_generic_type_annotations` cannot misfire on a real file beyond
-what this entry's `.qa-repos` grep already checked (e.g. a generic
-bound like `<T extends @Valid Foo>`, not seen in any available repo);
-(b) consider whether `_KNOWN_PROTOCOL_FIELD_NAME_CONSTANTS` should ever
-grow, and under what evidence bar. Also note: Section 7's build-order
-list still describes only "four" `.qa-repos` entries by name
-(`spring-petclinic-rest`, `quarkus-super-heroes`, the RealWorld
-reference backend, WebGoat) - stale since at least the fifth addition
-(2026-10-03); there are now eight. Left uncorrected in this entry since
-fixing Section 7's prose was out of this entry's own scope, but flagged
-here explicitly per Section 9's "flag staleness to the student" rule
-rather than silently left for the next session to rediscover.
+**Freeze/handoff:** Independent fresh-session QA has since run (see the
+addendum above) and returned an explicit "freeze as-is" verdict,
+confirming the crash-fix reproduction and all three CWE-798 fixes, and
+converting point (a) above from "not seen in any available repo" to a
+confirmed-real, named limitation (plus one new one, the nested-paren
+annotation-argument case) rather than leaving it an open question.
+Point (b) remains genuinely open - no further evidence either way on
+whether `_KNOWN_PROTOCOL_FIELD_NAME_CONSTANTS` should grow. Also note:
+Section 7's build-order list still describes only "four" `.qa-repos`
+entries by name (`spring-petclinic-rest`, `quarkus-super-heroes`, the
+RealWorld reference backend, WebGoat) - stale since at least the fifth
+addition (2026-10-03); there are now eight. Left uncorrected in this
+entry since fixing Section 7's prose was out of this entry's own scope,
+but flagged here explicitly per Section 9's "flag staleness to the
+student" rule rather than silently left for the next session to
+rediscover.
 
 ## [2026-10-20] - Closed main.py's and human_baseline.py's test-coverage gaps: 78%/70% -> 99%/99%
 
