@@ -10379,6 +10379,26 @@ protocol field name colliding with a bare credential keyword would need
 its own, separately-justified addition, not an assumption that this
 list is now complete.
 
+**Addendum (independent QA, same day):** A fresh-session adversarial
+review of `strip_generic_type_annotations` confirmed the trigger-
+pattern gap this entry's own "Freeze/handoff" section already flagged
+as unverified is real, not hypothetical: `List<? extends @Valid Foo>`
+and `class X<T extends @Valid Foo>` (a JSR 308 annotation after a
+wildcard/bound rather than immediately after `<`) still fail to parse
+after this fix, confirmed directly. It also found one new, previously
+undisclosed case: an annotation argument containing its own nested
+parentheses (e.g. `@Max((1+2))`) is only partially stripped, leaving
+behind text that still fails to parse - not a regression (the file
+already failed to parse before this fix too, same fallback-then-
+possible-crash consequence either way), and the existing string/comment
+masking was independently verified to still protect a nested-paren
+*string value* correctly (e.g. `@Pattern(regexp = "^(a|b)$")` strips
+and parses cleanly). Both shapes were grepped for across all 9
+currently-available `.qa-repos` entries: zero occurrences of either.
+Logged here as two concrete, now-named instances of the same already-
+acknowledged limitation, not a new one - a ninth repository surfacing
+either shape should be treated as expected, not a surprise.
+
 **Effect on thesis chapters:** Chapter 4/5's robustness discussion
 gains a materially more honest version of the native-crash story: the
 2026-09-10 entry's "near-zero through the actual CLI" conclusion did
@@ -10523,3 +10543,126 @@ Section 11, the next session should pick up from Section 7's
 "Next actual piece of work" line, correcting its own stale "four
 `.qa-repos` repositories" count while there (flagged, not fixed, by the
 immediately preceding entry).
+
+## [2026-10-20] - Independent QA reverted has_guard_caveat_signal a second time - the DRAFT entry above is kept as historical record, not deleted
+
+**What the plan said:** The `has_guard_caveat_signal` entry immediately
+above this one was explicitly marked "DRAFT, pending student review"
+and flagged for independent QA before being treated as settled, per
+Section 11.
+
+**What we actually did / found:** Ran that independent QA, in a fresh
+session with no memory of building the feature, per Section 11's own
+required separation. It independently reproduced the headline numbers
+exactly (31/64 accuracy, macro-F1 0.5156, "high" recall 7/13) and
+confirmed the code itself is mechanically correct - but found two
+things the original entry's framing did not adequately disclose:
+
+1. **The "never worse across 6 seeds" claim is not quite accurate.**
+   At `random_state=123`, macro-F1 is ~1.7e-5 *worse* with the feature
+   than without it - noise-level, but a direct contradiction of the
+   commit message's literal wording.
+2. **Circularity risk, understated rather than acknowledged.** The
+   4-project cluster motivating this feature includes
+   `ai-session-replay-service`, one of the 14 "batch 5" projects added
+   earlier this same session specifically to contain the duplicate-
+   feature-vector collisions a feature like this one would resolve
+   (see that batch's own `label_rationale`, and the 2026-10-11 entries
+   it was built against). Validating a feature primarily against a
+   benchmark purpose-built by the same actor to contain the gap it
+   fixes is materially weaker evidence than the "a genuinely different
+   empirical result... not a re-litigation" framing in the entry above
+   claimed. The one data point in the whole affected cluster that
+   predates this session and wasn't authored with this feature in mind
+   - `ai-payment-webhooks-service` (Codex-generated, batch 3) - is
+   exactly the one the feature gets *wrong*.
+3. **No test actually exercises `_has_guard_caveat_signal` itself.**
+   Every test touched by that entry only re-asserts pinned aggregate
+   numbers (confusion matrix, accuracy, batch breakdown) - all of which
+   would pass identically whether the feature function works correctly
+   or returns an arbitrary constant that happens to retrain to the same
+   totals. This is the same category of gap this project has already
+   found and fixed once in its own test suite (see the two-coverage-
+   gaps-closed entry earlier this session) - absent here for a change
+   with more real stakes than a coverage percentage.
+
+**Why reverted rather than fixed in place:** The independent reviewer's
+own verdict was "needs revision, not an outright revert" - add the
+missing unit test, correct the two inaccurate claims, and ideally
+validate against real `.qa-repos` findings rather than self-authored
+synthetic data before freezing. On reflection, though, the deciding
+factor is the same one the original 2026-09-10 revert of this exact
+feature direction was decided on: is the evidence this generalizes
+real, or an artifact of the specific dataset it was measured against.
+Here, the strongest available evidence (6-seed stability) answers a
+different question (robustness to the model's own random
+initialization) than the one that matters (does this signal hold up
+on data the feature's own author didn't write) - and on the one
+sample that actually answers that second question, it doesn't. Fixing
+the test gap and the two inaccurate claims would make this entry more
+honestly *described*, but would not change that underlying evidence
+picture. Real `.qa-repos` validation was considered and set aside:
+none of those repos carry a project-level ground-truth severity label
+Layer 4's evaluator could score against, so building that comparison
+would mean manually assigning severity labels to real external
+projects for the specific purpose of validating this one feature - a
+larger, separately-scoped undertaking, not a quick follow-up.
+
+**What we actually did:** Restored
+`vibeguard/layer4_ml/predictor.py`, `vibeguard/layer1_static/rules/
+cwe_284.py` (the two caveat constants back to their original private
+names, `_CENTRALIZED_AUTH_CAVEAT`/`_HAND_ROLLED_GUARD_CAVEAT`),
+`data/labeled/layer4_random_forest_contract.json`, `tests/
+test_layer4_ml.py`, `tests/test_evaluation.py`, `tests/
+test_thesis_orchestrator.py`, `vibeguard/layer5_report/
+_feature_descriptions.py`, and `CLAUDE.md`/`AGENTS.md`'s Section 7 text
+to their exact content immediately before the reverted commit (verified
+byte-for-byte identical via direct diff against that commit's parent,
+not reconstructed by hand). **Deliberately did not touch or delete the
+DRAFT entry above this one** - per Section 9's "do not delete or
+rewrite past entries - this is a running history, not a status board"
+rule, it stays as an accurate record of what was tried, measured, and
+why it was initially accepted, with this entry appended alongside it
+as the record of what independent review found and why it was then
+reverted. Layer 4 is back to exactly the 22-feature schema, 30/64
+leave-one-out accuracy, that was frozen before that entry.
+
+**Tests/adversarial checks run:** Full `pytest -q`: 529 passed,
+unchanged from immediately before the reverted commit plus everything
+added since (confirming the restored pinned values are exactly
+consistent with the current 64-project/22-feature state, not
+coincidentally matching). All four gates clean: `black --check`, `ruff
+check`, `mypy`, `git diff --check`. Confirmed no dangling reference to
+`has_guard_caveat_signal` or the public constant names remains anywhere
+in the codebase (`grep -rl` across all `.py` files).
+
+**What limitations remain:** This is the second time this exact
+feature direction (a Layer 4 feature reading CWE-284's caveat
+annotations from finding messages) has been built, measured, and
+reverted - once on a 50-project dataset (2026-09-10), once on a
+64-project dataset (this session). Both times the signal itself was
+real but too sparse/circular to generalize past the specific cluster
+it was traced from. A third attempt on a future, still-larger dataset
+is not pre-emptively ruled out, but should not be attempted again
+without either (a) data from a source other than this project's own
+AI-generation process, or (b) a validation set the feature's own
+author did not help construct - neither of which existed at either
+attempt.
+
+**Effect on thesis chapters:** Chapter 4/5 gain a concrete, two-
+instance example of this project's methodology actually working as
+intended under its own stated discipline: a change was proposed,
+measured, accepted provisionally (marked DRAFT, not silently frozen),
+subjected to independent review in a separate session as Section 11
+requires, and reverted when that review found the supporting evidence
+weaker than first presented - rather than kept because reverting is
+inconvenient. This is a more defensible thesis narrative than either
+"we tried this and it worked" or hiding the attempt - Chapter 5 should
+cite both this entry and the one above it together, not just the final
+22-feature state, as evidence of the methodology's own self-correction
+working.
+
+**Freeze/handoff:** Layer 4 is re-frozen at the 22-feature schema,
+exactly as it was before the reverted commit. Not marked DRAFT - this
+is a verified revert back to a previously-frozen, previously-reviewed
+state, not a new, unreviewed change.

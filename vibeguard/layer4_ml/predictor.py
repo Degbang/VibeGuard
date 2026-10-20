@@ -13,40 +13,10 @@ from enum import Enum
 from statistics import mean
 from typing import Any
 
-from vibeguard.layer1_static.rules.cwe_284 import (
-    CENTRALIZED_AUTH_CAVEAT,
-    HAND_ROLLED_GUARD_CAVEAT,
-)
 from vibeguard.layer3_scoring import RiskSeverity, ScoredFinding
 
 _CWE_IDS = ("CWE-20", "CWE-284", "CWE-287", "CWE-798", "CWE-1035")
 _SOURCE_TYPES = ("java", "config", "pom")
-
-# Whether any finding's message carries one of CWE-284's two caveat
-# annotations - a project-wide centralized Spring Security rule, or a
-# per-method hand-rolled header-comparison guard - that a human labeller
-# can see but the rest of this feature vector cannot, since both caveats
-# live only in Finding.message prose. A second, independent attempt at
-# this exact signal: an earlier one (`has_unverified_guard_signal`,
-# 2026-09-10) was built, measured, and reverted because it was a robust
-# net *loss* on the dataset as it stood then (accuracy 0.580->0.420,
-# macro-F1 0.498->0.413, "high" recall stuck at 0/10) - see
-# IMPLEMENTATION_LOG.md. Re-tested here on the current, larger, keyword-
-# widened 64-project dataset because the specific cluster motivating this
-# retry (`unprotected-reports-service`/`ai-session-replay-service` vs.
-# `ai-account-linking-service`/`ai-bulk-user-import-service`, tied 2-vs-2
-# on every other feature) did not exist in that form at the time of the
-# original attempt. This time it is a small, real, reproducible net gain
-# (accuracy 30/64->31/64, macro-F1 0.4995->0.5156, "high" recall 6/13-
-# >7/13, confirmed never worse across 6 tested random seeds) - but it is
-# still not a clean signal: `ai-payment-webhooks-service` ("high")
-# regresses because its one caveated finding reflects a genuinely well-
-# implemented HMAC-signature guard on a *different* endpoint than the one
-# actually driving its "high" label, which this project-level boolean
-# cannot distinguish from "the guard covers the risk." Kept because the
-# net effect across the full dataset is positive and stable, not because
-# this per-project ambiguity has been resolved.
-_CAVEAT_TEXTS = (CENTRALIZED_AUTH_CAVEAT, HAND_ROLLED_GUARD_CAVEAT)
 
 # Coarse, name-based signal that a finding sits in a business-sensitive
 # domain (payments, account/identity, admin) rather than general-purpose
@@ -209,7 +179,6 @@ def build_project_features(findings: Iterable[ScoredFinding]) -> ProjectFeatures
         _has_same_file_pair(items, "CWE-284", "CWE-20"),
         _has_same_file_pair(items, "CWE-798", "CWE-284"),
         _has_sensitive_domain_signal(items),
-        _has_guard_caveat_signal(items),
     )
     return ProjectFeatures(names=names, values=values)
 
@@ -233,7 +202,6 @@ def _feature_names() -> tuple[str, ...]:
         "same_file_access_control_and_input_validation",
         "same_file_secret_and_access_control",
         "has_sensitive_domain_signal",
-        "has_guard_caveat_signal",
     )
 
 
@@ -284,21 +252,5 @@ def _has_sensitive_domain_signal(findings: tuple[ScoredFinding, ...]) -> float:
     for item in findings:
         haystack = f"{item.feature.file_path.name} {item.feature.identifier}".lower()
         if any(keyword in haystack for keyword in _SENSITIVE_DOMAIN_KEYWORDS):
-            return 1.0
-    return 0.0
-
-
-def _has_guard_caveat_signal(findings: tuple[ScoredFinding, ...]) -> float:
-    """Whether any finding's message carries a CWE-284 caveat annotation.
-
-    Matches on the literal caveat constants (not a guessed substring),
-    the same two annotations `cwe_284.py` already appends to a finding's
-    message when it detects a project-wide centralized Spring Security
-    rule or a per-method hand-rolled header-comparison guard that its own
-    rule logic cannot verify. See the module-level comment on
-    `_CAVEAT_TEXTS` for why this signal is real but not clean.
-    """
-    for item in findings:
-        if any(caveat in item.feature.message for caveat in _CAVEAT_TEXTS):
             return 1.0
     return 0.0

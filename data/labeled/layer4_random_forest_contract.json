@@ -24,8 +24,7 @@
     "has_secret_and_vulnerable_dependency",
     "same_file_access_control_and_input_validation",
     "same_file_secret_and_access_control",
-    "has_sensitive_domain_signal",
-    "has_guard_caveat_signal"
+    "has_sensitive_domain_signal"
   ],
   "label_names": [
     "critical",
