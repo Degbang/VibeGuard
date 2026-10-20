@@ -8949,7 +8949,11 @@ own call on sequencing.
 
 ## [2026-10-10] - Gradle support for CWE-1035: a new, deliberately narrow text heuristic, not a Gradle parser
 
-**Status: DRAFT, pending student review.**
+**Status: confirmed and frozen** - see the independent QA pass in the
+next entry below, which re-derives every claim in both entries with
+real command executions and ends with an explicit freeze declaration
+covering this entry too. Originally logged as DRAFT, pending student
+review; superseded by that confirmation.
 
 **Scope defined before editing (Section 8 step 1):** Layer 1 static
 analysis, specifically recognizing `build.gradle`/`build.gradle.kts`
@@ -9117,7 +9121,12 @@ methodology question remain open, student's own call on sequencing.
 
 ## [2026-10-10] - Independent QA found Gradle support's true-positive path completely broken, plus a real comment-handling gap - both fixed and re-verified
 
-**Status: DRAFT, pending student review.**
+**Status: confirmed and frozen** - this entry's own closing section
+("2026-10-10 independent QA pass: clean. Freeze...") already is that
+confirmation, re-deriving every claim with real command executions
+across 478 tests and ending with an explicit freeze declaration for
+Gradle support as a whole. Originally logged as DRAFT, pending student
+review; superseded by that same entry's own later section.
 
 An independent QA pass on the Gradle support commit (`71d974c`, logged
 above) found that despite 22 passing unit tests, a real-repo
@@ -9378,7 +9387,12 @@ sequencing.
 
 ## [2026-10-10] - CWE-798 false positive on Spring Security's own form-field-name configurer methods, found scanning OWASP WebGoat
 
-**Status: DRAFT, pending student review.**
+**Status: confirmed and frozen** - this entry's own closing section
+("2026-10-10 independent QA pass: clean. Freeze...") already is that
+confirmation, re-deriving the blast-radius claim and the known-miss
+limitation independently and ending with an explicit freeze
+declaration. Originally logged as DRAFT, pending student review;
+superseded by that same entry's own later section.
 
 **Scope:** Layer 1, `cwe_798.py`'s call-site detection
 (`_check_method_invocation`/`_check_tree_sitter_method_invocation`),
@@ -9554,7 +9568,17 @@ methodology question, both the student's own call on sequencing.
 
 ## [2026-10-11] - Layer 4 reopened per the student's own choice among the three Case 17 directions: dataset expanded 50 -> 64, targeted at the known duplicate-vector clusters - "high" recall stays at 0, an honest null result
 
-**Status: DRAFT, pending student review.**
+**Status: numbers independently re-derived and confirmed (2026-10-20);
+the 14 new project labels themselves still need the student's own
+review.** This entry's freeze/handoff asked for two separate things:
+(1) a fresh-session re-derivation of the headline numbers, and (2) the
+student's personal review of the 14 new label/rationale pairs, since
+that review - not an agent's own judgment - is this round's stated
+safeguard. Only (1) can be done by another agent session; (2) cannot
+be substituted for, and has not been. See the independent re-
+derivation in the entry below (which also covers this one's numbers)
+for what's now confirmed, and the student's review of the 14 labels
+remains outstanding.
 
 **Scope defined before editing (Section 8 step 1):** Layer 4 (frozen,
 reopened here specifically because the student made the deliberate,
@@ -9772,7 +9796,33 @@ did when tried.
 
 ## [2026-10-11] - Diagnosed why option (a) came back negative, and a narrow, well-justified extension of the existing has_sensitive_domain_signal keyword list fixes it: "high" recall goes from 0/13 to 6/13
 
-**Status: DRAFT, pending student review.**
+**Status: numbers independently re-derived and confirmed (2026-10-20);
+the 14 new project labels from the entry above still need the
+student's own review.** A fresh-session re-derivation (not reusing
+this entry's own account) reconstructed all four disentangled states
+directly - a temporary git worktree at the pre-expansion commit
+(`345d79b`) supplied the original 50-project dataset and keyword list;
+the current repository supplied the 64-project dataset and the
+widened keyword list; `_SENSITIVE_DOMAIN_KEYWORDS` was swapped at
+runtime per scenario and the real `leave_one_out_evaluate_project_
+risk_model`/`evaluate_baseline_severity_model` were called directly,
+not estimated. All four numbers matched exactly:
+
+```
+50 projects, OLD keywords: acc=0.5800 f1=0.4981 baseline=0.4000 high=0/10
+50 projects, NEW keywords: acc=0.5000 f1=0.5262 baseline=0.4000 high=4/10
+64 projects, OLD keywords: acc=0.4375 f1=0.3886 baseline=0.3594 high=0/13
+64 projects, NEW keywords: acc=0.4688 f1=0.4995 baseline=0.3594 high=6/13
+```
+
+This confirms requirement (2) from this entry's own freeze/handoff in
+full - the disentanglement itself (not just the combined result) holds
+up under independent reproduction. Requirement (1) - the student's own
+review of the keyword-selection reasoning and the 14 new project
+labels together - was explicitly out of scope for this confirmation
+and remains outstanding; a numeric re-derivation is not a substitute
+for the student's own judgment on whether those labels are defensible,
+and this entry does not claim otherwise.
 
 **Scope defined before editing:** Layer 4 (still open from the entry
 immediately above - this continues the same reopened scope, not a
