@@ -10723,7 +10723,21 @@ state, not a new, unreviewed change.
 
 ## [2026-10-21] - A third attempt at "high" severity recall, structurally different from the first two: action-verb keywords, not a new feature mechanism - 6/13 -> 7/13, zero per-class regression
 
-**Status: DRAFT, pending student review.**
+**Status: confirmed by independent fresh-session QA (2026-10-21) -
+frozen.** The exact scrutiny both reverted attempts eventually failed
+was applied here too, not skipped because the mechanism looked
+different: independent re-derivation (separate git worktrees, a
+from-scratch collision scanner, `git log -S` tracing each affected
+project's actual introducing commit rather than trusting rationale
+text alone) confirmed every headline number, the 6-seed robustness
+claim, the zero-collision claim, the sample-size-wall reasoning for
+the two still-unfixed singleton cases, and - the one check that
+matters most, given why the first two attempts were reverted - found
+no trace of the circularity pattern that sank them: none of the four
+affected projects were authored during this investigation. One minor
+sourcing correction from that review is folded into point 4 below
+(`ai-file-upload-service`'s batch attribution was slightly wrong, now
+corrected - it does not change the conclusion).
 
 **What the plan said:** The student explicitly asked to research and
 find a genuinely new angle on "high" severity recall, after being told
@@ -10803,13 +10817,21 @@ high-labelled projects (`ai-file-upload-service` +
 label anywhere in the dataset**; "upload" and "campaign" are clean
 standalone cases, likewise zero matches elsewhere. None of the four
 affected projects were authored during this investigation or this
-session's earlier work - `ai-file-upload-service`/`ai-newsletter-
-service` are Codex-generated batch 4 ("held-out design" per their own
-rationale, predating any Layer 4 feature-engineering session at all)
-and `ai-webhook-replay-service` is from the 2026-10-11 batch, not
-today's. This is the structural difference from the two reverted
-attempts: that mechanism's validating cluster was purpose-built during
-the same investigation that proposed the fix; this one's is not.
+session's earlier work - independent QA traced each one's actual
+introducing commit (`git log -S`) rather than trusting rationale text
+alone: `ai-file-upload-service` predates even the "held-out design"
+framing below (`e99c369`, the 32-project batch, ~7 weeks before this
+entry - its own `label_rationale` says only "Codex-generated, post-hoc
+label," correcting this entry's original, slightly wrong attribution
+of that phrase to it); `ai-newsletter-service`/`ai-admin-report-export-
+service` are genuinely Codex-generated batch 4, "held-out design" per
+their own rationale (`56fd0e2`, ~6 weeks before); `ai-webhook-replay-
+service`/`ai-session-replay-service` are from the 2026-10-11 batch
+(`d0c09bb`, 10 days before this entry, built for an unrelated purpose -
+CWE-284-count duplicate-vector clusters, not action-verb vocabulary).
+This is the structural difference from the two reverted attempts: that
+mechanism's validating cluster was purpose-built during the same
+investigation that proposed the fix; none of these four were.
 
 **5. Measured honestly before shipping, the same discipline as every
 other Layer 4 change this session.** Added the four keywords to
@@ -10882,13 +10904,11 @@ all, independent of whether the signal is "real") is itself a citable,
 precise statement about this dataset's size limits, not just a vague
 "more data would help."
 
-**Freeze/handoff:** New, same-session work, not yet independently
-reviewed - and given both prior attempts at "high" recall failed
-independent review after initially looking clean, this one should get
-the same scrutiny, not be assumed different because the methodology
-differs. Per Section 11, recommend a fresh session specifically check:
-(a) the "zero collisions" claim, independently re-derived rather than
-trusted; (b) the 6-seed robustness and full-confusion-matrix claims in
-point 5; (c) whether mixing business-domain and action-verb signals
-under one feature name (point in "What limitations remain") is a
-problem worth splitting into two features, or acceptable as-is.
+**Freeze/handoff:** Independent fresh-session QA has since run (see the
+status line above) and confirmed every point (a)/(b) this section
+originally asked for, plus the circularity check that mattered most -
+returning an explicit "freeze as-is, no revision needed" verdict. Point
+(c) - whether mixing business-domain and action-verb signals under one
+feature name is worth splitting - remains genuinely open, not resolved
+by that review; left as a judgment call for whoever next touches this
+feature, not a blocker to freezing the current change.
