@@ -10720,3 +10720,175 @@ working.
 exactly as it was before the reverted commit. Not marked DRAFT - this
 is a verified revert back to a previously-frozen, previously-reviewed
 state, not a new, unreviewed change.
+
+## [2026-10-21] - A third attempt at "high" severity recall, structurally different from the first two: action-verb keywords, not a new feature mechanism - 6/13 -> 7/13, zero per-class regression
+
+**Status: DRAFT, pending student review.**
+
+**What the plan said:** The student explicitly asked to research and
+find a genuinely new angle on "high" severity recall, after being told
+why a third attempt at the same reverted mechanism (reading CWE-284's
+caveat text into a new feature) would be unlikely to generalize any
+better than the first two.
+
+**What we actually did / found:**
+
+**1. Investigated the actual current misses before proposing anything.**
+Recomputed every duplicate-feature-vector cluster across the full
+64-project dataset: 6 clusters span multiple labels, covering 48 of 64
+projects. Of the 7 current "high" misses, 5 sit inside clusters where
+"high"/"critical" is a genuine local minority (information-theoretically
+unsolvable by any classifier using only the current 22-dimension
+vector, confirmed exhaustively for the already-known 4-member tied
+cluster in the two reverted entries above) - but 2
+(`open-intake-service`, `duplicate-validation-gaps-service`) are
+**singleton vectors with zero collision anywhere in the dataset**, a
+qualitatively different, genuinely addressable problem. Both are
+deliberately-designed `layer4_training` boundary-test cases (predate
+this session entirely) whose own `label_rationale` explicitly names the
+signal they're testing. Checked directly why each still misses despite
+carrying the exact feature meant to catch it: `open-intake-service`'s
+`has_access_control_and_input_validation` flag has only 2 supporting
+examples in the whole dataset (both already high/critical, no
+disagreement - a pure sample-size wall, not a feature gap);
+`duplicate-validation-gaps-service`'s "same validation gap recurring"
+signal (both findings share `identifier="request"`) has exactly 1
+supporting example in the whole dataset. Concluded, and verified rather
+than assumed: a feature built from an n=1 pattern cannot be learned
+under leave-one-out at all, regardless of mechanism or provenance -
+when that one example is held out, zero training examples remain to
+learn the pattern from. **These two specific cases are not fixable by
+feature engineering on this dataset**, logged as a limitation, not
+pursued further.
+
+**2. Tried a hyperparameter sweep first (zero feature/dataset changes,
+zero circularity risk) - found a real but genuinely mixed result, not
+shipped.** `min_samples_leaf=3` on the unmodified 22... wait,
+23-feature model (see correction below) beat the baseline on accuracy
+and macro-F1 in all 6 tested random seeds, and tied or beat it on
+"high" recall in all 6 - but tracing individual predictions found 2
+new regressions in the dangerous direction (`unvalidated-customers-
+service`/`unvalidated-orders-service`, correctly-medium flipping to
+incorrectly-low) and made both singleton cases from point 1 *worse*,
+not better. A real, aggregate-level, circularity-free improvement, but
+not a clean one - reported to the student, not shipped, pending the
+request for a cleaner angle.
+
+**3. Found the actual fix by examining the two largest remaining
+clusters directly, not by hypothesizing in the abstract.** Read every
+`label_rationale` in the 10-member cluster containing `ai-file-upload-
+service`/`ai-newsletter-service` (2 "high" vs. 8 "low"/"medium") and the
+12-member cluster containing `ai-webhook-replay-service` (1 "high" vs.
+11 others). Found a consistent pattern distinguishing the lower-severity
+members: several have a real hand-rolled authorization guard (the
+already-tried, already-reverted signal) or are legitimately,
+deliberately public by design (already correctly captured by
+`has_sensitive_domain_signal` being absent). The "high" members share
+neither - instead, each is an unauthenticated **state-changing or
+bulk-impact action**: arbitrary file upload/download/enumeration, a
+mass email campaign to every subscriber, replaying a webhook to
+re-trigger a real business-logic side effect. This is a different axis
+from every existing `_SENSITIVE_DOMAIN_KEYWORDS` entry, which all name
+*what the data is* (payments, accounts, admin), not *what an
+unauthenticated caller can make happen*.
+
+**4. Checked for collisions and support across the full dataset before
+touching any code - the same bar the 2026-10-11 keyword additions were
+held to.** Extracted every CWE-284 finding's identifier (method name)
+grouped by project label across all 64 projects. Candidates:
+"download" and "replay" each match exactly 2 independent, pre-existing
+high-labelled projects (`ai-file-upload-service` +
+`ai-admin-report-export-service`; `ai-session-replay-service` +
+`ai-webhook-replay-service`) with **zero matches against any other
+label anywhere in the dataset**; "upload" and "campaign" are clean
+standalone cases, likewise zero matches elsewhere. None of the four
+affected projects were authored during this investigation or this
+session's earlier work - `ai-file-upload-service`/`ai-newsletter-
+service` are Codex-generated batch 4 ("held-out design" per their own
+rationale, predating any Layer 4 feature-engineering session at all)
+and `ai-webhook-replay-service` is from the 2026-10-11 batch, not
+today's. This is the structural difference from the two reverted
+attempts: that mechanism's validating cluster was purpose-built during
+the same investigation that proposed the fix; this one's is not.
+
+**5. Measured honestly before shipping, the same discipline as every
+other Layer 4 change this session.** Added the four keywords to
+`_SENSITIVE_DOMAIN_KEYWORDS` in a disposable scratch harness first.
+Leave-one-out accuracy/macro-F1/"high" recall are strictly better or
+equal across all 6 tested random seeds (0, 1, 7, 42, 99, 123) - unlike
+the hyperparameter sweep in point 2, **no seed and no tested metric is
+ever worse**. Traced every individual prediction change at
+`random_state=42` via the full confusion matrix, not just the
+aggregate numbers: one project exactly fixed (`ai-webhook-replay-
+service`, low -> high); five others move strictly closer to their true
+label as a side effect of retraining (e.g. `ai-billing-service`,
+critical, moves from predicted-medium to predicted-high - still wrong,
+but one severity level closer, not two); **zero regressions** - no
+class's recall decreases (low 9/14, medium 8/25, critical 7/12 all
+unchanged; "high" improves 6/13 -> 7/13). Regenerated the trusted model
+contract and updated every pinned test value this touches.
+
+**Correction to this session's own prior entries, found while writing
+this one:** every description in today's earlier entries (the guard-
+caveat feature and its revert) calling the frozen schema "22 features"
+is wrong - it was already 23 before any of today's work (confirmed
+directly: `git show 9f62978:vibeguard/layer4_ml/predictor.py`'s
+`_feature_names()` returns 23 names, byte-identical to the current
+file). The *revert itself* is unaffected and still correct - it was
+done via an exact byte-for-byte restore from that same commit,
+verified by `diff`, independent of what number anything was called -
+but every "22"/"23" count in this log's two preceding entries and in
+`CLAUDE.md`'s now-superseded Section 7 wording should be read as off
+by one throughout. Not corrected retroactively in those entries' own
+text, per Section 9's append-only rule; flagged here instead.
+
+**Tests/adversarial checks run:** 1 new test in `tests/test_layer4_ml.py`
+(`test_has_sensitive_domain_signal_matches_action_verb_keywords`,
+asserting the signal directly for all 4 new keywords, not just via
+pinned aggregate numbers - the exact test-coverage gap independent QA
+found missing from the reverted guard-caveat attempt, deliberately not
+repeated here). Updated every pinned value the keyword change made
+stale: `tests/test_layer4_ml.py` (full confusion matrix, accuracy,
+per-batch breakdown), `tests/test_evaluation.py` (in-sample/leave-one-
+out accuracy and macro-F1, console smoke string), `tests/
+test_thesis_orchestrator.py` (one pinned accuracy value). Full suite:
+530 passed (529 + 1 new). All four gates clean: `black --check`, `ruff
+check`, `mypy`, `git diff --check`.
+
+**What limitations remain:** "High" severity recall is 7/13 (54%), not
+solved - the 2 singleton-vector boundary cases (point 1) are not
+fixable by feature engineering on this dataset size at all, and the
+already-known 4-member tied cluster (the two reverted entries above)
+remains an information-theoretic wall for the same reason it always
+was. `_SENSITIVE_DOMAIN_KEYWORDS` now mixes two genuinely different
+signal types (business-domain nouns and action verbs) under one
+feature name - defensible since both feed the same underlying question
+("does this look risky by name alone"), but worth stating plainly in
+Chapter 3 rather than leaving the reader to infer it from the keyword
+list.
+
+**Effect on thesis chapters:** A materially better three-attempt
+narrative for Chapter 4/5 than two reverted attempts alone would have
+been: attempt 1 and 2 (same mechanism, two datasets, both reverted)
+establish that the caveat-text signal specifically doesn't generalize;
+attempt 3 (a structurally different mechanism, the same one that
+already worked once in 2026-10-11) succeeds, cleanly and without
+circularity, pointing at a real methodological lesson - extending an
+already-validated signal's vocabulary generalizes better than
+inventing a new signal from a smaller, more easily self-referential
+cluster. The sample-size wall found in point 1 (a feature needs more
+than one supporting example to be learnable under leave-one-out at
+all, independent of whether the signal is "real") is itself a citable,
+precise statement about this dataset's size limits, not just a vague
+"more data would help."
+
+**Freeze/handoff:** New, same-session work, not yet independently
+reviewed - and given both prior attempts at "high" recall failed
+independent review after initially looking clean, this one should get
+the same scrutiny, not be assumed different because the methodology
+differs. Per Section 11, recommend a fresh session specifically check:
+(a) the "zero collisions" claim, independently re-derived rather than
+trusted; (b) the 6-seed robustness and full-confusion-matrix claims in
+point 5; (c) whether mixing business-domain and action-verb signals
+under one feature name (point in "What limitations remain") is a
+problem worth splitting into two features, or acceptable as-is.

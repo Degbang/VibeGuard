@@ -83,6 +83,34 @@ _SENSITIVE_DOMAIN_KEYWORDS = frozenset(
         "recovery",
         "report",
         "export",
+        # Added 2026-10-21, after the 2026-10-11 additions above (all
+        # business-domain *nouns*) still left three real high-severity
+        # misses untouched: ai-file-upload-service, ai-newsletter-service,
+        # ai-webhook-replay-service. None names a sensitive business
+        # domain - "FileController"/"NewsletterController"/
+        # "WebhookReplayController" aren't payments, accounts, or admin.
+        # What they share instead is the *action*: an unauthenticated
+        # state-changing or bulk-impact operation (arbitrary file
+        # upload/download/enumeration; triggering a mass email campaign
+        # to every subscriber; replaying a webhook to re-trigger a real
+        # business-logic side effect) - a different axis from every
+        # keyword above, which all name *what the data is*, not *what the
+        # unauthenticated caller can make happen*. Checked against the
+        # full dataset before adding, same bar as before: "download" and
+        # "replay" each match 2 independent pre-existing high-labelled
+        # projects (ai-file-upload-service + ai-admin-report-export-
+        # service; ai-session-replay-service + ai-webhook-replay-service)
+        # with zero matches against any other label; "upload" and
+        # "campaign" are clean standalone cases (zero matches anywhere
+        # else in the dataset, any label). Measured, not assumed: leave-
+        # one-out accuracy/macro-F1/"high" recall are strictly better or
+        # equal across 6 random seeds, with zero per-class recall
+        # regression (confirmed via the full confusion matrix, not just
+        # the aggregate numbers) - see IMPLEMENTATION_LOG.md 2026-10-21.
+        "upload",
+        "download",
+        "replay",
+        "campaign",
     }
 )
 
